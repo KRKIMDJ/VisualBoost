@@ -1,9 +1,10 @@
 <Project Sdk="Microsoft.NET.Sdk">
   <PropertyGroup>
     <TargetFramework>net472</TargetFramework>
+    <UseWPF>true</UseWPF>
     <RootNamespace>VisualBoost</RootNamespace>
     <AssemblyName>VisualBoost</AssemblyName>
-    <Version>0.1.7</Version>
+    <Version>0.2.0</Version>
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
     <GeneratePkgDefFile>true</GeneratePkgDefFile>
     <IncludeBuildOutput>true</IncludeBuildOutput>

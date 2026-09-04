@@ -25,6 +25,13 @@
           <CanonicalName>VisualBoost.OpenOptions</CanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" priority="0x0180" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>VisualBoost 파일 탐색...</ButtonText>
+          <CanonicalName>VisualBoost.OpenFileSearch</CanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidVisualBoostCommandSet" id="ShowIndexStatusCommand" priority="0x0300" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
@@ -37,6 +44,7 @@
 
   <KeyBindings>
     <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="guidVSStd97" mod1="ALT" mod2="SHIFT" key1="O" />
   </KeyBindings>
 
   <Symbols>
@@ -46,6 +54,7 @@
       <IDSymbol name="SwitchHeaderSourceCommand" value="0x0100" />
       <IDSymbol name="OpenOptionsCommand" value="0x0101" />
       <IDSymbol name="ShowIndexStatusCommand" value="0x0102" />
+      <IDSymbol name="OpenFileSearchCommand" value="0x0103" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

@@ -14,7 +14,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.1.7")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.2.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
@@ -46,6 +46,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
         await ShowIndexStatusCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await OpenFileSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)

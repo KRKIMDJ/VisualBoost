@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using VisualBoost.Core.Indexing;
+using VisualBoost.Core.Searching;
 
 namespace VisualBoost.Services;
 
@@ -67,6 +68,12 @@ internal sealed class SolutionFileIndexService : IDisposable
                 lastError);
         }
     }
+
+    public IReadOnlyList<FileSearchMatch> Search(
+        string query,
+        int maximumResults,
+        CancellationToken cancellationToken) =>
+        index.Search(query, maximumResults, cancellationToken);
 
     public async Task WaitUntilReadyAsync()
     {
