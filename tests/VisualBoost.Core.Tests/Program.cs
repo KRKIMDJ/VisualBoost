@@ -1,10 +1,12 @@
 using System;
 using System.Collections.Generic;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using VisualBoost.Core.FilePairing;
 using VisualBoost.Core.Indexing;
 using VisualBoost.Core.Searching;
+using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Core.Tests;
 
@@ -30,6 +32,9 @@ internal static class Program
         Run("대규모 인덱스에서 퍼지 검색 결과를 결정적으로 정렬한다", LargeFuzzySearchIsDeterministic);
         Run("파일 변경 후 퍼지 검색 스냅샷을 갱신한다", FuzzySearchSnapshotTracksChanges);
         Run("퍼지 검색을 취소할 수 있다", FuzzySearchCanBeCancelled);
+        Run("C++ include와 주요 심볼 위치를 추출한다", CppSourceAnalysisFindsIncludesAndSymbols);
+        Run("주석 속 심볼은 분석에서 제외한다", CppSourceAnalysisIgnoresComments);
+        Run("심볼 인덱스는 이름별 위치를 반환한다", SourceSymbolIndexFindsLocations);
 
         Console.WriteLine(failures == 0
             ? "모든 VisualBoost.Core 테스트가 통과했습니다."
@@ -260,6 +265,65 @@ internal static class Program
 
         Throws<OperationCanceledException>(() =>
             FuzzyFileSearch.Search("widget", new[] { "widget.cpp" }, cancellationToken: cancellation.Token));
+    }
+
+    private static void CppSourceAnalysisFindsIncludesAndSymbols()
+    {
+        const string source = """
+            #include "Widget.h"
+            #include <vector>
+            #define WIDGET_ENABLED 1
+            namespace Demo {
+            class Widget final {};
+            int BuildWidget(int value);
+            static int WidgetCount = 0;
+            }
+            """;
+        var analysis = CppSourceAnalyzer.Analyze("Widget.cpp", source);
+
+        Equal(2, analysis.Includes.Count);
+        Equal("Widget.h", analysis.Includes[0].Value);
+        Equal(false, analysis.Includes[0].IsSystem);
+        Equal(true, analysis.Includes[1].IsSystem);
+        Equal(true, analysis.Symbols.Any(symbol =>
+            symbol.Name == "WIDGET_ENABLED" && symbol.Kind == SourceSymbolKind.Macro));
+        Equal(true, analysis.Symbols.Any(symbol =>
+            symbol.Name == "Demo" && symbol.Kind == SourceSymbolKind.Namespace));
+        Equal(true, analysis.Symbols.Any(symbol =>
+            symbol.Name == "Widget" && symbol.Kind == SourceSymbolKind.Type));
+        Equal(true, analysis.Symbols.Any(symbol =>
+            symbol.Name == "BuildWidget" && symbol.Kind == SourceSymbolKind.Function));
+        Equal(true, analysis.Symbols.Any(symbol =>
+            symbol.Name == "WidgetCount" && symbol.Kind == SourceSymbolKind.Variable));
+    }
+
+    private static void CppSourceAnalysisIgnoresComments()
+    {
+        const string source = """
+            // class HiddenType {};
+            /*
+            #define HIDDEN_MACRO 1
+            */
+            struct VisibleType {};
+            """;
+        var analysis = CppSourceAnalyzer.Analyze("Types.h", source);
+
+        Equal(1, analysis.Symbols.Count);
+        Equal("VisibleType", analysis.Symbols[0].Name);
+    }
+
+    private static void SourceSymbolIndexFindsLocations()
+    {
+        using var index = new SourceSymbolIndex();
+        index.ReplaceAll(new[]
+        {
+            new SourceSymbolLocation("Widget", "B.h", 20, 3, SourceSymbolKind.Type),
+            new SourceSymbolLocation("Widget", "A.cpp", 5, 1, SourceSymbolKind.Function),
+        });
+
+        Equal(2, index.Count);
+        Equal("A.cpp", index.Find("widget")[0].Path);
+        Equal(0, index.Find("missing").Count);
     }
 
     private static FilePairResolver Resolver() => new();

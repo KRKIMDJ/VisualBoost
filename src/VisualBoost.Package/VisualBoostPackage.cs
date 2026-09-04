@@ -14,7 +14,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.2.0")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.3.4")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]

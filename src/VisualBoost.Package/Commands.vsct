@@ -44,7 +44,7 @@
 
   <KeyBindings>
     <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
-    <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="guidVSStd97" mod1="ALT" mod2="SHIFT" key1="O" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="O" />
   </KeyBindings>
 
   <Symbols>

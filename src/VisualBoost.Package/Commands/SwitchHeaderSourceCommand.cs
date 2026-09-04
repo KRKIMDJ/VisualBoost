@@ -63,13 +63,24 @@ internal sealed class SwitchHeaderSourceCommand
         }
 
         var activeFile = currentFile!;
-        await fileIndex.WaitUntilReadyAsync();
+        if (fileIndex.Count == 0)
+        {
+            await fileIndex.WaitUntilReadyAsync();
+        }
+
         var stem = Path.GetFileNameWithoutExtension(activeFile);
         var candidates = fileIndex.FindByStem(stem);
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
         var options = package.GetGeneralOptions();
         var resolver = new FilePairResolver(options.CreateFilePairingOptions());
         var matches = resolver.FindMatches(activeFile, candidates);
+        if (matches.Count == 0 && fileIndex.GetSnapshot().State == SolutionFileIndexState.Building)
+        {
+            await fileIndex.WaitUntilReadyAsync();
+            candidates = fileIndex.FindByStem(stem);
+            matches = resolver.FindMatches(activeFile, candidates);
+        }
+
         if (matches.Count == 0)
         {
             var diagnostic = options.ShowIndexCountOnFailure

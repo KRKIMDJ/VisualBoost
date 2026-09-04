@@ -49,14 +49,14 @@ internal sealed class OpenFileSearchCommand
     private async Task ExecuteAsync()
     {
         var snapshot = fileIndex.GetSnapshot();
-        if (snapshot.State == SolutionFileIndexState.Building)
+        if (snapshot.State == SolutionFileIndexState.Building && snapshot.FileCount == 0)
         {
             await ShowStatusAsync("VisualBoost가 파일 인덱싱을 마칠 때까지 기다리는 중입니다...");
+            await fileIndex.WaitUntilReadyAsync();
+            snapshot = fileIndex.GetSnapshot();
         }
 
-        await fileIndex.WaitUntilReadyAsync();
-        snapshot = fileIndex.GetSnapshot();
-        if (snapshot.State == SolutionFileIndexState.Faulted)
+        if (snapshot.State == SolutionFileIndexState.Faulted && snapshot.FileCount == 0)
         {
             await ShowStatusAsync($"파일 인덱스를 사용할 수 없습니다: {snapshot.LastError}");
             return;
