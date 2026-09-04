@@ -23,14 +23,13 @@ namespace VisualBoost.UI;
 
 public partial class FileSearchDialog : DialogWindow
 {
-    private const int MaximumResults = 100;
-
     private readonly SolutionFileIndexService fileIndex;
-    private readonly GeneralOptionsPage options;
+    private readonly FileSearchOptionsPage options;
     private readonly string? preferredRoot;
     private readonly string? solutionRoot;
     private readonly HashSet<string> openFiles;
     private readonly IReadOnlyList<SolutionProjectInfo> projects;
+    private readonly IReadOnlyList<string>? candidatePaths;
     private readonly DispatcherTimer statusTimer;
     private CancellationTokenSource? searchCancellation;
     private FileSearchScope scope;
@@ -41,11 +40,12 @@ public partial class FileSearchDialog : DialogWindow
 
     internal FileSearchDialog(
         SolutionFileIndexService fileIndex,
-        GeneralOptionsPage options,
+        FileSearchOptionsPage options,
         string? preferredRoot,
         string? solutionRoot,
         IReadOnlyCollection<string> openFiles,
-        IReadOnlyList<SolutionProjectInfo> projects)
+        IReadOnlyList<SolutionProjectInfo> projects,
+        IReadOnlyList<string>? candidatePaths = null)
     {
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
@@ -55,10 +55,15 @@ public partial class FileSearchDialog : DialogWindow
             openFiles ?? throw new ArgumentNullException(nameof(openFiles)),
             StringComparer.OrdinalIgnoreCase);
         this.projects = projects ?? throw new ArgumentNullException(nameof(projects));
+        this.candidatePaths = candidatePaths?
+            .Where(path => !string.IsNullOrWhiteSpace(path))
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToArray();
         scope = ParseScope(options.FileSearchScope);
 
         InitializeComponent();
         ConfigureScopeButtons();
+        ConfigureMode();
         RestoreWindowPlacement();
 
         statusTimer = new DispatcherTimer(DispatcherPriority.Background)
@@ -155,28 +160,21 @@ public partial class FileSearchDialog : DialogWindow
 
         try
         {
-            if (useDebounce && !string.IsNullOrWhiteSpace(query))
+            var inputDelay = options.GetInputDelayMilliseconds();
+            if (useDebounce && !string.IsNullOrWhiteSpace(query) && inputDelay > 0)
             {
-                await Task.Delay(80, cancellationToken);
+                await Task.Delay(inputDelay, cancellationToken);
             }
 
+            var maximumResults = options.GetMaximumResults();
+            var showSuggestions = options.ShowSuggestionsForEmptyQuery;
             var matches = await Task.Run(
-                () => string.IsNullOrWhiteSpace(query)
-                    ? fileIndex.GetSuggestions(
-                        MaximumResults,
-                        preferredRoot,
-                        solutionRoot,
-                        selectedScope,
-                        openFiles,
-                        cancellationToken)
-                    : fileIndex.Search(
-                        query,
-                        MaximumResults,
-                        preferredRoot,
-                        solutionRoot,
-                        selectedScope,
-                        openFiles,
-                        cancellationToken),
+                () => GetMatches(
+                    query,
+                    maximumResults,
+                    showSuggestions,
+                    selectedScope,
+                    cancellationToken),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
@@ -225,15 +223,19 @@ public partial class FileSearchDialog : DialogWindow
 
         var stateText = statusNotice ?? (isSearching
             ? "검색 중"
-            : snapshot.State switch
-            {
-                SolutionFileIndexState.Building => "인덱싱 중",
-                SolutionFileIndexState.Ready when snapshot.IsAnalyzing => "소스 분석 중",
-                SolutionFileIndexState.Ready => "준비됨",
-                SolutionFileIndexState.Faulted => "인덱스 오류",
-                _ => "인덱스 없음",
-            });
-        StatusText.Text = $"{displayedResultCount:N0}개 결과 · {snapshot.FileCount:N0}개 인덱싱 · {stateText}";
+            : candidatePaths is not null
+                ? "대응 파일 선택"
+                : snapshot.State switch
+                {
+                    SolutionFileIndexState.Building => "인덱싱 중",
+                    SolutionFileIndexState.Ready when snapshot.IsAnalyzing => "소스 분석 중",
+                    SolutionFileIndexState.Ready => "준비됨",
+                    SolutionFileIndexState.Faulted => "인덱스 오류",
+                    _ => "인덱스 없음",
+                });
+        StatusText.Text = candidatePaths is null
+            ? $"{displayedResultCount:N0}개 결과 · {snapshot.FileCount:N0}개 인덱싱 · {stateText}"
+            : $"{displayedResultCount:N0}개 후보 · {stateText}";
         CancelSearchButton.Visibility = isSearching ? Visibility.Visible : Visibility.Collapsed;
         KeyboardHintText.Text = isSearching
             ? "Esc 검색 취소"
@@ -296,6 +298,82 @@ public partial class FileSearchDialog : DialogWindow
         CurrentProjectScopeButton.IsChecked = scope == FileSearchScope.CurrentProject;
         OpenFilesScopeButton.IsChecked = scope == FileSearchScope.OpenFiles;
         ExternalSourcesScopeButton.IsChecked = scope == FileSearchScope.ExternalSources;
+    }
+
+    private void ConfigureMode()
+    {
+        if (candidatePaths is null)
+        {
+            return;
+        }
+
+        Title = "VisualBoost 대응 파일 선택";
+        ScopePanel.Visibility = Visibility.Collapsed;
+        SearchPlaceholder.Text = "대응 파일 후보 검색";
+    }
+
+    private IReadOnlyList<FileSearchMatch> SearchCandidatePaths(
+        string query,
+        int maximumResults,
+        CancellationToken cancellationToken)
+    {
+        if (candidatePaths is null)
+        {
+            return Array.Empty<FileSearchMatch>();
+        }
+
+        if (!string.IsNullOrWhiteSpace(query))
+        {
+            return FuzzyFileSearch.Search(
+                query,
+                candidatePaths,
+                maximumResults,
+                cancellationToken);
+        }
+
+        var results = new List<FileSearchMatch>(Math.Min(candidatePaths.Count, maximumResults));
+        for (var index = 0; index < candidatePaths.Count && index < maximumResults; index++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            results.Add(new FileSearchMatch(candidatePaths[index], candidatePaths.Count - index));
+        }
+
+        return results;
+    }
+
+    private IReadOnlyList<FileSearchMatch> GetMatches(
+        string query,
+        int maximumResults,
+        bool showSuggestions,
+        FileSearchScope selectedScope,
+        CancellationToken cancellationToken)
+    {
+        if (candidatePaths is not null)
+        {
+            return SearchCandidatePaths(query, maximumResults, cancellationToken);
+        }
+
+        if (string.IsNullOrWhiteSpace(query))
+        {
+            return showSuggestions
+                ? fileIndex.GetSuggestions(
+                    maximumResults,
+                    preferredRoot,
+                    solutionRoot,
+                    selectedScope,
+                    openFiles,
+                    cancellationToken)
+                : Array.Empty<FileSearchMatch>();
+        }
+
+        return fileIndex.Search(
+            query,
+            maximumResults,
+            preferredRoot,
+            solutionRoot,
+            selectedScope,
+            openFiles,
+            cancellationToken);
     }
 
     private bool IsScopeAvailable(FileSearchScope candidate) => candidate switch
@@ -514,7 +592,10 @@ public partial class FileSearchDialog : DialogWindow
             options.FileSearchPlacementSaved = true;
         }
 
-        options.FileSearchScope = scope.ToString();
+        if (candidatePaths is null)
+        {
+            options.FileSearchScope = scope.ToString();
+        }
         options.SaveSettingsToStorage();
     }
 

@@ -5,6 +5,7 @@ VisualBoost는 Visual Studio에서 일반 C++ 프로젝트의 반복적인 탐�
 ## 현재 기능
 
 - `Alt+O`: 현재 헤더와 동일한 이름의 구현 파일 또는 현재 구현 파일과 동일한 이름의 헤더로 전환
+- 헤더·구현 전환 후보가 여러 개면 탐색 창에서 원하는 파일 선택
 - `Shift+Alt+O`: 파일명과 경로를 검색하는 키보드 중심 파일 탐색 창 열기
 - 최근에 연 파일과 현재 프로젝트의 파일을 검색 결과에서 우선 표시
 - 검색어가 없을 때 최근 파일과 현재 프로젝트 파일을 바로 표시
@@ -20,6 +21,8 @@ VisualBoost는 Visual Studio에서 일반 C++ 프로젝트의 반복적인 탐�
 - 실행 중 추가·제거·이름 변경된 프로젝트의 검색 루트 반영
 - 동일 디렉터리와 `include`/`src` 같은 대응 디렉터리를 우선하는 후보 점수 계산
 - `Tools > Options > VisualBoost > General`에서 C++ 확장자와 대응 디렉터리 설정
+- `Tools > Options > VisualBoost > 파일 탐색`에서 결과 수, 입력 지연과 빈 검색 추천 설정
+- `Tools > Options > VisualBoost > 인덱싱`에서 영구 캐시, 소스 분석과 진단 설정
 - `Tools > VisualBoost 옵션...`에서 설정 페이지 바로 열기
 - `Tools > VisualBoost 인덱스 상태...`에서 상태, 파일 수, 검색 루트와 최근 소요 시간 확인
 - `.git`, `.vs`, `bin`, `obj`, `packages`, `node_modules` 및 대형 생성물 디렉터리 제외

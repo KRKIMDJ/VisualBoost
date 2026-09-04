@@ -54,6 +54,7 @@ public sealed class GeneralOptionsPage : DialogPage
     public string DirectoryPairs { get; set; } = "include=src;include=source;inc=src;headers=source";
 
     [Category("진단")]
+    [Browsable(false)]
     [DisplayName("탐색 실패 시 인덱스 크기 표시")]
     [Description("대응 파일을 찾지 못했을 때 상태 표시줄에 인덱싱된 파일 개수를 표시합니다.")]
     [DefaultValue(true)]

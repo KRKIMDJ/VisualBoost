@@ -14,11 +14,15 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.6.0")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.8.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideProfile(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
+[ProvideOptionPage(typeof(FileSearchOptionsPage), "VisualBoost", "파일 탐색", 0, 0, true)]
+[ProvideProfile(typeof(FileSearchOptionsPage), "VisualBoost", "파일 탐색", 0, 0, true)]
+[ProvideOptionPage(typeof(IndexingOptionsPage), "VisualBoost", "인덱싱", 0, 0, true)]
+[ProvideProfile(typeof(IndexingOptionsPage), "VisualBoost", "인덱싱", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
@@ -46,6 +50,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         documentEvents.DocumentOpened += OnDocumentOpened;
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
+        MigrateLegacyOptions();
         StartFileIndex(dte);
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
@@ -140,6 +145,7 @@ public sealed class VisualBoostPackage : AsyncPackage
     private void StartFileIndex(DTE2 dte)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        fileIndex.Configure(GetIndexingOptions().CreateConfiguration());
         fileIndex.Start(SolutionSearchRootCollector.Collect(dte));
     }
 
@@ -149,9 +155,47 @@ public sealed class VisualBoostPackage : AsyncPackage
         return (GeneralOptionsPage)GetDialogPage(typeof(GeneralOptionsPage));
     }
 
+    internal FileSearchOptionsPage GetFileSearchOptions()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        return (FileSearchOptionsPage)GetDialogPage(typeof(FileSearchOptionsPage));
+    }
+
+    internal IndexingOptionsPage GetIndexingOptions()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        return (IndexingOptionsPage)GetDialogPage(typeof(IndexingOptionsPage));
+    }
+
     internal void ShowGeneralOptions()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         ShowOptionPage(typeof(GeneralOptionsPage));
+    }
+
+    private void MigrateLegacyOptions()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var general = GetGeneralOptions();
+        var fileSearch = GetFileSearchOptions();
+        if (!fileSearch.LegacySettingsMigrated)
+        {
+            fileSearch.FileSearchScope = general.FileSearchScope;
+            fileSearch.FileSearchWidth = general.FileSearchWidth;
+            fileSearch.FileSearchHeight = general.FileSearchHeight;
+            fileSearch.FileSearchLeft = general.FileSearchLeft;
+            fileSearch.FileSearchTop = general.FileSearchTop;
+            fileSearch.FileSearchPlacementSaved = general.FileSearchPlacementSaved;
+            fileSearch.LegacySettingsMigrated = true;
+            fileSearch.SaveSettingsToStorage();
+        }
+
+        var indexing = GetIndexingOptions();
+        if (!indexing.LegacySettingsMigrated)
+        {
+            indexing.ShowIndexCountOnFailure = general.ShowIndexCountOnFailure;
+            indexing.LegacySettingsMigrated = true;
+            indexing.SaveSettingsToStorage();
+        }
     }
 }

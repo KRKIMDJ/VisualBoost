@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel.Design;
 using System.IO;
+using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using EnvDTE80;
@@ -9,6 +10,7 @@ using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using VisualBoost.Core.FilePairing;
 using VisualBoost.Services;
+using VisualBoost.UI;
 
 namespace VisualBoost.Commands;
 
@@ -83,20 +85,37 @@ internal sealed class SwitchHeaderSourceCommand
 
         if (matches.Count == 0)
         {
-            var diagnostic = options.ShowIndexCountOnFailure
+            var diagnostic = package.GetIndexingOptions().ShowIndexCountOnFailure
                 ? $" 인덱스: {fileIndex.Count:N0}개 파일"
                 : string.Empty;
             await ShowStatusAsync($"'{Path.GetFileName(activeFile)}'의 대응 파일을 찾지 못했습니다.{diagnostic}");
             return;
         }
 
-        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
-        dte.ItemOperations.OpenFile(matches[0].Path);
-
+        var selectedPath = matches[0].Path;
         if (matches.Count > 1)
         {
-            await ShowStatusAsync($"후보 {matches.Count}개 중 가장 가까운 파일을 열었습니다: {matches[0].Path}");
+            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+            var context = FileSearchContext.Collect(dte);
+            var dialog = new FileSearchDialog(
+                fileIndex,
+                package.GetFileSearchOptions(),
+                context.PreferredRoot,
+                context.SolutionRoot,
+                context.OpenFiles,
+                context.Projects,
+                matches.Select(match => match.Path).ToArray());
+            if (dialog.ShowModal() != true || string.IsNullOrWhiteSpace(dialog.SelectedPath))
+            {
+                return;
+            }
+
+            selectedPath = dialog.SelectedPath!;
         }
+
+        await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync();
+        fileIndex.RecordRecentFile(selectedPath);
+        dte.ItemOperations.OpenFile(selectedPath);
     }
 
     private async Task ShowStatusAsync(string message)

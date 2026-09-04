@@ -4,7 +4,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>VisualBoost</RootNamespace>
     <AssemblyName>VisualBoost</AssemblyName>
-    <Version>0.6.0</Version>
+    <Version>0.8.0</Version>
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
     <GeneratePkgDefFile>true</GeneratePkgDefFile>
     <IncludeBuildOutput>true</IncludeBuildOutput>

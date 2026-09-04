@@ -34,9 +34,24 @@ internal sealed class SolutionFileIndexService : IDisposable
     private string? analysisError;
     private readonly LinkedList<string> recentFiles = new();
     private readonly HashSet<string> recentFileSet = new(StringComparer.OrdinalIgnoreCase);
+    private SolutionFileIndexConfiguration configuration = SolutionFileIndexConfiguration.Default;
     private bool disposed;
 
     public int Count => index.Count;
+
+    public void Configure(SolutionFileIndexConfiguration value)
+    {
+        if (value is null)
+        {
+            throw new ArgumentNullException(nameof(value));
+        }
+
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            configuration = value;
+        }
+    }
 
     public void Start(SolutionIndexDiscoveryResult discovery)
     {
@@ -427,6 +442,12 @@ internal sealed class SolutionFileIndexService : IDisposable
         CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
+        SolutionFileIndexConfiguration currentConfiguration;
+        lock (gate)
+        {
+            currentConfiguration = configuration;
+        }
+
         try
         {
             var solutionDirectory = Path.GetDirectoryName(currentSolutionPath);
@@ -439,7 +460,9 @@ internal sealed class SolutionFileIndexService : IDisposable
                 .Select(Path.GetFullPath)
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToArray();
-            var cachedFiles = cache.Load(currentSolutionPath);
+            var cachedFiles = currentConfiguration.UsePersistentFileCache
+                ? cache.Load(currentSolutionPath)
+                : Array.Empty<string>();
             if (cachedFiles.Count > 0)
             {
                 index.ReplaceAll(cachedFiles.Concat(effectiveProjectFiles));
@@ -473,25 +496,32 @@ internal sealed class SolutionFileIndexService : IDisposable
                         : SolutionFileIndexState.Ready;
                     lastError = null;
                     ReplaceWatchersNoLock(effectiveRoots);
-                    isAnalyzing = true;
+                    isAnalyzing = currentConfiguration.EnableSourceAnalysis;
                     analysisError = null;
-                    activeAnalysis = Task.Run(
-                        async () =>
-                        {
-                            // Solution 로드 직후의 Visual Studio 작업과 CPU 및 디스크 사용이 겹치지 않게 양보합니다.
-                            await Task.Delay(TimeSpan.FromSeconds(2), cancellationToken).ConfigureAwait(false);
-                            AnalyzeSources(
-                                currentSolutionPath,
-                                files,
-                                effectiveRoots,
-                                cancellationToken);
-                        },
-                        cancellationToken);
+                    activeAnalysis = currentConfiguration.EnableSourceAnalysis
+                        ? Task.Run(
+                            async () =>
+                            {
+                                // Solution 로드 직후의 Visual Studio 작업과 CPU 및 디스크 사용이 겹치지 않게 양보합니다.
+                                await Task.Delay(
+                                    currentConfiguration.SourceAnalysisDelay,
+                                    cancellationToken).ConfigureAwait(false);
+                                AnalyzeSources(
+                                    currentSolutionPath,
+                                    files,
+                                    effectiveRoots,
+                                    cancellationToken);
+                            },
+                            cancellationToken)
+                        : Task.CompletedTask;
                 }
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            cache.Save(currentSolutionPath, files);
+            if (currentConfiguration.UsePersistentFileCache)
+            {
+                cache.Save(currentSolutionPath, files);
+            }
         }
         catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
         {

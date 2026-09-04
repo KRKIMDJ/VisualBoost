@@ -164,7 +164,7 @@
         </Grid>
       </Border>
 
-      <StackPanel Margin="0,8,0,0" Orientation="Horizontal">
+      <StackPanel x:Name="ScopePanel" Margin="0,8,0,0" Orientation="Horizontal">
         <RadioButton x:Name="AllScopeButton"
                      GroupName="SearchScope"
                      Tag="All"
