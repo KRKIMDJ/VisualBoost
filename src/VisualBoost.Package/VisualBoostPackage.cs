@@ -14,7 +14,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.1.6")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.1.7")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
@@ -38,21 +38,45 @@ public sealed class VisualBoostPackage : AsyncPackage
         solutionEvents = dte.Events.SolutionEvents;
         solutionEvents.Opened += OnSolutionOpened;
         solutionEvents.AfterClosing += OnSolutionClosed;
+        solutionEvents.ProjectAdded += OnProjectChanged;
+        solutionEvents.ProjectRemoved += OnProjectChanged;
+        solutionEvents.ProjectRenamed += OnProjectRenamed;
 
         StartFileIndex(dte);
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
+        await ShowIndexStatusCommand.InitializeAsync(this, fileIndex, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)
     {
         if (disposing)
         {
+            JoinableTaskFactory.Run(async () =>
+            {
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                UnsubscribeSolutionEvents();
+            });
             fileIndex.Dispose();
             solutionEvents = null;
         }
 
         base.Dispose(disposing);
+    }
+
+    private void UnsubscribeSolutionEvents()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (solutionEvents is null)
+        {
+            return;
+        }
+
+        solutionEvents.Opened -= OnSolutionOpened;
+        solutionEvents.AfterClosing -= OnSolutionClosed;
+        solutionEvents.ProjectAdded -= OnProjectChanged;
+        solutionEvents.ProjectRemoved -= OnProjectChanged;
+        solutionEvents.ProjectRenamed -= OnProjectRenamed;
     }
 
     private void OnSolutionOpened()
@@ -73,6 +97,28 @@ public sealed class VisualBoostPackage : AsyncPackage
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         fileIndex.Clear();
+    }
+
+    private void OnProjectChanged(Project project)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        RefreshFileIndexRoots();
+    }
+
+    private void OnProjectRenamed(Project project, string oldName)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        RefreshFileIndexRoots();
+    }
+
+    private void RefreshFileIndexRoots()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var dte = GetService(typeof(SDTE)) as DTE2;
+        if (dte is not null)
+        {
+            StartFileIndex(dte);
+        }
     }
 
     private void StartFileIndex(DTE2 dte)

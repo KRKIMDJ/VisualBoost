@@ -3,7 +3,7 @@
     <TargetFramework>net472</TargetFramework>
     <RootNamespace>VisualBoost</RootNamespace>
     <AssemblyName>VisualBoost</AssemblyName>
-    <Version>0.1.6</Version>
+    <Version>0.1.7</Version>
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
     <GeneratePkgDefFile>true</GeneratePkgDefFile>
     <IncludeBuildOutput>true</IncludeBuildOutput>

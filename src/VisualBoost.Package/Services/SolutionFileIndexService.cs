@@ -17,11 +17,12 @@ internal sealed class SolutionFileIndexService : IDisposable
     private IReadOnlyList<string> roots = Array.Empty<string>();
     private IReadOnlyList<FileSystemWatcher> watchers = Array.Empty<FileSystemWatcher>();
     private Task activeBuild = Task.CompletedTask;
+    private SolutionFileIndexState state = SolutionFileIndexState.Empty;
+    private TimeSpan lastBuildDuration;
+    private string? lastError;
     private bool disposed;
 
     public int Count => index.Count;
-
-    public TimeSpan LastBuildDuration { get; private set; }
 
     public void Start(IReadOnlyList<string> searchRoots)
     {
@@ -35,7 +36,8 @@ internal sealed class SolutionFileIndexService : IDisposable
         lock (gate)
         {
             ThrowIfDisposed();
-            if (roots.SequenceEqual(normalizedRoots, StringComparer.OrdinalIgnoreCase) && !activeBuild.IsFaulted)
+            if (roots.SequenceEqual(normalizedRoots, StringComparer.OrdinalIgnoreCase) &&
+                state != SolutionFileIndexState.Faulted)
             {
                 return;
             }
@@ -44,7 +46,25 @@ internal sealed class SolutionFileIndexService : IDisposable
             CancelBuildNoLock();
             rebuildCancellation = new CancellationTokenSource();
             var cancellationToken = rebuildCancellation.Token;
+            state = normalizedRoots.Count == 0
+                ? SolutionFileIndexState.Empty
+                : SolutionFileIndexState.Building;
+            lastError = null;
             activeBuild = Task.Run(() => BuildIndex(normalizedRoots, cancellationToken), cancellationToken);
+        }
+    }
+
+    public SolutionFileIndexSnapshot GetSnapshot()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            return new SolutionFileIndexSnapshot(
+                state,
+                index.Count,
+                roots.Count,
+                lastBuildDuration,
+                lastError);
         }
     }
 
@@ -95,6 +115,9 @@ internal sealed class SolutionFileIndexService : IDisposable
             rebuildCancellation = new CancellationTokenSource();
             DisposeWatchersNoLock();
             index.Clear();
+            state = SolutionFileIndexState.Empty;
+            lastBuildDuration = TimeSpan.Zero;
+            lastError = null;
         }
     }
 
@@ -124,17 +147,41 @@ internal sealed class SolutionFileIndexService : IDisposable
     private void BuildIndex(IReadOnlyList<string> searchRoots, CancellationToken cancellationToken)
     {
         var stopwatch = Stopwatch.StartNew();
-        var files = SolutionFileCatalog.GetFiles(searchRoots, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        index.ReplaceAll(files);
-        stopwatch.Stop();
-        LastBuildDuration = stopwatch.Elapsed;
-
-        lock (gate)
+        try
         {
-            if (!disposed && !cancellationToken.IsCancellationRequested)
+            var files = SolutionFileCatalog.GetFiles(searchRoots, cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            index.ReplaceAll(files);
+            stopwatch.Stop();
+
+            lock (gate)
             {
-                ReplaceWatchersNoLock(searchRoots);
+                if (!disposed && !cancellationToken.IsCancellationRequested)
+                {
+                    lastBuildDuration = stopwatch.Elapsed;
+                    state = searchRoots.Count == 0
+                        ? SolutionFileIndexState.Empty
+                        : SolutionFileIndexState.Ready;
+                    lastError = null;
+                    ReplaceWatchersNoLock(searchRoots);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+            // 더 최신 Solution 구성으로 다시 시작된 빌드는 상태를 덮어쓰지 않습니다.
+        }
+        catch (Exception exception)
+        {
+            stopwatch.Stop();
+            lock (gate)
+            {
+                if (!disposed && !cancellationToken.IsCancellationRequested)
+                {
+                    lastBuildDuration = stopwatch.Elapsed;
+                    state = SolutionFileIndexState.Faulted;
+                    lastError = exception.Message;
+                }
             }
         }
     }

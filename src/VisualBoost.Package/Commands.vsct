@@ -25,6 +25,13 @@
           <CanonicalName>VisualBoost.OpenOptions</CanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidVisualBoostCommandSet" id="ShowIndexStatusCommand" priority="0x0300" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>VisualBoost 인덱스 상태...</ButtonText>
+          <CanonicalName>VisualBoost.ShowIndexStatus</CanonicalName>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -38,6 +45,7 @@
       <IDSymbol name="VisualBoostCommandGroup" value="0x1020" />
       <IDSymbol name="SwitchHeaderSourceCommand" value="0x0100" />
       <IDSymbol name="OpenOptionsCommand" value="0x0101" />
+      <IDSymbol name="ShowIndexStatusCommand" value="0x0102" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>
