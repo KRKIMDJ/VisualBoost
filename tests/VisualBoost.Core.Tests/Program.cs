@@ -32,8 +32,12 @@ internal static class Program
         Run("대규모 인덱스에서 퍼지 검색 결과를 결정적으로 정렬한다", LargeFuzzySearchIsDeterministic);
         Run("파일 변경 후 퍼지 검색 스냅샷을 갱신한다", FuzzySearchSnapshotTracksChanges);
         Run("퍼지 검색을 취소할 수 있다", FuzzySearchCanBeCancelled);
+        Run("진행 중인 대규모 퍼지 검색을 취소할 수 있다", RunningFuzzySearchCanBeCancelled);
         Run("최근 파일을 동점 후보보다 우선한다", RecentFileWinsEquivalentMatch);
         Run("현재 프로젝트 파일을 동점 후보보다 우선한다", CurrentProjectWinsEquivalentMatch);
+        Run("현재 프로젝트 검색 범위는 지정한 루트만 포함한다", CurrentProjectScopeIncludesPreferredRoot);
+        Run("열린 파일 검색 범위는 열린 문서만 포함한다", OpenFilesScopeIncludesOnlyOpenDocuments);
+        Run("외부 소스 검색 범위는 Solution 바깥만 포함한다", ExternalScopeExcludesSolutionFiles);
         Run("C++ include와 주요 심볼 위치를 추출한다", CppSourceAnalysisFindsIncludesAndSymbols);
         Run("주석 속 심볼은 분석에서 제외한다", CppSourceAnalysisIgnoresComments);
         Run("심볼 인덱스는 이름별 위치를 반환한다", SourceSymbolIndexFindsLocations);
@@ -269,6 +273,30 @@ internal static class Program
             FuzzyFileSearch.Search("widget", new[] { "widget.cpp" }, cancellationToken: cancellation.Token));
     }
 
+    private static void RunningFuzzySearchCanBeCancelled()
+    {
+        using var cancellation = new CancellationTokenSource();
+
+        Throws<OperationCanceledException>(() =>
+            FuzzyFileSearch.Search(
+                "widget",
+                EnumerateAndCancel(cancellation),
+                cancellationToken: cancellation.Token));
+    }
+
+    private static IEnumerable<string> EnumerateAndCancel(CancellationTokenSource cancellation)
+    {
+        for (var index = 0; index < 1_000; index++)
+        {
+            if (index == 10)
+            {
+                cancellation.Cancel();
+            }
+
+            yield return $"Widget-{index}.cpp";
+        }
+    }
+
     private static void RecentFileWinsEquivalentMatch()
     {
         var root = Root();
@@ -292,6 +320,60 @@ internal static class Program
         var matches = FuzzyFileSearch.Search("widget", new[] { first, preferred }, context);
 
         Equal(preferred, matches[0].Path);
+    }
+
+    private static void CurrentProjectScopeIncludesPreferredRoot()
+    {
+        var root = Root();
+        var projectRoot = Path.Combine(root, "Game");
+
+        Equal(true, FileSearchScopeFilter.Includes(
+            Path.Combine(projectRoot, "Source", "Widget.cpp"),
+            FileSearchScope.CurrentProject,
+            projectRoot,
+            root));
+        Equal(false, FileSearchScopeFilter.Includes(
+            Path.Combine(root, "Engine", "Widget.cpp"),
+            FileSearchScope.CurrentProject,
+            projectRoot,
+            root));
+    }
+
+    private static void OpenFilesScopeIncludesOnlyOpenDocuments()
+    {
+        var root = Root();
+        var openPath = Path.Combine(root, "Widget.cpp");
+        var openFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { openPath };
+
+        Equal(true, FileSearchScopeFilter.Includes(
+            openPath.ToUpperInvariant(),
+            FileSearchScope.OpenFiles,
+            root,
+            root,
+            openFiles));
+        Equal(false, FileSearchScopeFilter.Includes(
+            Path.Combine(root, "Other.cpp"),
+            FileSearchScope.OpenFiles,
+            root,
+            root,
+            openFiles));
+    }
+
+    private static void ExternalScopeExcludesSolutionFiles()
+    {
+        var root = Root();
+        var solutionRoot = Path.Combine(root, "Game");
+
+        Equal(false, FileSearchScopeFilter.Includes(
+            Path.Combine(solutionRoot, "Source", "Widget.cpp"),
+            FileSearchScope.ExternalSources,
+            solutionRoot,
+            solutionRoot));
+        Equal(true, FileSearchScopeFilter.Includes(
+            Path.Combine(root, "Engine", "Source", "Widget.cpp"),
+            FileSearchScope.ExternalSources,
+            solutionRoot,
+            solutionRoot));
     }
 
     private static void CppSourceAnalysisFindsIncludesAndSymbols()

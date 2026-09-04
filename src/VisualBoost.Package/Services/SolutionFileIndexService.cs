@@ -108,6 +108,23 @@ internal sealed class SolutionFileIndexService : IDisposable
         string query,
         int maximumResults,
         string? preferredRoot,
+        CancellationToken cancellationToken) =>
+        Search(
+            query,
+            maximumResults,
+            preferredRoot,
+            solutionRoot: null,
+            FileSearchScope.All,
+            openFiles: null,
+            cancellationToken);
+
+    public IReadOnlyList<FileSearchMatch> Search(
+        string query,
+        int maximumResults,
+        string? preferredRoot,
+        string? solutionRoot,
+        FileSearchScope scope,
+        ISet<string>? openFiles,
         CancellationToken cancellationToken)
     {
         string[] recentPaths;
@@ -117,11 +134,154 @@ internal sealed class SolutionFileIndexService : IDisposable
             recentPaths = recentFiles.ToArray();
         }
 
-        return index.Search(
+        var candidates = index
+            .GetPathsSnapshot()
+            .Where(path => FileSearchScopeFilter.Includes(
+                path,
+                scope,
+                preferredRoot,
+                solutionRoot,
+                openFiles));
+        return FuzzyFileSearch.Search(
             query,
+            candidates,
             new FileSearchRankingContext(preferredRoot, recentPaths),
             maximumResults,
             cancellationToken);
+    }
+
+    public IReadOnlyList<FileSearchMatch> GetSuggestions(
+        int maximumResults,
+        string? preferredRoot,
+        string? solutionRoot,
+        FileSearchScope scope,
+        ISet<string>? openFiles,
+        CancellationToken cancellationToken)
+    {
+        if (maximumResults <= 0)
+        {
+            return Array.Empty<FileSearchMatch>();
+        }
+
+        string[] recentPaths;
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            recentPaths = recentFiles.ToArray();
+        }
+
+        var paths = index.GetPathsSnapshot();
+        var availablePaths = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
+        var selectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var suggestions = new List<FileSearchMatch>(maximumResults);
+
+        for (var recentIndex = 0; recentIndex < recentPaths.Length; recentIndex++)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var recentPath = recentPaths[recentIndex];
+            if (!availablePaths.Contains(recentPath) ||
+                !FileSearchScopeFilter.Includes(
+                    recentPath,
+                    scope,
+                    preferredRoot,
+                    solutionRoot,
+                    openFiles) ||
+                !selectedPaths.Add(recentPath))
+            {
+                continue;
+            }
+
+            suggestions.Add(new FileSearchMatch(recentPath, 1000 - recentIndex));
+            if (suggestions.Count == maximumResults)
+            {
+                return suggestions;
+            }
+        }
+
+        var remainingLimit = maximumResults - suggestions.Count;
+        var remainingPaths = new List<string>(remainingLimit);
+        foreach (var path in paths)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (!selectedPaths.Contains(path) &&
+                FileSearchScopeFilter.Includes(
+                    path,
+                    scope,
+                    preferredRoot,
+                    solutionRoot,
+                    openFiles))
+            {
+                InsertSuggestion(remainingPaths, path, remainingLimit, preferredRoot);
+            }
+        }
+
+        suggestions.AddRange(remainingPaths.Select(path => new FileSearchMatch(path, 0)));
+
+        return suggestions;
+    }
+
+    public IReadOnlyList<string> GetRecentFilesSnapshot()
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            return recentFiles.ToArray();
+        }
+    }
+
+    private static void InsertSuggestion(
+        List<string> suggestions,
+        string candidate,
+        int maximumResults,
+        string? preferredRoot)
+    {
+        if (maximumResults <= 0)
+        {
+            return;
+        }
+
+        var low = 0;
+        var high = suggestions.Count;
+        while (low < high)
+        {
+            var middle = low + ((high - low) / 2);
+            if (CompareSuggestions(candidate, suggestions[middle], preferredRoot) < 0)
+            {
+                high = middle;
+            }
+            else
+            {
+                low = middle + 1;
+            }
+        }
+
+        if (low >= maximumResults)
+        {
+            return;
+        }
+
+        suggestions.Insert(low, candidate);
+        if (suggestions.Count > maximumResults)
+        {
+            suggestions.RemoveAt(suggestions.Count - 1);
+        }
+    }
+
+    private static int CompareSuggestions(string first, string second, string? preferredRoot)
+    {
+        var firstIsPreferred = FileSearchScopeFilter.IsInside(first, preferredRoot);
+        var secondIsPreferred = FileSearchScopeFilter.IsInside(second, preferredRoot);
+        if (firstIsPreferred != secondIsPreferred)
+        {
+            return firstIsPreferred ? -1 : 1;
+        }
+
+        var fileNameComparison = StringComparer.OrdinalIgnoreCase.Compare(
+            Path.GetFileName(first),
+            Path.GetFileName(second));
+        return fileNameComparison != 0
+            ? fileNameComparison
+            : StringComparer.OrdinalIgnoreCase.Compare(first, second);
     }
 
     public void RecordRecentFile(string? path)

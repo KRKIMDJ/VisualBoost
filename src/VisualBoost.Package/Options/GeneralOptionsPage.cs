@@ -11,6 +11,30 @@ namespace VisualBoost.Options;
 [Guid("302ea02e-d82f-41ac-a785-cbf1d5fb1d9f")]
 public sealed class GeneralOptionsPage : DialogPage
 {
+    [Browsable(false)]
+    [DefaultValue("All")]
+    public string FileSearchScope { get; set; } = "All";
+
+    [Browsable(false)]
+    [DefaultValue(760d)]
+    public double FileSearchWidth { get; set; } = 760d;
+
+    [Browsable(false)]
+    [DefaultValue(520d)]
+    public double FileSearchHeight { get; set; } = 520d;
+
+    [Browsable(false)]
+    [DefaultValue(-1d)]
+    public double FileSearchLeft { get; set; } = -1d;
+
+    [Browsable(false)]
+    [DefaultValue(-1d)]
+    public double FileSearchTop { get; set; } = -1d;
+
+    [Browsable(false)]
+    [DefaultValue(false)]
+    public bool FileSearchPlacementSaved { get; set; }
+
     [Category("C++ 파일 전환")]
     [DisplayName("헤더 확장자")]
     [Description("세미콜론으로 구분합니다. 점은 생략할 수 있습니다.")]

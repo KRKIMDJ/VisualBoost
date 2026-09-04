@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Collections.ObjectModel;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -180,6 +181,36 @@ public sealed class FilePathIndex : IDisposable
 
         // 점수 계산 중에는 쓰기 잠금을 유지하지 않아 파일 감시 이벤트 처리를 막지 않습니다.
         return FuzzyFileSearch.Search(query, paths, rankingContext, maximumResults, cancellationToken);
+    }
+
+    public IReadOnlyList<string> GetPathsSnapshot()
+    {
+        string[] paths;
+        gate.EnterUpgradeableReadLock();
+        try
+        {
+            if (searchSnapshot is null)
+            {
+                gate.EnterWriteLock();
+                try
+                {
+                    searchSnapshot ??= allPaths.ToArray();
+                }
+                finally
+                {
+                    gate.ExitWriteLock();
+                }
+            }
+
+            paths = searchSnapshot;
+        }
+        finally
+        {
+            gate.ExitUpgradeableReadLock();
+        }
+
+        // 스냅샷 배열은 이후 변경하지 않고 교체만 하므로 복사 없이 안전하게 순회할 수 있습니다.
+        return new ReadOnlyCollection<string>(paths);
     }
 
     public void Clear() => ReplaceAll(Array.Empty<string>());

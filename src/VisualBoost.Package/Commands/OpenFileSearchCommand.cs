@@ -68,7 +68,14 @@ internal sealed class OpenFileSearchCommand
         await package.JoinableTaskFactory.SwitchToMainThreadAsync();
         var dte = await package.GetServiceAsync(typeof(SDTE)) as DTE2;
         Assumes.Present(dte);
-        var dialog = new FileSearchDialog(fileIndex, GetActiveProjectDirectory(dte));
+        var preferredRoot = GetActiveProjectDirectory(dte);
+        var dialog = new FileSearchDialog(
+            fileIndex,
+            package.GetGeneralOptions(),
+            preferredRoot,
+            GetSolutionDirectory(dte),
+            GetOpenDocumentPaths(dte),
+            SolutionProjectCatalog.Collect(dte, preferredRoot));
         if (dialog.ShowModal() != true || string.IsNullOrWhiteSpace(dialog.SelectedPath))
         {
             return;
@@ -99,6 +106,43 @@ internal sealed class OpenFileSearchCommand
             // 로드 중인 비표준 프로젝트에서는 최근 파일 가중치만 사용합니다.
             return null;
         }
+    }
+
+    private static string? GetSolutionDirectory(DTE2 dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            return string.IsNullOrWhiteSpace(dte.Solution.FullName)
+                ? null
+                : Path.GetDirectoryName(dte.Solution.FullName);
+        }
+        catch (COMException)
+        {
+            return null;
+        }
+    }
+
+    private static IReadOnlyCollection<string> GetOpenDocumentPaths(DTE2 dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        var paths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        try
+        {
+            foreach (EnvDTE.Document document in dte.Documents)
+            {
+                if (!string.IsNullOrWhiteSpace(document.FullName))
+                {
+                    paths.Add(Path.GetFullPath(document.FullName));
+                }
+            }
+        }
+        catch (COMException)
+        {
+            // 일부 문서 공급자는 로드 중 컬렉션 열거를 지원하지 않을 수 있습니다.
+        }
+
+        return paths;
     }
 
     private static string? FindCommonDirectory(string? first, string? second)
