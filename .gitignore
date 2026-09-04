@@ -1,0 +1,27 @@
+**/bin/
+**/obj/
+.vs/
+.dotnet-cli/
+.nuget/
+*.user
+*.suo
+*.vsix
+TestResults/
+
+# 로컬 진단 및 개발 산출물
+artifacts/
+*.log
+*.userprefs
+
+# 에이전트 및 로컬 개발 지침
+CLAUDE.md
+AGENTS.md
+.agents/
+.codex/
+*.agent.md
+*.agent.txt
+*.notes.md
+*.notes.txt
+
+# 에이전트가 유지하는 내부 개발 문서
+Docs/

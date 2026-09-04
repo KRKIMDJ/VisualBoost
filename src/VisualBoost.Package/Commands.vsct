@@ -1,0 +1,43 @@
+<?xml version="1.0" encoding="utf-8"?>
+<CommandTable xmlns="http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable">
+  <Extern href="stdidcmd.h" />
+  <Extern href="vsshlids.h" />
+
+  <Commands package="guidVisualBoostPackage">
+    <Groups>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" priority="0x0600">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+    </Groups>
+
+    <Buttons>
+      <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0100" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>헤더/구현 파일 전환</ButtonText>
+          <CanonicalName>VisualBoost.SwitchHeaderSource</CanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidVisualBoostCommandSet" id="OpenOptionsCommand" priority="0x0200" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>VisualBoost 옵션...</ButtonText>
+          <CanonicalName>VisualBoost.OpenOptions</CanonicalName>
+        </Strings>
+      </Button>
+    </Buttons>
+  </Commands>
+
+  <KeyBindings>
+    <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
+  </KeyBindings>
+
+  <Symbols>
+    <GuidSymbol name="guidVisualBoostPackage" value="{d54a4377-4869-4f58-a583-5318b38d77f2}" />
+    <GuidSymbol name="guidVisualBoostCommandSet" value="{4cce3464-a08f-4e0d-a5fd-a297c7fcd41e}">
+      <IDSymbol name="VisualBoostCommandGroup" value="0x1020" />
+      <IDSymbol name="SwitchHeaderSourceCommand" value="0x0100" />
+      <IDSymbol name="OpenOptionsCommand" value="0x0101" />
+    </GuidSymbol>
+  </Symbols>
+</CommandTable>

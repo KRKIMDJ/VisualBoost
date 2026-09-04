@@ -1,0 +1,95 @@
+using System;
+using System.Runtime.InteropServices;
+using System.Threading;
+using System.Threading.Tasks;
+using EnvDTE;
+using EnvDTE80;
+using Microsoft;
+using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell.Interop;
+using VisualBoost.Commands;
+using VisualBoost.Options;
+using VisualBoost.Services;
+
+namespace VisualBoost;
+
+[PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.1.6")]
+[ProvideMenuResource("Menus.ctmenu", 1)]
+[ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
+[ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
+[ProvideProfile(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
+[Guid(PackageGuidString)]
+public sealed class VisualBoostPackage : AsyncPackage
+{
+    public const string PackageGuidString = "d54a4377-4869-4f58-a583-5318b38d77f2";
+
+    private readonly SolutionFileIndexService fileIndex = new();
+    private SolutionEvents? solutionEvents;
+
+    protected override async Task InitializeAsync(
+        CancellationToken cancellationToken,
+        IProgress<ServiceProgressData> progress)
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        var dte = await GetServiceAsync(typeof(SDTE)) as DTE2;
+        Assumes.Present(dte);
+
+        solutionEvents = dte.Events.SolutionEvents;
+        solutionEvents.Opened += OnSolutionOpened;
+        solutionEvents.AfterClosing += OnSolutionClosed;
+
+        StartFileIndex(dte);
+        await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
+    }
+
+    protected override void Dispose(bool disposing)
+    {
+        if (disposing)
+        {
+            fileIndex.Dispose();
+            solutionEvents = null;
+        }
+
+        base.Dispose(disposing);
+    }
+
+    private void OnSolutionOpened()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        JoinableTaskFactory.RunAsync(async () =>
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync();
+            var dte = await GetServiceAsync(typeof(SDTE)) as DTE2;
+            if (dte is not null)
+            {
+                StartFileIndex(dte);
+            }
+        }).FileAndForget("VisualBoost/StartFileIndex");
+    }
+
+    private void OnSolutionClosed()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        fileIndex.Clear();
+    }
+
+    private void StartFileIndex(DTE2 dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        fileIndex.Start(SolutionSearchRootCollector.Collect(dte));
+    }
+
+    internal GeneralOptionsPage GetGeneralOptions()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        return (GeneralOptionsPage)GetDialogPage(typeof(GeneralOptionsPage));
+    }
+
+    internal void ShowGeneralOptions()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        ShowOptionPage(typeof(GeneralOptionsPage));
+    }
+}
