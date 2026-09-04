@@ -8,6 +8,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VisualBoost.Package", "src\
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VisualBoost.Core.Tests", "tests\VisualBoost.Core.Tests\VisualBoost.Core.Tests.csproj", "{6F8F06CA-6903-429E-B1E4-DF62F8327A4D}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VisualBoost.PerformanceTests", "tests\VisualBoost.PerformanceTests\VisualBoost.PerformanceTests.csproj", "{F5C8AF8D-84D0-4EA3-90E0-563E24788486}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
@@ -26,6 +28,10 @@ Global
 		{6F8F06CA-6903-429E-B1E4-DF62F8327A4D}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{6F8F06CA-6903-429E-B1E4-DF62F8327A4D}.Release|Any CPU.ActiveCfg = Release|Any CPU
 		{6F8F06CA-6903-429E-B1E4-DF62F8327A4D}.Release|Any CPU.Build.0 = Release|Any CPU
+		{F5C8AF8D-84D0-4EA3-90E0-563E24788486}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{F5C8AF8D-84D0-4EA3-90E0-563E24788486}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{F5C8AF8D-84D0-4EA3-90E0-563E24788486}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{F5C8AF8D-84D0-4EA3-90E0-563E24788486}.Release|Any CPU.Build.0 = Release|Any CPU
 	EndGlobalSection
 EndGlobal
 

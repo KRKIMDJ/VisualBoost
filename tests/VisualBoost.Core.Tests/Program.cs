@@ -23,6 +23,7 @@ internal static class Program
         Run("중복 후보를 제거한다", DuplicateCandidatesAreRemoved);
         Run("파일 인덱스는 언어와 무관하게 같은 이름을 찾는다", FileIndexSupportsMultipleLanguages);
         Run("파일 인덱스는 생성과 삭제를 증분 반영한다", FileIndexTracksAddsAndRemoves);
+        Run("파일 카탈로그는 생성물 디렉터리를 제외한다", FileCatalogExcludesGeneratedDirectories);
         Run("대규모 파일 인덱스에서 이름으로 후보를 제한한다", FileIndexNarrowsLargeCandidateSet);
         Run("사용자 확장자와 대응 디렉터리를 적용한다", CustomFilePairingOptionsAreApplied);
         Run("정확한 파일명 일치를 우선한다", ExactFileNameWinsFuzzySearch);
@@ -168,6 +169,18 @@ internal static class Program
         });
 
         Equal(expected, matches[0].Path);
+    }
+
+    private static void FileCatalogExcludesGeneratedDirectories()
+    {
+        var root = Root();
+
+        Equal(true, FileSystemPathCatalog.IsExcludedPath(
+            Path.Combine(root, "Intermediate", "Build", "Widget.cpp")));
+        Equal(true, FileSystemPathCatalog.IsExcludedPath(
+            Path.Combine(root, ".vs", "Cache", "Widget.cpp")));
+        Equal(false, FileSystemPathCatalog.IsExcludedPath(
+            Path.Combine(root, "Source", "Widget.cpp")));
     }
 
     private static void ExactFileNameWinsFuzzySearch()
