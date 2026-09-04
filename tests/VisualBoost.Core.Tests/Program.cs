@@ -32,6 +32,8 @@ internal static class Program
         Run("대규모 인덱스에서 퍼지 검색 결과를 결정적으로 정렬한다", LargeFuzzySearchIsDeterministic);
         Run("파일 변경 후 퍼지 검색 스냅샷을 갱신한다", FuzzySearchSnapshotTracksChanges);
         Run("퍼지 검색을 취소할 수 있다", FuzzySearchCanBeCancelled);
+        Run("최근 파일을 동점 후보보다 우선한다", RecentFileWinsEquivalentMatch);
+        Run("현재 프로젝트 파일을 동점 후보보다 우선한다", CurrentProjectWinsEquivalentMatch);
         Run("C++ include와 주요 심볼 위치를 추출한다", CppSourceAnalysisFindsIncludesAndSymbols);
         Run("주석 속 심볼은 분석에서 제외한다", CppSourceAnalysisIgnoresComments);
         Run("심볼 인덱스는 이름별 위치를 반환한다", SourceSymbolIndexFindsLocations);
@@ -265,6 +267,31 @@ internal static class Program
 
         Throws<OperationCanceledException>(() =>
             FuzzyFileSearch.Search("widget", new[] { "widget.cpp" }, cancellationToken: cancellation.Token));
+    }
+
+    private static void RecentFileWinsEquivalentMatch()
+    {
+        var root = Root();
+        var first = Path.Combine(root, "alpha", "Widget.cpp");
+        var recent = Path.Combine(root, "bravo", "Widget.cpp");
+        var context = new FileSearchRankingContext(recentPaths: new[] { recent });
+
+        var matches = FuzzyFileSearch.Search("widget", new[] { first, recent }, context);
+
+        Equal(recent, matches[0].Path);
+    }
+
+    private static void CurrentProjectWinsEquivalentMatch()
+    {
+        var root = Root();
+        var preferredRoot = Path.Combine(root, "bravo");
+        var first = Path.Combine(root, "alpha", "Widget.cpp");
+        var preferred = Path.Combine(preferredRoot, "Widget.cpp");
+        var context = new FileSearchRankingContext(preferredRoot);
+
+        var matches = FuzzyFileSearch.Search("widget", new[] { first, preferred }, context);
+
+        Equal(preferred, matches[0].Path);
     }
 
     private static void CppSourceAnalysisFindsIncludesAndSymbols()

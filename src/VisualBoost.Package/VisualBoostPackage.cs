@@ -14,7 +14,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.3.4")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.4.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
@@ -26,6 +26,7 @@ public sealed class VisualBoostPackage : AsyncPackage
 
     private readonly SolutionFileIndexService fileIndex = new();
     private SolutionEvents? solutionEvents;
+    private DocumentEvents? documentEvents;
 
     protected override async Task InitializeAsync(
         CancellationToken cancellationToken,
@@ -41,6 +42,9 @@ public sealed class VisualBoostPackage : AsyncPackage
         solutionEvents.ProjectAdded += OnProjectChanged;
         solutionEvents.ProjectRemoved += OnProjectChanged;
         solutionEvents.ProjectRenamed += OnProjectRenamed;
+        documentEvents = dte.Events.DocumentEvents;
+        documentEvents.DocumentOpened += OnDocumentOpened;
+        fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         StartFileIndex(dte);
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
@@ -60,6 +64,7 @@ public sealed class VisualBoostPackage : AsyncPackage
             });
             fileIndex.Dispose();
             solutionEvents = null;
+            documentEvents = null;
         }
 
         base.Dispose(disposing);
@@ -78,6 +83,16 @@ public sealed class VisualBoostPackage : AsyncPackage
         solutionEvents.ProjectAdded -= OnProjectChanged;
         solutionEvents.ProjectRemoved -= OnProjectChanged;
         solutionEvents.ProjectRenamed -= OnProjectRenamed;
+        if (documentEvents is not null)
+        {
+            documentEvents.DocumentOpened -= OnDocumentOpened;
+        }
+    }
+
+    private void OnDocumentOpened(Document document)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        fileIndex.RecordRecentFile(document.FullName);
     }
 
     private void OnSolutionOpened()

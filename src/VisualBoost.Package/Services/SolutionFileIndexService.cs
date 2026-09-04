@@ -32,6 +32,8 @@ internal sealed class SolutionFileIndexService : IDisposable
     private string? lastError;
     private bool isAnalyzing;
     private string? analysisError;
+    private readonly LinkedList<string> recentFiles = new();
+    private readonly HashSet<string> recentFileSet = new(StringComparer.OrdinalIgnoreCase);
     private bool disposed;
 
     public int Count => index.Count;
@@ -105,8 +107,65 @@ internal sealed class SolutionFileIndexService : IDisposable
     public IReadOnlyList<FileSearchMatch> Search(
         string query,
         int maximumResults,
-        CancellationToken cancellationToken) =>
-        index.Search(query, maximumResults, cancellationToken);
+        string? preferredRoot,
+        CancellationToken cancellationToken)
+    {
+        string[] recentPaths;
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            recentPaths = recentFiles.ToArray();
+        }
+
+        return index.Search(
+            query,
+            new FileSearchRankingContext(preferredRoot, recentPaths),
+            maximumResults,
+            cancellationToken);
+    }
+
+    public void RecordRecentFile(string? path)
+    {
+        if (string.IsNullOrWhiteSpace(path))
+        {
+            return;
+        }
+
+        string normalizedPath;
+        try
+        {
+            normalizedPath = Path.GetFullPath(path!);
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException ||
+            exception is NotSupportedException ||
+            exception is PathTooLongException)
+        {
+            return;
+        }
+
+        lock (gate)
+        {
+            if (disposed)
+            {
+                return;
+            }
+
+            if (recentFileSet.Remove(normalizedPath))
+            {
+                recentFiles.Remove(normalizedPath);
+            }
+
+            recentFiles.AddFirst(normalizedPath);
+            recentFileSet.Add(normalizedPath);
+            while (recentFiles.Count > 20)
+            {
+                var last = recentFiles.Last!.Value;
+                recentFiles.RemoveLast();
+                recentFileSet.Remove(last);
+            }
+        }
+    }
 
     public async Task WaitUntilReadyAsync()
     {
@@ -162,6 +221,8 @@ internal sealed class SolutionFileIndexService : IDisposable
             DisposeWatchersNoLock();
             index.Clear();
             sourceAnalyzer.Clear();
+            recentFiles.Clear();
+            recentFileSet.Clear();
             state = SolutionFileIndexState.Empty;
             lastBuildDuration = TimeSpan.Zero;
             lastError = null;

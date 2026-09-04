@@ -12,6 +12,14 @@ public static class FuzzyFileSearch
         string query,
         IEnumerable<string> paths,
         int maximumResults = 50,
+        CancellationToken cancellationToken = default) =>
+        Search(query, paths, null, maximumResults, cancellationToken);
+
+    public static IReadOnlyList<FileSearchMatch> Search(
+        string query,
+        IEnumerable<string> paths,
+        FileSearchRankingContext? rankingContext,
+        int maximumResults = 50,
         CancellationToken cancellationToken = default)
     {
         if (paths is null)
@@ -49,10 +57,45 @@ public static class FuzzyFileSearch
                 continue;
             }
 
+            score += ScoreRankingContext(path, rankingContext);
+
             InsertMatch(bestMatches, new FileSearchMatch(path, score), maximumResults);
         }
 
         return bestMatches;
+    }
+
+    private static int ScoreRankingContext(string path, FileSearchRankingContext? context)
+    {
+        if (context is null)
+        {
+            return 0;
+        }
+
+        var score = 0;
+        if (IsInside(path, context.PreferredRoot))
+        {
+            score += 120;
+        }
+
+        if (context.TryGetRecentRank(path, out var recentRank))
+        {
+            score += 220 - (recentRank * 10);
+        }
+
+        return score;
+    }
+
+    private static bool IsInside(string path, string? root)
+    {
+        if (string.IsNullOrWhiteSpace(root))
+        {
+            return false;
+        }
+
+        var normalizedPath = NormalizeSeparators(path);
+        var normalizedRoot = NormalizeSeparators(root!).TrimEnd('/');
+        return normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase);
     }
 
     private static int ScorePath(string path, IReadOnlyList<string> tokens)

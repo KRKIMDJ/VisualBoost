@@ -145,6 +145,13 @@ public sealed class FilePathIndex : IDisposable
     public IReadOnlyList<FileSearchMatch> Search(
         string query,
         int maximumResults = 50,
+        CancellationToken cancellationToken = default) =>
+        Search(query, null, maximumResults, cancellationToken);
+
+    public IReadOnlyList<FileSearchMatch> Search(
+        string query,
+        FileSearchRankingContext? rankingContext,
+        int maximumResults = 50,
         CancellationToken cancellationToken = default)
     {
         string[] paths;
@@ -172,7 +179,7 @@ public sealed class FilePathIndex : IDisposable
         }
 
         // 점수 계산 중에는 쓰기 잠금을 유지하지 않아 파일 감시 이벤트 처리를 막지 않습니다.
-        return FuzzyFileSearch.Search(query, paths, maximumResults, cancellationToken);
+        return FuzzyFileSearch.Search(query, paths, rankingContext, maximumResults, cancellationToken);
     }
 
     public void Clear() => ReplaceAll(Array.Empty<string>());

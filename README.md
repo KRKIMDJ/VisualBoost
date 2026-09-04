@@ -6,6 +6,7 @@ VisualBoost는 Visual Studio에서 일반 C++ 프로젝트의 반복적인 탐�
 
 - `Alt+O`: 현재 헤더와 동일한 이름의 구현 파일 또는 현재 구현 파일과 동일한 이름의 헤더로 전환
 - `Shift+Alt+O`: 파일명과 경로를 검색하는 키보드 중심 파일 탐색 창 열기
+- 최근에 연 파일과 현재 프로젝트의 파일을 검색 결과에서 우선 표시
 - Solution 로드 시 언어와 관계없이 프로젝트 파일을 백그라운드 인덱싱
 - 프로젝트 파일과 C++ include 경로 및 감지된 외부 엔진 소스 인덱싱
 - `%LocalAppData%\\VisualBoost\\Cache`의 Solution별 영구 파일 캐시

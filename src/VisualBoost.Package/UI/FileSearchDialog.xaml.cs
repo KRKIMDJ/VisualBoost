@@ -16,11 +16,13 @@ namespace VisualBoost.UI;
 public partial class FileSearchDialog : DialogWindow
 {
     private readonly SolutionFileIndexService fileIndex;
+    private readonly string? preferredRoot;
     private CancellationTokenSource? searchCancellation;
 
-    internal FileSearchDialog(SolutionFileIndexService fileIndex)
+    internal FileSearchDialog(SolutionFileIndexService fileIndex, string? preferredRoot)
     {
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
+        this.preferredRoot = preferredRoot;
         InitializeComponent();
         Loaded += OnLoaded;
         Closed += OnClosed;
@@ -66,7 +68,7 @@ public partial class FileSearchDialog : DialogWindow
         {
             await Task.Delay(80, cancellationToken);
             var matches = await Task.Run(
-                () => fileIndex.Search(query, 100, cancellationToken),
+                () => fileIndex.Search(query, 100, preferredRoot, cancellationToken),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
 
