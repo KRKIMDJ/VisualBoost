@@ -122,23 +122,27 @@ public partial class SymbolUsagesControl : UserControl
                 paths = currentIndex.GetFilePathsSnapshot();
             }
 
-            var matches = await Task.Run(
-                () => currentProvider.FindUsages(
+            var items = await Task.Run(() =>
+            {
+                var matches = currentProvider.FindUsages(
                     currentSymbol,
                     paths,
                     currentProjectFile,
                     selectedScope,
                     MaximumResults,
-                    cancellationToken),
-                cancellationToken);
+                    cancellationToken);
+                // 조회와 표시용 구간 생성도 UI 밖에서 수행하며 같은 이름은 요청당 한 번만 조회합니다.
+                var resolver = new SymbolKindResolver(currentIndex.FindSymbol, cancellationToken);
+                var results = new List<SymbolUsageResultItem>(matches.Count);
+                foreach (var match in matches)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    results.Add(new SymbolUsageResultItem(match, currentProjects, resolver.Resolve));
+                }
+                return results;
+            }, cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
             watch.Stop();
-
-            var items = new List<SymbolUsageResultItem>(matches.Count);
-            foreach (var match in matches)
-            {
-                items.Add(new SymbolUsageResultItem(match, currentProjects));
-            }
 
             ResultsList.ItemsSource = items;
             ResultsList.SelectedIndex = items.Count > 0 ? 0 : -1;
@@ -222,14 +226,15 @@ internal sealed class SymbolUsageResultItem
 {
     public SymbolUsageResultItem(
         SourceUsageLocation location,
-        IReadOnlyList<SolutionProjectInfo> projects)
+        IReadOnlyList<SolutionProjectInfo> projects,
+        Func<string, SourceSymbolKind>? resolveKind = null)
     {
         Location = location;
         FileName = Path.GetFileName(location.Path);
         DirectoryPath = Path.GetDirectoryName(location.Path) ?? string.Empty;
         ProjectName = ProjectNameResolver.Resolve(location.Path, projects);
         Line = location.Line.ToString();
-        CodeSegments = UsageTextSegment.Create(location.LineText, location.Symbol);
+        CodeSegments = UsageTextSegment.Create(location, resolveKind ?? (_ => SourceSymbolKind.Unknown));
         FullPath = location.Path;
     }
 
@@ -250,18 +255,39 @@ internal sealed class SymbolUsageResultItem
 
 internal sealed class UsageTextSegment
 {
-    private UsageTextSegment(string text, bool isMatch)
+    private UsageTextSegment(string text, bool isMatch, SourceSymbolKind kind = SourceSymbolKind.Unknown)
     {
         Text = text;
         IsMatch = isMatch;
+        Kind = kind;
     }
 
     public string Text { get; }
 
     public bool IsMatch { get; }
 
+    public SourceSymbolKind Kind { get; }
+
+    public static IReadOnlyList<UsageTextSegment> Create(SourceUsageLocation location, Func<string, SourceSymbolKind> resolveKind)
+    {
+        if (location.Identifiers.Count == 0) return Create(location.LineText, location.Symbol);
+        var result = new List<UsageTextSegment>();
+        var offset = 0;
+        foreach (var span in location.Identifiers)
+        {
+            if (span.Start < offset || span.Length <= 0 || span.Start > location.LineText.Length - span.Length) continue;
+            if (span.Start > offset) result.Add(new UsageTextSegment(location.LineText.Substring(offset, span.Start - offset), false));
+            var text = location.LineText.Substring(span.Start, span.Length);
+            result.Add(new UsageTextSegment(text, text == location.Symbol, resolveKind(text)));
+            offset = span.Start + span.Length;
+        }
+        if (offset < location.LineText.Length) result.Add(new UsageTextSegment(location.LineText.Substring(offset), false));
+        return result;
+    }
+
     public static IReadOnlyList<UsageTextSegment> Create(string text, string symbol)
     {
+        if (string.IsNullOrEmpty(symbol)) return new[] { new UsageTextSegment(text, false) };
         var segments = new List<UsageTextSegment>();
         var offset = 0;
         while (offset < text.Length)

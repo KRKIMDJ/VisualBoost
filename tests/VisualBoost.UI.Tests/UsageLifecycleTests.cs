@@ -98,6 +98,7 @@ namespace VisualBoost.Services
     internal sealed class SolutionFileIndexService
     {
         public bool Building { get; set; }
+        public IReadOnlyList<SourceSymbolLocation> FindSymbol(string name) => Array.Empty<SourceSymbolLocation>();
         public (SolutionFileIndexState State, int Count) GetSnapshot() =>
             (Building ? SolutionFileIndexState.Building : SolutionFileIndexState.Ready, 0);
         public IReadOnlyList<string> GetFilePathsSnapshot() => Building ? Array.Empty<string>() : new[] { "Sample.cpp" };

@@ -4,6 +4,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Documents;
 using System.Windows.Markup;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
@@ -30,6 +31,8 @@ internal static class Program
             ColorFormatTests.Run();
             PaletteAndMenuTests.Run(root);
             SharedColorTests.Run();
+            NavigationIntegrationTests.Run();
+            SearchHighlightTests.Run();
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
             return 0;
         }
@@ -86,7 +89,7 @@ internal static class Program
         window.Left = -20000;
         window.ShowInTaskbar = false;
         if (element.FindName("EmptyStatePanel") is FrameworkElement empty) empty.Visibility = Visibility.Collapsed;
-        if (element.FindName("SearchBox") is TextBox box) box.Text = "SetMovementMode";
+        if (element.FindName("SearchBox") is TextBox box) box.Text = name == "SymbolSearchDialog" ? "Move" : "SetMovementMode";
         if (element.FindName("SearchPlaceholder") is FrameworkElement placeholder) placeholder.Visibility = Visibility.Collapsed;
         if (element.FindName("SymbolText") is TextBlock symbol) symbol.Text = "SetMovementMode";
         if (element.FindName("StatusText") is TextBlock status) status.Text = "30개 결과 · 준비됨";
@@ -123,16 +126,55 @@ internal static class Program
             list.SelectedIndex = 2;
         }
         Pump();
-        if (name == "SymbolSearchDialog")
+        if (name == "SymbolSearchDialog" || name == "SymbolUsagesControl")
         {
             var symbolItems = Descendants<ListViewItem>(items).ToArray();
-            var unselectedText = Descendants<TextBlock>(symbolItems.First(item => !item.IsSelected)).First(text => text.Text == "SetMovementMode");
-            var selectedText = Descendants<TextBlock>(symbolItems.First(item => item.IsSelected)).First(text => text.Text == "SetMovementMode");
+            var unselectedText = Descendants<TextBlock>(symbolItems.First(item => !item.IsSelected)).First(IsSearchSymbol);
+            var selectedText = Descendants<TextBlock>(symbolItems.First(item => item.IsSelected)).First(IsSearchSymbol);
             Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0xF2, 0xCB, 0x8D), "심볼 팔레트 적용 실패");
             Assert(((SolidColorBrush)selectedText.Foreground).Color == Colors.White, "선택 행 색상 우선순위 실패");
             ColoringSettings.Publish(new ColoringSettings(true, new[] { "", "", "#11AA66", "", "", "", "", "" }));
             Pump();
             Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0x11, 0xAA, 0x66), "열린 창 색상 변경 반영 실패");
+            if (name == "SymbolSearchDialog")
+            {
+                foreach (var block in new[] { unselectedText, selectedText })
+                {
+                    var runs = block.Inlines.OfType<Run>().ToArray();
+                    Assert(string.Concat(runs.Where(run => run.FontWeight == FontWeights.Bold).Select(run => run.Text)) == "Move", "심볼 일치 문자만 굵게 표시");
+                    Assert(string.Concat(runs.Where(run => run.TextDecorations?.Any(d => d.Location == TextDecorationLocation.Underline) == true).Select(run => run.Text)) == "Move", "심볼 일치 문자만 밑줄 표시");
+                    Assert(runs.All(run => ((SolidColorBrush)run.Foreground).Color == ((SolidColorBrush)block.Foreground).Color), "심볼 구간은 팔레트/선택 색상 상속");
+                    Assert(block.TextTrimming == TextTrimming.CharacterEllipsis, "심볼 말줄임 유지");
+                }
+            }
+            if (name == "SymbolUsagesControl")
+            {
+                var row = symbolItems.First(item => !item.IsSelected);
+                var texts = Descendants<TextBlock>(row).ToArray();
+                Assert(texts.First(t => t.Text == "Widget").Foreground is SolidColorBrush typeBrush && typeBrush.Color == Color.FromRgb(0x68, 0xD5, 0xC4), "사용처 타입 색상");
+                Assert(texts.First(t => t.Text == "Movement").Foreground is SolidColorBrush variableBrush && variableBrush.Color == Color.FromRgb(0xB4, 0xD8, 0xFA), "사용처 변수 색상");
+                Assert(texts.First(t => t.Text == "MODE").Foreground is SolidColorBrush macroBrush && macroBrush.Color == Color.FromRgb(0xD2, 0xAA, 0xF5), "사용처 매크로 색상");
+                Assert(unselectedText.FontWeight == FontWeights.Bold, "검색한 식별자 굵게 유지");
+                Assert(unselectedText.TextDecorations.Any(d => d.Location == TextDecorationLocation.Underline), "사용처 검색 심볼 밑줄");
+                Assert(selectedText.TextDecorations.Any(d => d.Location == TextDecorationLocation.Underline), "사용처 선택 행에서도 밑줄 유지");
+                Assert(texts.First(t => t.Text == "Movement").TextDecorations.Count == 0, "다른 식별자에 밑줄을 붙이지 않음");
+                var comment = texts.First(t => t.Text.Contains("// SetMovementMode"));
+                Assert(comment.TextDecorations.Count == 0, "주석의 동일 이름은 밑줄 제외");
+                Assert(comment.FontWeight == FontWeights.Normal && ((SolidColorBrush)comment.Foreground).Color == Color.FromRgb(0xE5, 0xE5, 0xE5), "주석의 동일 이름은 강조하지 않음");
+                ColoringSettings.Publish(new ColoringSettings(false, new string[8]));
+                Pump();
+                Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0xE5, 0xE5, 0xE5), "사용처 색상 비활성화 복원");
+                Assert(((SolidColorBrush)selectedText.Foreground).Color == Colors.White, "사용처 선택 색상 유지");
+                ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
+                var usageControl = (UserControl)element;
+                var originalBackground = usageControl.Background;
+                usageControl.Background = Brushes.White;
+                Pump();
+                Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0x84, 0x51, 0x14), "사용처 밝은 테마 팔레트");
+                usageControl.Background = originalBackground;
+                Pump();
+                Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0xF2, 0xCB, 0x8D), "사용처 어두운 테마 복원");
+            }
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
             Pump();
         }
@@ -155,6 +197,8 @@ internal static class Program
     }
 
     private static void Pump() => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+    private static bool IsSearchSymbol(TextBlock text) => text.Text == "SetMovementMode" ||
+        SearchTextHighlight.GetText(text) == "SetMovementMode";
     private static void Assert(bool condition, string message)
     {
         if (!condition) throw new InvalidOperationException(message);
@@ -174,6 +218,7 @@ internal static class Program
     {
         public Row(int line) { Line = line; }
         public string Name => "SetMovementMode";
+        public string SearchQuery => "Move";
         public SourceSymbolLocation Location => new(Name, FullPath, Line, 1, SourceSymbolKind.Function);
         public string FileName => "CharacterMovementComponent.cpp";
         public string ProjectName => "Engine";
@@ -185,6 +230,12 @@ internal static class Program
         public string IconText => "C++";
         public object[] FileNameSegments => new object[] { new { Text = FileName, IsMatch = true } };
         public object[] PathSegments => new object[] { new { Text = DirectoryPath, IsMatch = false } };
-        public object[] CodeSegments => new object[] { new { Text = "Movement->", IsMatch = false }, new { Text = Name, IsMatch = true }, new { Text = "(MOVE_Walking);", IsMatch = false } };
+        public object CodeSegments => UsageTextSegment.Create(
+            CppIdentifierUsageScanner.Find(Name, FullPath, "Widget Movement; Movement->" + Name + "(MODE); // " + Name)[0],
+            symbol => symbol switch
+            {
+                "Widget" => SourceSymbolKind.Type, "Movement" => SourceSymbolKind.Variable,
+                "MODE" => SourceSymbolKind.Macro, "SetMovementMode" => SourceSymbolKind.Function, _ => SourceSymbolKind.Unknown,
+            });
     }
 }

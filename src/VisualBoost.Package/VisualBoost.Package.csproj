@@ -4,7 +4,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>VisualBoost</RootNamespace>
     <AssemblyName>VisualBoost</AssemblyName>
-    <Version>0.11.0</Version>
+    <Version>0.12.2</Version>
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
     <GeneratePkgDefFile>true</GeneratePkgDefFile>
     <IncludeBuildOutput>true</IncludeBuildOutput>
@@ -25,7 +25,17 @@
 
   <ItemGroup>
     <PackageReference Include="Microsoft.VisualStudio.SDK" Version="17.14.40265" ExcludeAssets="runtime" />
+    <PackageReference Include="Microsoft.VisualStudio.VCCodeModel" Version="17.14.40828" GeneratePathProperty="true" ExcludeAssets="all" PrivateAssets="all" />
     <PackageReference Include="Microsoft.VSSDK.BuildTools" Version="18.9.820" PrivateAssets="all" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- 사용한 공개 COM 계약만 포함해 C++ 구성 요소가 없는 호스트에도 별도 DLL을 요구하지 않습니다. -->
+    <Reference Include="Microsoft.VisualStudio.VCCodeModel">
+      <HintPath>$(PkgMicrosoft_VisualStudio_VCCodeModel)\lib\net472\Microsoft.VisualStudio.VCCodeModel.dll</HintPath>
+      <EmbedInteropTypes>true</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
   </ItemGroup>
 
   <ItemGroup>

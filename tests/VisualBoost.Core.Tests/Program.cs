@@ -54,6 +54,17 @@ internal static class Program
         Run("C++ 사용처 검색은 정확한 식별자 경계를 찾는다", CppUsageSearchMatchesIdentifierBoundaries);
         Run("C++ 사용처 검색은 주석과 문자열을 제외한다", CppUsageSearchIgnoresCommentsAndStrings);
         Run("색상 입력과 테마별 기본 팔레트를 검증한다", SemanticColorsAreValid);
+        Run("함수 선언에서는 정의로 이동한다", FunctionDeclarationNavigatesToDefinition);
+        Run("함수 정의 이름에서만 선언으로 이동한다", FunctionDefinitionNavigatesToDeclaration);
+        Run("함수 본문과 다른 문서는 기본 탐색을 유지한다", FunctionBodyKeepsNativeNavigation);
+        Run("인라인 함수의 겹친 위치는 기본 탐색을 유지한다", InlineFunctionKeepsNativeNavigation);
+        Run("불완전한 함수 위치는 기본 탐색을 유지한다", MissingFunctionLocationKeepsNativeNavigation);
+        Run("이름 밖까지 선택하면 기본 탐색을 유지한다", WideFunctionSelectionKeepsNativeNavigation);
+        Run("같은 파일의 선언과 정의를 라인으로 구분한다", SameFileFunctionLocationsAreDistinct);
+        Run("경로 대소문자와 구분자에 관계없이 정의를 판별한다", FunctionLocationNormalizesPathComparison);
+        Run("사용처 표시 식별자는 들여쓰기·주석·문자열과 결과 제한을 처리한다", UsageIdentifiersPreserveRanges);
+        Run("사용처 표시에서 여러 줄 raw 문자열과 블록 주석을 제외한다", UsageIdentifiersIgnoreMultilineLiterals);
+        Run("사용처 분류는 대소문자·충돌·요청별 캐시와 취소를 처리한다", UsageKindsAreConservativeAndCached);
 
         Console.WriteLine(failures == 0
             ? "모든 VisualBoost.Core 테스트가 통과했습니다."
@@ -657,7 +668,128 @@ internal static class Program
         Equal(false, SemanticColorPalette.IsDark(255, 255, 255));
     }
 
+    private static readonly FunctionNameRange Declaration = new("C:/Sample/Widget.h", 5, 10, 16);
+    private static readonly FunctionNameRange Definition = new("C:/Sample/Widget.cpp", 20, 15, 21);
+
+    private static void FunctionDeclarationNavigatesToDefinition() =>
+        Equal(SymbolNavigationDirection.Definition,
+            FunctionNavigationPolicy.SelectDirection(Declaration.Path, 5, 12, 12, Declaration, Definition));
+
+    private static void FunctionDefinitionNavigatesToDeclaration()
+    {
+        foreach (var column in new[] { 15, 18, 21 })
+            Equal(SymbolNavigationDirection.Declaration,
+                FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, column, column, Declaration, Definition));
+        Equal(SymbolNavigationDirection.Declaration,
+            FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, 15, 21, Declaration, Definition));
+    }
+
+    private static void FunctionBodyKeepsNativeNavigation()
+    {
+        foreach (var (path, line, column) in new[] { (Definition.Path, 21, 18), (Definition.Path, 20, 30),
+            (Definition.Path, 20, 14), ("C:/Other/Widget.cpp", 20, 18) })
+            Equal(SymbolNavigationDirection.Definition,
+                FunctionNavigationPolicy.SelectDirection(path, line, column, column, Declaration, Definition));
+    }
+
+    private static void InlineFunctionKeepsNativeNavigation() =>
+        Equal(SymbolNavigationDirection.Definition,
+            FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, 18, 18, Definition, Definition));
+
+    private static void MissingFunctionLocationKeepsNativeNavigation()
+    {
+        foreach (var missing in new FunctionNameRange?[] { null, new("", 5, 10, 16), new(Declaration.Path, 0, 10, 16),
+            new(Declaration.Path, 5, 0, 16), new(Declaration.Path, 5, 16, 16), new(Declaration.Path, 5, 17, 16) })
+        {
+            Equal(SymbolNavigationDirection.Definition,
+                FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, 18, 18, missing, Definition));
+            Equal(SymbolNavigationDirection.Definition,
+                FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, 18, 18, Declaration, missing));
+        }
+        Equal(SymbolNavigationDirection.Definition,
+            FunctionNavigationPolicy.SelectDirection(null, 20, 18, 18, Declaration, Definition));
+    }
+
+    private static void WideFunctionSelectionKeepsNativeNavigation()
+    {
+        foreach (var (start, end) in new[] { (14, 21), (15, 22), (21, 15), (0, 20) })
+            Equal(SymbolNavigationDirection.Definition,
+                FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, start, end, Declaration, Definition));
+    }
+
+    private static void SameFileFunctionLocationsAreDistinct()
+    {
+        var declaration = new FunctionNameRange(Definition.Path, 5, 15, 21);
+        Equal(SymbolNavigationDirection.Declaration,
+            FunctionNavigationPolicy.SelectDirection(Definition.Path, 20, 18, 18, declaration, Definition));
+        Equal(SymbolNavigationDirection.Definition,
+            FunctionNavigationPolicy.SelectDirection(Definition.Path, 5, 18, 18, declaration, Definition));
+    }
+
+    private static void FunctionLocationNormalizesPathComparison() =>
+        Equal(SymbolNavigationDirection.Declaration,
+            FunctionNavigationPolicy.SelectDirection(@"c:\SAMPLE\WIDGET.CPP", 20, 18, 18, Declaration, Definition));
+
     private static FilePairResolver Resolver() => new();
+
+    private static void UsageIdentifiersPreserveRanges()
+    {
+        const string source = "  Widget item; item.Run(MODE); Run(); /* Run */ \"Run\"; // Run";
+        var results = CppIdentifierUsageScanner.Find("Run", "Sample.cpp", source, 1);
+        Equal(1, results.Count);
+        var result = results[0];
+        Equal(source.IndexOf("Run", StringComparison.Ordinal) + 1, result.Column);
+        Equal(source.Trim(), result.LineText);
+        Equal("Widget,item,item,Run,MODE,Run", string.Join(",", result.Identifiers.Select(s => result.LineText.Substring(s.Start, s.Length))));
+    }
+
+    private static void UsageIdentifiersIgnoreMultilineLiterals()
+    {
+        const string source = """"
+            /* Run
+            Run */ Widget item; item.Run();
+            auto text = u8R"tag(Run "
+            Run)tag"; item.Run();
+            auto continued = "Run \
+            Run"; item.Run();
+            """";
+        var results = CppIdentifierUsageScanner.Find("Run", "Sample.cpp", source);
+        Equal("2,4,6", string.Join(",", results.Select(r => r.Line)));
+        foreach (var result in results)
+        {
+            var identifiers = result.Identifiers.Select(s => result.LineText.Substring(s.Start, s.Length)).ToArray();
+            Equal(1, identifiers.Count(name => name == "Run"));
+            Equal(true, identifiers.Contains("item"));
+        }
+    }
+
+    private static void UsageKindsAreConservativeAndCached()
+    {
+        var queries = 0;
+        var resolver = new SymbolKindResolver(name =>
+        {
+            queries++;
+            return name switch
+            {
+                "Run" => new[] { Symbol("Run", SourceSymbolKind.Function), Symbol("Run", SourceSymbolKind.Function) },
+                "run" => new[] { Symbol("Run", SourceSymbolKind.Function) },
+                "Mixed" => new[] { Symbol("Mixed", SourceSymbolKind.Type), Symbol("Mixed", SourceSymbolKind.Variable) },
+                _ => Array.Empty<SourceSymbolLocation>(),
+            };
+        });
+        for (var i = 0; i < 100; i++) Equal(SourceSymbolKind.Function, resolver.Resolve("Run"));
+        Equal(1, queries);
+        Equal(SourceSymbolKind.Unknown, resolver.Resolve("run"));
+        Equal(SourceSymbolKind.Unknown, resolver.Resolve("Mixed"));
+        Equal(SourceSymbolKind.Unknown, resolver.Resolve("Absent"));
+        using var cancellation = new CancellationTokenSource();
+        var cancelled = new SymbolKindResolver(_ => Array.Empty<SourceSymbolLocation>(), cancellation.Token);
+        cancelled.Resolve("Cached");
+        cancellation.Cancel();
+        Throws<OperationCanceledException>(() => cancelled.Resolve("Cached"));
+
+        static SourceSymbolLocation Symbol(string name, SourceSymbolKind kind) => new(name, "Sample.h", 1, 1, kind);
+    }
 
     private static string Root() => Path.Combine(Path.GetTempPath(), "VisualBoostTests");
 

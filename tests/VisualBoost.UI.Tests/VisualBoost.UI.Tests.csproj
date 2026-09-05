@@ -6,6 +6,11 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/UI/SearchTextHighlight.cs" Link="SearchTextHighlight.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/FileSearchTextSegment.cs" Link="FileSearchTextSegment.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/CppNavigationDirectionReader.cs" Link="CppNavigationDirectionReader.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/ISymbolNavigationProvider.cs" Link="ISymbolNavigationProvider.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/VisualStudioSymbolNavigationProvider.cs" Link="VisualStudioSymbolNavigationProvider.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/ColoringColorSource.cs" Link="ColoringColorSource.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/SemanticFormatNames.cs" Link="SemanticFormatNames.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/SharedColorPalette.cs" Link="SharedColorPalette.cs" />

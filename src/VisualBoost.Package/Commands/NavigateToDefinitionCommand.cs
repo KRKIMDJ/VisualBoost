@@ -37,7 +37,7 @@ internal sealed class NavigateToDefinitionCommand
     private void Execute(object sender, EventArgs eventArgs)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        package.JoinableTaskFactory.RunAsync(ExecuteAsync).FileAndForget("VisualBoost/NavigateToDefinition");
+        SearchCommandRunner.Run(package, "NavigateToDefinition", ExecuteAsync);
     }
 
     private async Task ExecuteAsync()
@@ -47,7 +47,7 @@ internal sealed class NavigateToDefinitionCommand
         Assumes.Present(dte);
         var activeFile = dte.ActiveDocument?.FullName;
         var uiShell = await package.GetServiceAsync(typeof(SVsUIShell)) as IVsUIShell;
-        if (!provider.CanHandle(activeFile) || uiShell is null || !provider.TryNavigateToDefinition(uiShell))
+        if (!provider.CanHandle(activeFile) || uiShell is null || !provider.TryNavigateToDefinition(dte, uiShell))
         {
             var statusBar = await package.GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
             statusBar?.SetText("현재 커서 위치에서 선언 또는 정의를 찾지 못했습니다.");

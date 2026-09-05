@@ -112,7 +112,7 @@ public partial class SymbolSearchDialog : DialogWindow
                 () => fileIndex.SearchSymbols(query, 200, cancellationToken),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            var items = matches.Select(match => new SymbolSearchResultItem(match, projects)).ToArray();
+            var items = matches.Select(match => new SymbolSearchResultItem(match, projects, query)).ToArray();
             ResultsList.ItemsSource = items;
             ResultsList.SelectedIndex = items.Length > 0 ? 0 : -1;
             EmptyStatePanel.Visibility = items.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -275,9 +275,11 @@ internal sealed class SymbolSearchResultItem
 {
     public SymbolSearchResultItem(
         SourceSymbolMatch match,
-        IReadOnlyList<SolutionProjectInfo> projects)
+        IReadOnlyList<SolutionProjectInfo> projects,
+        string query)
     {
         Location = match.Location;
+        SearchQuery = query;
         Name = Location.Name;
         Kind = GetKindText(Location.Kind);
         FileName = Path.GetFileName(Location.Path);
@@ -289,6 +291,8 @@ internal sealed class SymbolSearchResultItem
     public SourceSymbolLocation Location { get; }
 
     public string Name { get; }
+
+    public string SearchQuery { get; }
 
     public string Kind { get; }
 

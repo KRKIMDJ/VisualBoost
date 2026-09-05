@@ -146,8 +146,9 @@
             <GridViewColumn Header="심볼" Width="460">
               <GridViewColumn.CellTemplate>
                 <DataTemplate>
-                  <TextBlock Margin="6,0" VerticalAlignment="Center" FontWeight="SemiBold"
-                             Text="{Binding Name}" TextTrimming="CharacterEllipsis"
+                  <TextBlock Margin="6,0" VerticalAlignment="Center" FontWeight="Normal"
+                             ui:SearchTextHighlight.Text="{Binding Name}"
+                             ui:SearchTextHighlight.Query="{Binding SearchQuery}" TextTrimming="CharacterEllipsis"
                              ToolTip="{Binding Name}">
                     <TextBlock.Foreground>
                       <MultiBinding Converter="{StaticResource SymbolColorConverter}">
