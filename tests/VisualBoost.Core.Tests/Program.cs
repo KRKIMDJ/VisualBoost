@@ -30,6 +30,9 @@ internal static class Program
         Run("정확한 파일명 일치를 우선한다", ExactFileNameWinsFuzzySearch);
         Run("경로 구분자를 포함한 검색을 지원한다", PathSegmentsParticipateInFuzzySearch);
         Run("띄어쓴 검색어를 모두 만족해야 한다", MultipleSearchTokensMustMatch);
+        Run("AND 검색어가 모두 파일명에 포함된 후보를 먼저 표시한다", FileNameContainsAllTokensWins);
+        Run("최근 파일과 현재 프로젝트도 파일명 일치 등급을 뒤집지 않는다", FileNameQualityBeatsContext);
+        Run("파일명 포함·파일명 퍼지·경로 일치 순서를 결과 제한 전에 적용한다", FileNameQualityOrdersBeforeLimit);
         Run("퍼지 검색 결과 수를 제한한다", FuzzySearchLimitsResults);
         Run("대규모 인덱스에서 퍼지 검색 결과를 결정적으로 정렬한다", LargeFuzzySearchIsDeterministic);
         Run("파일 변경 후 퍼지 검색 스냅샷을 갱신한다", FuzzySearchSnapshotTracksChanges);
@@ -259,6 +262,45 @@ internal static class Program
 
         Equal(7, FuzzyFileSearch.Search("widget", paths, 7).Count);
         Equal(0, FuzzyFileSearch.Search("widget", paths, 0).Count);
+    }
+
+    private static void FileNameContainsAllTokensWins()
+    {
+        var expected = Path.Combine(Root(), "Private", "Rendering", "ToonRenderingSettings.cpp");
+        var pathOnly = Path.Combine(Root(), "Toon", "Settings.cpp");
+        foreach (var query in new[] { "Toon Settings .cpp", ".cpp Settings Toon", "toon SETTINGS .CPP" })
+        {
+            var matches = FuzzyFileSearch.Search(query, new[] { pathOnly, expected });
+            Equal(2, matches.Count);
+            Equal(expected, matches[0].Path);
+            Equal(pathOnly, matches[1].Path);
+        }
+    }
+
+    private static void FileNameQualityBeatsContext()
+    {
+        var expected = Path.Combine(Root(), "External", "ToonRenderingSettings.cpp");
+        var preferredRoot = Path.Combine(Root(), "Toon");
+        var recent = Path.Combine(preferredRoot, "Settings.cpp");
+        var context = new FileSearchRankingContext(preferredRoot, new[] { recent });
+        Equal(expected, FuzzyFileSearch.Search("Toon Settings .cpp", new[] { recent, expected }, context)[0].Path);
+    }
+
+    private static void FileNameQualityOrdersBeforeLimit()
+    {
+        var literal = Path.Combine(Root(), "Deep", "ToonRenderingSettings.cpp");
+        var fuzzy = Path.Combine(Root(), "T_o_o_nSettings.cpp");
+        var pathOnly = Path.Combine(Root(), "Toon", "Settings.cpp");
+        var paths = new[] { pathOnly, fuzzy, literal };
+        var matches = FuzzyFileSearch.Search("Toon Settings .cpp", paths);
+        Equal(3, matches.Count);
+        Equal(literal, matches[0].Path);
+        Equal(fuzzy, matches[1].Path);
+        Equal(pathOnly, matches[2].Path);
+        using var index = new FilePathIndex();
+        index.ReplaceAll(paths);
+        Equal(literal, index.Search("Toon Settings .cpp", 1)[0].Path);
+        Equal(literal, FuzzyFileSearch.Search("Toon Settings .cpp", paths.Reverse(), 1)[0].Path);
     }
 
     private static void LargeFuzzySearchIsDeterministic()

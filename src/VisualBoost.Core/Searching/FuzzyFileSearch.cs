@@ -51,7 +51,7 @@ public static class FuzzyFileSearch
                 continue;
             }
 
-            var score = ScorePath(path, tokens);
+            var score = ScorePath(path, tokens, out var nameMatchQuality);
             if (score < 0)
             {
                 continue;
@@ -59,7 +59,7 @@ public static class FuzzyFileSearch
 
             score += ScoreRankingContext(path, rankingContext);
 
-            InsertMatch(bestMatches, new FileSearchMatch(path, score), maximumResults);
+            InsertMatch(bestMatches, new FileSearchMatch(path, score, nameMatchQuality), maximumResults);
         }
 
         return bestMatches;
@@ -98,17 +98,26 @@ public static class FuzzyFileSearch
         return normalizedPath.StartsWith(normalizedRoot + "/", StringComparison.OrdinalIgnoreCase);
     }
 
-    private static int ScorePath(string path, IReadOnlyList<string> tokens)
+    private static int ScorePath(string path, IReadOnlyList<string> tokens, out FileNameMatchQuality nameMatchQuality)
     {
         var candidate = NormalizeSeparators(path);
         var fileNameOffset = candidate.LastIndexOf('/') + 1;
         var fileName = candidate.Substring(fileNameOffset);
         var stem = Path.GetFileNameWithoutExtension(fileName);
         var score = 0;
+        nameMatchQuality = FileNameMatchQuality.ContainsAllTokens;
 
         foreach (var token in tokens)
         {
-            var tokenScore = ScoreToken(candidate, token, fileNameOffset);
+            // 파일명에서 만족한 조건은 디렉터리의 앞선 문자에 빼앗기지 않게 별도로 채점합니다.
+            var fileNameScore = ScoreToken(fileName, token, 0);
+            if (fileNameScore < 0)
+                nameMatchQuality = FileNameMatchQuality.PathOnly;
+            else if (nameMatchQuality == FileNameMatchQuality.ContainsAllTokens &&
+                     fileName.IndexOf(token, StringComparison.OrdinalIgnoreCase) < 0)
+                nameMatchQuality = FileNameMatchQuality.Fuzzy;
+
+            var tokenScore = fileNameScore >= 0 ? fileNameScore : ScoreToken(candidate, token, fileNameOffset);
             if (tokenScore < 0)
             {
                 return -1;
@@ -130,7 +139,8 @@ public static class FuzzyFileSearch
         }
 
         // 점수가 같으면 짧고 직접적인 경로가 앞서도록 작은 길이 페널티를 적용합니다.
-        return score - Math.Min(candidate.Length, 200);
+        // 일치 여부는 위에서 판정했으므로 긴 경로의 길이 감점으로 결과를 제거하지 않습니다.
+        return Math.Max(0, score - Math.Min(candidate.Length, 200));
     }
 
     private static int ScoreToken(string candidate, string token, int fileNameOffset)
@@ -248,6 +258,11 @@ public static class FuzzyFileSearch
 
     private static int Compare(FileSearchMatch left, FileSearchMatch right)
     {
+        // 결과 수를 제한하기 전에 등급을 비교합니다. 최근 파일/프로젝트 점수로
+        // 모든 단어가 파일명에 포함된 후보가 경로 일치 후보 뒤로 밀리지 않습니다.
+        var qualityComparison = right.NameMatchQuality.CompareTo(left.NameMatchQuality);
+        if (qualityComparison != 0) return qualityComparison;
+
         var scoreComparison = right.Score.CompareTo(left.Score);
         if (scoreComparison != 0)
         {
