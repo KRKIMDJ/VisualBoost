@@ -23,6 +23,7 @@ internal static class Program
     {
         try
         {
+            if (args.Length == 2 && args[0] == "--symbols") return SymbolSearchBenchmark.Run(args[1]);
             var options = Options.Parse(args);
             var sourceRoot = Path.GetFullPath(options.SourceRoot);
             var outputPath = Path.GetFullPath(options.OutputPath);

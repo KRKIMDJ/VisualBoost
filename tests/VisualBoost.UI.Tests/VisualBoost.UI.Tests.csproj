@@ -1,0 +1,14 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net10.0-windows</TargetFramework>
+    <UseWPF>true</UseWPF>
+  </PropertyGroup>
+  <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/UI/FittedResultsList.cs" Link="FittedResultsList.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/SymbolUsagesControl.xaml.cs" Link="SymbolUsagesControl.xaml.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/ISymbolUsageProvider.cs" Link="ISymbolUsageProvider.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/SymbolUsageScope.cs" Link="SymbolUsageScope.cs" />
+    <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
+  </ItemGroup>
+</Project>

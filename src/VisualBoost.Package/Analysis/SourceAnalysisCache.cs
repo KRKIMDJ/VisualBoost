@@ -12,7 +12,7 @@ namespace VisualBoost.Analysis;
 internal sealed class SourceAnalysisCache
 {
     private const string Magic = "VisualBoost.SourceAnalysis";
-    private const int Version = 1;
+    private const int Version = 2;
     private const int MaximumFiles = 1_000_000;
     private const int MaximumItemsPerFile = 100_000;
     private readonly string directory = Path.Combine(

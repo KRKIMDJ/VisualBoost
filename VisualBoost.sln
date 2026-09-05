@@ -10,12 +10,18 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VisualBoost.Core.Tests", "t
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VisualBoost.PerformanceTests", "tests\VisualBoost.PerformanceTests\VisualBoost.PerformanceTests.csproj", "{F5C8AF8D-84D0-4EA3-90E0-563E24788486}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "VisualBoost.UI.Tests", "tests\VisualBoost.UI.Tests\VisualBoost.UI.Tests.csproj", "{8833B5C2-1377-407B-9B97-118AC25FE677}"
+EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution
 		Debug|Any CPU = Debug|Any CPU
 		Release|Any CPU = Release|Any CPU
 	EndGlobalSection
 	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{8833B5C2-1377-407B-9B97-118AC25FE677}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{8833B5C2-1377-407B-9B97-118AC25FE677}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{8833B5C2-1377-407B-9B97-118AC25FE677}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{8833B5C2-1377-407B-9B97-118AC25FE677}.Release|Any CPU.Build.0 = Release|Any CPU
 		{E415C0D7-DB75-4E76-9B03-1D9A4B47D287}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
 		{E415C0D7-DB75-4E76-9B03-1D9A4B47D287}.Debug|Any CPU.Build.0 = Debug|Any CPU
 		{E415C0D7-DB75-4E76-9B03-1D9A4B47D287}.Release|Any CPU.ActiveCfg = Release|Any CPU

@@ -6,6 +6,7 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using VisualBoost.Core.Analysis;
+using VisualBoost.Core.Searching;
 
 namespace VisualBoost.Analysis;
 
@@ -104,7 +105,21 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         return externalFiles.ToArray();
     }
 
+    public void LoadCachedSymbols(string solutionPath, CancellationToken cancellationToken)
+    {
+        cancellationToken.ThrowIfCancellationRequested();
+        var cached = cache.Load(solutionPath);
+        cancellationToken.ThrowIfCancellationRequested();
+        symbols.ReplaceAll(cached.Values.SelectMany(entry => entry.Analysis.Symbols));
+    }
+
     public IReadOnlyList<SourceSymbolLocation> FindSymbol(string name) => symbols.Find(name);
+
+    public IReadOnlyList<SourceSymbolMatch> SearchSymbols(
+        string query,
+        int maximumResults,
+        CancellationToken cancellationToken) =>
+        symbols.Search(query, maximumResults, cancellationToken);
 
     public void Clear()
     {

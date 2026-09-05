@@ -35,6 +35,8 @@ public partial class FileSearchDialog : DialogWindow
     private FileSearchScope scope;
     private int displayedResultCount;
     private bool isSearching;
+    private bool isClosed;
+    private int observedFileCount = -1;
     private string? statusNotice;
     private DateTime statusNoticeUntil;
 
@@ -92,10 +94,10 @@ public partial class FileSearchDialog : DialogWindow
 
     private void OnClosed(object? sender, EventArgs eventArgs)
     {
+        isClosed = true;
         statusTimer.Stop();
         statusTimer.Tick -= OnStatusTimerTick;
         searchCancellation?.Cancel();
-        searchCancellation?.Dispose();
         searchCancellation = null;
         SaveWindowPlacement();
     }
@@ -106,6 +108,7 @@ public partial class FileSearchDialog : DialogWindow
         Justification = "WPF 이벤트 시그니처이며 검색 취소와 예외를 메서드 내부에서 처리합니다.")]
     private async void OnSearchTextChanged(object sender, TextChangedEventArgs eventArgs)
     {
+        if (!IsLoaded || isClosed) return;
         UpdateSearchControls();
         await RefreshResultsAsync(useDebounce: true);
     }
@@ -144,11 +147,11 @@ public partial class FileSearchDialog : DialogWindow
 
     private async Task RefreshResultsAsync(bool useDebounce)
     {
+        if (isClosed) return;
         var previousCancellation = searchCancellation;
         var currentCancellation = new CancellationTokenSource();
         searchCancellation = currentCancellation;
         previousCancellation?.Cancel();
-        previousCancellation?.Dispose();
 
         var query = SearchBox.Text;
         var selectedScope = scope;
@@ -166,6 +169,10 @@ public partial class FileSearchDialog : DialogWindow
                 await Task.Delay(inputDelay, cancellationToken);
             }
 
+            if (fileIndex.GetSnapshot().FileCount == 0 && fileIndex.GetSnapshot().State == SolutionFileIndexState.Building)
+                await fileIndex.WaitUntilReadyAsync(cancellationToken);
+            cancellationToken.ThrowIfCancellationRequested();
+            observedFileCount = fileIndex.GetSnapshot().FileCount;
             var maximumResults = options.GetMaximumResults();
             var showSuggestions = options.ShowSuggestionsForEmptyQuery;
             var matches = await Task.Run(
@@ -195,6 +202,7 @@ public partial class FileSearchDialog : DialogWindow
         }
         catch (Exception exception)
         {
+            if (!ReferenceEquals(searchCancellation, currentCancellation)) return;
             ResultsList.ItemsSource = null;
             displayedResultCount = 0;
             EmptyStatePanel.Visibility = Visibility.Visible;
@@ -208,10 +216,20 @@ public partial class FileSearchDialog : DialogWindow
                 isSearching = false;
                 UpdateStatus();
             }
+            if (ReferenceEquals(searchCancellation, currentCancellation)) searchCancellation = null;
+            currentCancellation.Dispose();
         }
     }
 
-    private void OnStatusTimerTick(object? sender, EventArgs eventArgs) => UpdateStatus();
+    [SuppressMessage("Usage", "VSTHRD100:Avoid async void methods",
+        Justification = "타이머 이벤트이며 검색 예외는 갱신 메서드에서 처리합니다.")]
+    private async void OnStatusTimerTick(object? sender, EventArgs eventArgs)
+    {
+        if (isClosed) return;
+        UpdateStatus();
+        if (!isSearching && candidatePaths is null && observedFileCount != fileIndex.GetSnapshot().FileCount)
+            await RefreshResultsAsync(useDebounce: false);
+    }
 
     private void UpdateStatus()
     {
@@ -418,7 +436,11 @@ public partial class FileSearchDialog : DialogWindow
         }
     }
 
-    private void OnResultDoubleClick(object sender, MouseButtonEventArgs eventArgs) => AcceptSelection();
+    private void OnResultDoubleClick(object sender, MouseButtonEventArgs eventArgs)
+    {
+        if (ItemsControl.ContainerFromElement(ResultsList, eventArgs.OriginalSource as DependencyObject) is ListBoxItem)
+            AcceptSelection();
+    }
 
     private void OnCancelSearchClick(object sender, RoutedEventArgs eventArgs) => CancelActiveSearch();
 

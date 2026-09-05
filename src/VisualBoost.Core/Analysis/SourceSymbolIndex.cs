@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Linq;
 using System.Threading;
+using VisualBoost.Core.Searching;
 
 namespace VisualBoost.Core.Analysis;
 
@@ -10,6 +11,7 @@ public sealed class SourceSymbolIndex : IDisposable
     private readonly ReaderWriterLockSlim gate = new();
     private Dictionary<string, SourceSymbolLocation[]> locationsByName =
         new(StringComparer.OrdinalIgnoreCase);
+    private SymbolSearchSnapshot searchSnapshot = new(Array.Empty<SourceSymbolLocation>());
 
     public int Count { get; private set; }
 
@@ -31,11 +33,13 @@ public sealed class SourceSymbolIndex : IDisposable
                     .ToArray(),
                 StringComparer.OrdinalIgnoreCase);
         var count = replacement.Values.Sum(items => items.Length);
+        var snapshot = new SymbolSearchSnapshot(replacement.Values.SelectMany(items => items));
 
         gate.EnterWriteLock();
         try
         {
             locationsByName = replacement;
+            searchSnapshot = snapshot;
             Count = count;
         }
         finally
@@ -62,6 +66,26 @@ public sealed class SourceSymbolIndex : IDisposable
         {
             gate.ExitReadLock();
         }
+    }
+
+    public IReadOnlyList<SourceSymbolMatch> Search(
+        string query,
+        int maximumResults = 100,
+        CancellationToken cancellationToken = default)
+    {
+        SymbolSearchSnapshot snapshot;
+        gate.EnterReadLock();
+        try
+        {
+            snapshot = searchSnapshot;
+        }
+        finally
+        {
+            gate.ExitReadLock();
+        }
+
+        // 스냅샷은 교체 후 변경되지 않으므로 검색 중 쓰기 잠금을 유지할 필요가 없습니다.
+        return snapshot.Search(query, maximumResults, cancellationToken);
     }
 
     public void Dispose() => gate.Dispose();

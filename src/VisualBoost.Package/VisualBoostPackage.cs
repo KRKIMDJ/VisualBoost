@@ -14,9 +14,14 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.8.0")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.9.5")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
+[ProvideToolWindow(
+    typeof(UI.SymbolUsagesToolWindow),
+    Style = VsDockStyle.Tabbed,
+    Window = EnvDTE.Constants.vsWindowKindOutput,
+    DockedHeight = 320)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideProfile(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideOptionPage(typeof(FileSearchOptionsPage), "VisualBoost", "파일 탐색", 0, 0, true)]
@@ -56,6 +61,9 @@ public sealed class VisualBoostPackage : AsyncPackage
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
         await ShowIndexStatusCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenFileSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await OpenSymbolSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await NavigateToDefinitionCommand.InitializeAsync(this, cancellationToken);
+        await FindSymbolUsagesCommand.InitializeAsync(this, fileIndex, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)

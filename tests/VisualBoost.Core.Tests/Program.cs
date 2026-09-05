@@ -41,7 +41,17 @@ internal static class Program
         Run("외부 소스 검색 범위는 Solution 바깥만 포함한다", ExternalScopeExcludesSolutionFiles);
         Run("C++ include와 주요 심볼 위치를 추출한다", CppSourceAnalysisFindsIncludesAndSymbols);
         Run("주석 속 심볼은 분석에서 제외한다", CppSourceAnalysisIgnoresComments);
+        Run("함수 호출은 심볼 선언에서 제외한다", CppSourceAnalysisIgnoresFunctionCalls);
+        Run("클래스 전방 선언은 타입 정의에서 제외한다", CppSourceAnalysisIgnoresForwardDeclarations);
         Run("심볼 인덱스는 이름별 위치를 반환한다", SourceSymbolIndexFindsLocations);
+        Run("심볼 검색은 정확한 이름을 우선한다", ExactSymbolNameWinsSearch);
+        Run("심볼 검색은 파일 경로를 검색하지 않는다", SymbolSearchIgnoresFilePaths);
+        Run("심볼 검색은 결과 수와 취소를 적용한다", SymbolSearchLimitsResultsAndCancels);
+        Run("최적화된 심볼 검색의 점수와 순서가 기존 검색과 일치한다", SymbolSnapshotMatchesBaseline);
+        Run("심볼 스냅샷 교체와 취소를 반영한다", SymbolSnapshotReplacesAndCancels);
+        Run("실행 프로젝트의 외부 연결 파일을 포함하고 다른 프로젝트는 제외한다", SourceProjectMembershipIsExact);
+        Run("C++ 사용처 검색은 정확한 식별자 경계를 찾는다", CppUsageSearchMatchesIdentifierBoundaries);
+        Run("C++ 사용처 검색은 주석과 문자열을 제외한다", CppUsageSearchIgnoresCommentsAndStrings);
 
         Console.WriteLine(failures == 0
             ? "모든 VisualBoost.Core 테스트가 통과했습니다."
@@ -434,6 +444,48 @@ internal static class Program
         Equal("VisibleType", analysis.Symbols[0].Name);
     }
 
+    private static void CppSourceAnalysisIgnoresFunctionCalls()
+    {
+        const string source = """
+            class Widget {};
+            Widget CreateWidget();
+            void BuildWidget() {
+            CreateWidget();
+            Widget();
+            object.CreateWidget();
+            auto value = CreateWidget();
+            return CreateWidget();
+            """;
+
+        var analysis = CppSourceAnalyzer.Analyze("Widget.cpp", source);
+        var functions = analysis.Symbols
+            .Where(symbol => symbol.Kind == SourceSymbolKind.Function)
+            .Select(symbol => symbol.Name)
+            .ToArray();
+
+        Equal(2, functions.Length);
+        Equal("CreateWidget", functions[0]);
+        Equal("BuildWidget", functions[1]);
+    }
+
+    private static void CppSourceAnalysisIgnoresForwardDeclarations()
+    {
+        const string source = """
+            class ForwardOnly;
+            class DefinedType final
+            {
+            };
+            class PROJECT_API ExportedType {};
+            """;
+
+        var analysis = CppSourceAnalyzer.Analyze("Types.h", source);
+        var types = analysis.Symbols.Where(symbol => symbol.Kind == SourceSymbolKind.Type).ToArray();
+
+        Equal(2, types.Length);
+        Equal("DefinedType", types[0].Name);
+        Equal("ExportedType", types[1].Name);
+    }
+
     private static void SourceSymbolIndexFindsLocations()
     {
         using var index = new SourceSymbolIndex();
@@ -446,6 +498,146 @@ internal static class Program
         Equal(2, index.Count);
         Equal("A.cpp", index.Find("widget")[0].Path);
         Equal(0, index.Find("missing").Count);
+    }
+
+    private static void ExactSymbolNameWinsSearch()
+    {
+        var symbols = new[]
+        {
+            new SourceSymbolLocation("WidgetFactory", "Factory.cpp", 2, 1, SourceSymbolKind.Type),
+            new SourceSymbolLocation("Widget", "Widget.h", 5, 7, SourceSymbolKind.Type),
+            new SourceSymbolLocation("CreateWidget", "Widget.cpp", 9, 3, SourceSymbolKind.Function),
+        };
+
+        var matches = FuzzySymbolSearch.Search("Widget", symbols);
+
+        Equal("Widget", matches[0].Location.Name);
+    }
+
+    private static void SymbolSearchLimitsResultsAndCancels()
+    {
+        var symbols = Enumerable.Range(0, 100)
+            .Select(index => new SourceSymbolLocation(
+                $"Widget{index}",
+                $"Widget{index}.cpp",
+                index + 1,
+                1,
+                SourceSymbolKind.Function))
+            .ToArray();
+
+        Equal(7, FuzzySymbolSearch.Search("Widget", symbols, 7).Count);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Throws<OperationCanceledException>(() =>
+            FuzzySymbolSearch.Search("Widget", symbols, cancellationToken: cancellation.Token));
+    }
+
+    private static void SymbolSearchIgnoresFilePaths()
+    {
+        var symbols = new[]
+        {
+            new SourceSymbolLocation("BuildWidget", "Runtime/Character/Pawn.cpp", 8, 1, SourceSymbolKind.Function),
+        };
+
+        Equal(0, FuzzySymbolSearch.Search("Character", symbols).Count);
+        Equal(1, FuzzySymbolSearch.Search("BuildWidget", symbols).Count);
+    }
+
+    private static void SymbolSnapshotMatchesBaseline()
+    {
+        var names = new[] { "SetMovementMode", "setMovementMode", "SMMode", "GetWorld", "Set_Mode", "État", "상태", "I", "ı" };
+        var symbols = Enumerable.Range(0, 3000).Select(i => new SourceSymbolLocation(
+            names[i % names.Length] + (i % 3 == 0 ? (i % 100).ToString() : ""),
+            $"Folder{i % 7}/File{i % 31}.cpp", i + 1, 1, SourceSymbolKind.Function)).ToArray();
+        using var index = new SourceSymbolIndex();
+        index.ReplaceAll(symbols);
+        foreach (var query in new[] { "S", "Set", "SMMode", "Set Mode", "setmovementmode", "GetWorld", "ét", "상태", "I", "missing", "" })
+        foreach (var limit in new[] { 1, 17, 200 })
+        {
+            var expected = FuzzySymbolSearch.Search(query, symbols, limit);
+            var actual = index.Search(query, limit);
+            Equal(expected.Count, actual.Count);
+            for (var i = 0; i < expected.Count; i++)
+            {
+                Equal(expected[i].Score, actual[i].Score);
+                Equal(expected[i].Location, actual[i].Location);
+            }
+        }
+    }
+
+    private static void SymbolSnapshotReplacesAndCancels()
+    {
+        using var index = new SourceSymbolIndex();
+        index.ReplaceAll(new[] { new SourceSymbolLocation("Old", "A.h", 1, 1, SourceSymbolKind.Type) });
+        Equal(1, index.Search("Old").Count);
+        index.ReplaceAll(new[] { new SourceSymbolLocation("New", "B.h", 1, 1, SourceSymbolKind.Type) });
+        Equal(0, index.Search("Old").Count);
+        Equal(1, index.Search("New").Count);
+        using var cancellation = new CancellationTokenSource();
+        cancellation.Cancel();
+        Throws<OperationCanceledException>(() => index.Search("New", cancellationToken: cancellation.Token));
+    }
+
+    private static void SourceProjectMembershipIsExact()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoostProjectTests-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(Path.Combine(root, "Projects"));
+        try
+        {
+            var project = Path.Combine(root, "Projects", "Game.vcxproj");
+            var shared = Path.Combine(root, "Projects", "Shared.vcxitems");
+            File.WriteAllText(project, """
+                <Project><ItemGroup>
+                <ClCompile Include="../Source/Game.cpp" />
+                <ClCompile Include="../Plugins/**/*.cpp" />
+                <ClInclude Include="$(ProjectDir)../Source/Game.h" />
+                </ItemGroup><Import Project="Shared.vcxitems" /></Project>
+                """);
+            File.WriteAllText(shared, """
+                <Project><ItemGroup><ClInclude Include="$(MSBuildThisFileDirectory)../Shared/Public.h" /></ItemGroup></Project>
+                """);
+            var owned = new[] { "Source/Game.cpp", "Source/Game.h", "Plugins/Top.cpp", "Plugins/Feature/Linked.cpp", "Shared/Public.h" }
+                .Select(path => Path.GetFullPath(Path.Combine(root, path))).ToArray();
+            var other = Path.Combine(root, "Source", "OtherProject.cpp");
+            var files = SourceProjectFiles.Read(project, owned.Concat(new[] { other }).ToArray());
+            Equal(owned.Length, files.Count);
+            foreach (var path in owned) Equal(true, files.Contains(path));
+            Equal(false, files.Contains(other));
+            using var cancellation = new CancellationTokenSource();
+            cancellation.Cancel();
+            Throws<OperationCanceledException>(() => SourceProjectFiles.Read(project, owned, cancellation.Token));
+        }
+        finally
+        {
+            Directory.Delete(root, recursive: true);
+        }
+    }
+
+    private static void CppUsageSearchMatchesIdentifierBoundaries()
+    {
+        const string source = "Widget value; WidgetFactory factory; value = Widget();";
+
+        var matches = CppIdentifierUsageScanner.Find("Widget", "Widget.cpp", source);
+
+        Equal(2, matches.Count);
+        Equal(1, matches[0].Line);
+        Equal(1, matches[0].Column);
+    }
+
+    private static void CppUsageSearchIgnoresCommentsAndStrings()
+    {
+        const string source = """
+            // Widget in line comment
+            const char* text = "Widget";
+            /* Widget in block comment
+               Widget still in block comment */
+            Widget visible;
+            """;
+
+        var matches = CppIdentifierUsageScanner.Find("Widget", "Widget.cpp", source);
+
+        Equal(1, matches.Count);
+        Equal(5, matches[0].Line);
     }
 
     private static FilePairResolver Resolver() => new();

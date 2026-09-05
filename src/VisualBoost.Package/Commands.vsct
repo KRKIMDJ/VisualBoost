@@ -32,6 +32,27 @@
           <CanonicalName>VisualBoost.OpenFileSearch</CanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidVisualBoostCommandSet" id="OpenSymbolSearchCommand" priority="0x0190" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>VisualBoost 심볼 탐색...</ButtonText>
+          <CanonicalName>VisualBoost.OpenSymbolSearch</CanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidVisualBoostCommandSet" id="NavigateToDefinitionCommand" priority="0x01A0" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>VisualBoost 선언/정의로 이동</ButtonText>
+          <CanonicalName>VisualBoost.NavigateToDefinition</CanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidVisualBoostCommandSet" id="FindSymbolUsagesCommand" priority="0x01B0" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>VisualBoost 사용처 탐색</ButtonText>
+          <CanonicalName>VisualBoost.FindSymbolUsages</CanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidVisualBoostCommandSet" id="ShowIndexStatusCommand" priority="0x0300" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
@@ -45,6 +66,9 @@
   <KeyBindings>
     <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="O" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="OpenSymbolSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="S" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="FindSymbolUsagesCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="F" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="NavigateToDefinitionCommand" editor="GUID_TextEditorFactory" mod1="ALT" key1="G" />
   </KeyBindings>
 
   <Symbols>
@@ -55,6 +79,9 @@
       <IDSymbol name="OpenOptionsCommand" value="0x0101" />
       <IDSymbol name="ShowIndexStatusCommand" value="0x0102" />
       <IDSymbol name="OpenFileSearchCommand" value="0x0103" />
+      <IDSymbol name="OpenSymbolSearchCommand" value="0x0104" />
+      <IDSymbol name="NavigateToDefinitionCommand" value="0x0105" />
+      <IDSymbol name="FindSymbolUsagesCommand" value="0x0106" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

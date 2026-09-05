@@ -21,11 +21,11 @@ public static class CppSourceAnalyzer
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex TypePattern = new(
-        @"\b(?:class|struct|union|enum(?:\s+class)?)\s+(?<name>[A-Za-z_]\w*)",
+        @"\b(?:(?:class|struct|union)\s+(?:[A-Za-z_]\w*_API\s+)?|enum(?:\s+class)?\s+)(?<name>[A-Za-z_]\w*)",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex FunctionPattern = new(
-        @"(?<name>[A-Za-z_~]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:->[^;{]+)?\s*[;{]",
+        @"(?<name>[A-Za-z_~]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:(?:override|final)\s*)?(?:->[^;{]+)?\s*(?<terminator>[;{]?)\s*$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant);
 
     private static readonly Regex VariablePattern = new(
@@ -76,10 +76,18 @@ public static class CppSourceAnalyzer
 
             AddMatch(symbols, MacroPattern.Match(code), path, lineNumber, SourceSymbolKind.Macro);
             AddMatch(symbols, NamespacePattern.Match(code), path, lineNumber, SourceSymbolKind.Namespace);
-            AddMatches(symbols, TypePattern.Matches(code), path, lineNumber, SourceSymbolKind.Type);
+            foreach (Match typeMatch in TypePattern.Matches(code))
+            {
+                if (IsForwardDeclaration(code, typeMatch))
+                {
+                    continue;
+                }
+
+                AddMatch(symbols, typeMatch, path, lineNumber, SourceSymbolKind.Type);
+            }
 
             var functionMatch = FunctionPattern.Match(code);
-            if (functionMatch.Success)
+            if (functionMatch.Success && IsFunctionDeclarationOrDefinition(code, functionMatch))
             {
                 var name = LastNameSegment(functionMatch.Groups["name"].Value);
                 if (!ControlKeywords.Contains(name))
@@ -93,6 +101,53 @@ public static class CppSourceAnalyzer
         }
 
         return new SourceFileAnalysis(path, includes, symbols);
+    }
+
+    private static bool IsForwardDeclaration(string code, Match match)
+    {
+        var suffix = code.Substring(match.Index + match.Length).TrimStart();
+        return suffix.StartsWith(";", StringComparison.Ordinal);
+    }
+
+    private static bool IsFunctionDeclarationOrDefinition(
+        string code,
+        Match match)
+    {
+        var nameGroup = match.Groups["name"];
+        var qualifiedName = nameGroup.Value;
+        var simpleName = LastNameSegment(qualifiedName).TrimStart('~');
+        var prefix = code.Substring(0, nameGroup.Index).Trim();
+        if (prefix.Length == 0)
+        {
+            var qualifierOffset = qualifiedName.LastIndexOf("::", StringComparison.Ordinal);
+            if (qualifierOffset < 0)
+            {
+                return false;
+            }
+
+            var qualifier = qualifiedName.Substring(0, qualifierOffset);
+            var containingType = LastNameSegment(qualifier);
+            return string.Equals(containingType, simpleName, StringComparison.Ordinal);
+        }
+
+        if (prefix.IndexOf('=') >= 0 ||
+            prefix.EndsWith(".", StringComparison.Ordinal) ||
+            prefix.EndsWith("->", StringComparison.Ordinal) ||
+            prefix.EndsWith("(", StringComparison.Ordinal) ||
+            prefix.EndsWith("[", StringComparison.Ordinal) ||
+            prefix.EndsWith("!", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        var firstWordEnd = prefix.IndexOfAny(new[] { ' ', '\t', '(' });
+        var firstWord = firstWordEnd < 0 ? prefix : prefix.Substring(0, firstWordEnd);
+        return !ControlKeywords.Contains(firstWord) &&
+               !string.Equals(firstWord, "return", StringComparison.Ordinal) &&
+               !string.Equals(firstWord, "co_return", StringComparison.Ordinal) &&
+               !string.Equals(firstWord, "throw", StringComparison.Ordinal) &&
+               !string.Equals(firstWord, "new", StringComparison.Ordinal) &&
+               !string.Equals(firstWord, "delete", StringComparison.Ordinal);
     }
 
     private static void AddMatches(

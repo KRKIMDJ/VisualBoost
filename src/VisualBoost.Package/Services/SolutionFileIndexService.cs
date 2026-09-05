@@ -342,7 +342,7 @@ internal sealed class SolutionFileIndexService : IDisposable
         }
     }
 
-    public async Task WaitUntilReadyAsync()
+    public async Task WaitUntilReadyAsync(CancellationToken cancellationToken = default)
     {
         while (true)
         {
@@ -355,9 +355,16 @@ internal sealed class SolutionFileIndexService : IDisposable
 
             try
             {
+                // 창을 닫거나 새 검색을 시작하면 공유 인덱싱 작업과 독립적으로 대기를 끝냅니다.
+                while (!build.IsCompleted)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    await Task.WhenAny(build, Task.Delay(50, cancellationToken)).ConfigureAwait(false);
+                }
+                cancellationToken.ThrowIfCancellationRequested();
                 await build.ConfigureAwait(false);
             }
-            catch (OperationCanceledException)
+            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
             {
                 // Solution 변경으로 취소되면 아래에서 새 빌드가 끝났는지 다시 확인합니다.
             }
@@ -375,7 +382,46 @@ internal sealed class SolutionFileIndexService : IDisposable
 
     public IReadOnlyList<string> FindByStem(string stem) => index.FindByStem(stem);
 
+    public IReadOnlyList<string> GetFilePathsSnapshot() => index.GetPathsSnapshot();
+
     public IReadOnlyList<SourceSymbolLocation> FindSymbol(string name) => sourceAnalyzer.FindSymbol(name);
+
+    public IReadOnlyList<SourceSymbolMatch> SearchSymbols(
+        string query,
+        int maximumResults,
+        CancellationToken cancellationToken) =>
+        sourceAnalyzer.SearchSymbols(query, maximumResults, cancellationToken);
+
+    public async Task WaitUntilAnalysisReadyAsync()
+    {
+        while (true)
+        {
+            Task analysis;
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                analysis = activeAnalysis;
+            }
+
+            try
+            {
+                await analysis.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+                // Solution 변경으로 취소되면 새 분석 작업이 끝났는지 다시 확인합니다.
+            }
+
+            lock (gate)
+            {
+                ThrowIfDisposed();
+                if (ReferenceEquals(analysis, activeAnalysis))
+                {
+                    return;
+                }
+            }
+        }
+    }
 
     public void Clear()
     {
@@ -502,6 +548,8 @@ internal sealed class SolutionFileIndexService : IDisposable
                         ? Task.Run(
                             async () =>
                             {
+                                // 이전 실행의 심볼을 먼저 공개해 전체 재검증을 기다리지 않고 탐색할 수 있게 합니다.
+                                sourceAnalyzer.LoadCachedSymbols(currentSolutionPath, cancellationToken);
                                 // Solution 로드 직후의 Visual Studio 작업과 CPU 및 디스크 사용이 겹치지 않게 양보합니다.
                                 await Task.Delay(
                                     currentConfiguration.SourceAnalysisDelay,

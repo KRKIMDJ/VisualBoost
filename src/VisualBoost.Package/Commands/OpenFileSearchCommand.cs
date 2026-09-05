@@ -43,18 +43,12 @@ internal sealed class OpenFileSearchCommand
     private void Execute(object sender, EventArgs eventArgs)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        package.JoinableTaskFactory.RunAsync(ExecuteAsync).FileAndForget("VisualBoost/OpenFileSearch");
+        SearchCommandRunner.Run(package, "OpenFileSearch", ExecuteAsync);
     }
 
     private async Task ExecuteAsync()
     {
         var snapshot = fileIndex.GetSnapshot();
-        if (snapshot.State == SolutionFileIndexState.Building && snapshot.FileCount == 0)
-        {
-            await ShowStatusAsync("VisualBoost가 파일 인덱싱을 마칠 때까지 기다리는 중입니다...");
-            await fileIndex.WaitUntilReadyAsync();
-            snapshot = fileIndex.GetSnapshot();
-        }
 
         if (snapshot.State == SolutionFileIndexState.Faulted && snapshot.FileCount == 0)
         {
