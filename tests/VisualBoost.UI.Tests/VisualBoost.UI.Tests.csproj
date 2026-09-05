@@ -6,6 +6,8 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationControl.xaml.cs" Link="DocumentNavigationControl.xaml.cs" />
+    <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentMemberBuffer.cs" Link="DocumentMemberBuffer.cs" />
     <Compile Include="../../src/VisualBoost.Package/Completion/CompletionRuntime.cs" Link="CompletionRuntime.cs" />
     <Compile Include="../../src/VisualBoost.Package/Completion/CompletionViewListener.cs" Link="CompletionViewListener.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/SearchTextHighlight.cs" Link="SearchTextHighlight.cs" />

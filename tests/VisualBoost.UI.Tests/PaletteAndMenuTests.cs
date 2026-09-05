@@ -42,12 +42,19 @@ internal static class PaletteAndMenuTests
             Assert((string?)group.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu", "모든 명령은 하위 메뉴 안에 배치");
             Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
         }
-        var expected = new[] { "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
+        var expected = new[] { "OpenDocumentMembersCommand|GUID_TextEditorFactory|ALT|M", "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
             "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S", "FindSymbolUsagesCommand|GUID_TextEditorFactory|Shift Alt|F",
             "NavigateToDefinitionCommand|GUID_TextEditorFactory|ALT|G" };
         var actual = xml.Root.Element(ns + "KeyBindings")!.Elements(ns + "KeyBinding").Select(k =>
             string.Join("|", new[] { "id", "editor", "mod1", "key1" }.Select(name => (string?)k.Attribute(name))));
         Assert(actual.SequenceEqual(expected), "기존 단축키와 적용 범위 유지");
+        var navigationFolder = Path.Combine(root, "src", "VisualBoost.Package", "DocumentNavigation");
+        Assert(!Directory.GetFiles(navigationFolder, "*.cs").Any(file => File.ReadAllText(file).Contains("IWpfTextViewMarginProvider")), "별도 상단 margin 등록 제거");
+        var navigationView = XDocument.Load(Path.Combine(navigationFolder, "DocumentNavigationControl.xaml"));
+        XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
+        Assert(!navigationView.Descendants().Any(node => (string?)node.Attribute(x + "Name") is "Bar" or "CurrentFunction" or "OpenButton"), "상단 바 컨트롤 제거");
+        var navigationOptions = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Options", "DocumentNavigationOptionsPage.cs"));
+        Assert(!navigationOptions.Contains("ShowBar") && navigationOptions.Contains("NameOrder"), "바 옵션 제거·정렬 설정 유지");
         var codeSearch = commands.Element(ns + "Buttons")!.Elements(ns + "Button")
             .Single(button => (string?)button.Attribute("id") == "FindSymbolUsagesCommand");
         Assert((string?)codeSearch.Element(ns + "Strings")!.Element(ns + "ButtonText") == "코드 검색", "코드 검색 메뉴 표시 이름");
@@ -56,7 +63,7 @@ internal static class PaletteAndMenuTests
         Assert(view.Descendants(wpf + "TextBlock").Any(block => (string?)block.Attribute("Text") == "심볼:"), "코드 검색 상단 심볼 라벨");
         var pane = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesToolWindow.cs"));
         Assert(pane.Contains("Caption = \"VisualBoost 코드 검색\""), "코드 검색 도킹 창 제목");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count() == 7, "이름 기반 후보 검색을 포함한 일곱 명령");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count() == 8, "문서 함수 탐색을 포함한 여덟 명령");
         var package = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs"));
         Assert(package.Contains("ProvideToolWindow") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"), "이름 검색 창만 등록하고 정밀 옵션·인덱스는 제외");
         var project = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoost.Package.csproj"));

@@ -25,6 +25,13 @@
     </Groups>
 
     <Buttons>
+      <Button guid="guidVisualBoostCommandSet" id="OpenDocumentMembersCommand" priority="0x0195" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>문서 함수 탐색...</ButtonText>
+          <CanonicalName>VisualBoost.OpenDocumentMembers</CanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0100" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
@@ -78,6 +85,7 @@
   </Commands>
 
   <KeyBindings>
+    <KeyBinding guid="guidVisualBoostCommandSet" id="OpenDocumentMembersCommand" editor="GUID_TextEditorFactory" mod1="ALT" key1="M" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="O" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenSymbolSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="S" />
@@ -99,6 +107,7 @@
       <IDSymbol name="OpenSymbolSearchCommand" value="0x0104" />
       <IDSymbol name="NavigateToDefinitionCommand" value="0x0105" />
       <IDSymbol name="FindSymbolUsagesCommand" value="0x0106" />
+      <IDSymbol name="OpenDocumentMembersCommand" value="0x0107" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

@@ -16,7 +16,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.19.2")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.20.1")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(typeof(UI.SymbolUsagesToolWindow), Style = VsDockStyle.Tabbed,
@@ -31,6 +31,8 @@ namespace VisualBoost;
 [ProvideProfile(typeof(ColoringOptionsPage), "VisualBoost", "Coloring", 0, 0, true)]
 [ProvideOptionPage(typeof(CompletionOptionsPage), "VisualBoost", "자동완성", 0, 0, true)]
 [ProvideProfile(typeof(CompletionOptionsPage), "VisualBoost", "자동완성", 0, 0, true)]
+[ProvideOptionPage(typeof(DocumentNavigationOptionsPage), "VisualBoost", "문서 함수 탐색", 0, 0, true)]
+[ProvideProfile(typeof(DocumentNavigationOptionsPage), "VisualBoost", "문서 함수 탐색", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
@@ -60,6 +62,7 @@ public sealed class VisualBoostPackage : AsyncPackage
 
         MigrateLegacyOptions();
         ((CompletionOptionsPage)GetDialogPage(typeof(CompletionOptionsPage))).Publish();
+        ((DocumentNavigationOptionsPage)GetDialogPage(typeof(DocumentNavigationOptionsPage))).Publish();
         var components = await GetServiceAsync(typeof(SComponentModel)) as IComponentModel;
         Assumes.Present(components);
         Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
@@ -72,6 +75,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await OpenSymbolSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await NavigateToDefinitionCommand.InitializeAsync(this, cancellationToken);
         await FindSymbolUsagesCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)

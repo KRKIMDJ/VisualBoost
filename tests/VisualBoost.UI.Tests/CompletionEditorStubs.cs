@@ -17,11 +17,22 @@ namespace Microsoft.VisualStudio.Utilities
     {
         public object? Value;
         public T GetOrCreateSingletonProperty<T>(Func<T> create) => (T)(Value ??= create()!);
+        public void RemoveProperty(object key) { if (Value?.GetType() == key as Type) Value = null; }
     }
 }
 namespace Microsoft.VisualStudio.Shell
 {
-    internal static class ActivityLog { public static void LogWarning(string source, string message) { } }
+    internal static class ActivityLog
+    {
+        public static readonly List<string> Errors = new();
+        public static void LogWarning(string source, string message) { }
+        public static void LogError(string source, string message) { Errors.Add(source + ": " + message); }
+    }
+    internal static class TaskLogStub
+    {
+        public static void FileAndForget(this System.Threading.Tasks.Task task, string name)
+            => _ = task.ContinueWith(t => ActivityLog.LogError(name, t.Exception!.ToString()), System.Threading.Tasks.TaskContinuationOptions.OnlyOnFaulted);
+    }
     internal static class VsBrushes
     {
         public static object ToolWindowBackgroundKey => SystemColors.WindowBrushKey;
@@ -35,8 +46,19 @@ namespace Microsoft.VisualStudio.Text
     { public int Start => start; public int Length => length; public int End => start + length; }
     internal sealed class ITextSnapshot(string text)
     {
+        private static int nextVersion;
+        public SnapshotVersion Version { get; } = new(System.Threading.Interlocked.Increment(ref nextVersion));
+        public string GetText() => text;
+        public int Length => text.Length;
         public string Text => text;
         public string GetText(Span span) => text.Substring(span.Start, span.Length);
+    }
+    internal sealed class SnapshotVersion(int number) { public int VersionNumber => number; }
+    internal interface ITextBuffer
+    {
+        ITextSnapshot CurrentSnapshot { get; }
+        Microsoft.VisualStudio.Utilities.PropertyCollection Properties { get; }
+        event EventHandler<TextContentChangedEventArgs>? Changed;
     }
     internal readonly struct SnapshotSpan(ITextSnapshot snapshot, Span span) { public ITextSnapshot Snapshot => snapshot; public Span Span => span; }
     internal readonly struct SnapshotPoint(ITextSnapshot snapshot, int position)
@@ -51,8 +73,10 @@ namespace Microsoft.VisualStudio.Text
     { public string NewText => newText; public int OldLength => oldLength; public int NewPosition => position; }
     internal sealed class TextContentChangedEventArgs(ITextSnapshot after, TextChange change) : EventArgs
     { public ITextSnapshot After => after; public List<TextChange> Changes => new() { change }; }
-    internal sealed class TestBuffer
+    internal sealed class TestBuffer : ITextBuffer
     {
+        public ITextSnapshot CurrentSnapshot => Snapshot;
+        public Microsoft.VisualStudio.Utilities.PropertyCollection Properties { get; } = new();
         public ITextSnapshot Snapshot = new("");
         public bool ReadOnly;
         public int Edits;

@@ -25,6 +25,8 @@ internal static class Program
             var output = Path.Combine(root, "artifacts", "ui-validation");
             Directory.CreateDirectory(output);
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
+            if (args.Skip(1).Contains("--document-navigation"))
+            { DocumentNavigationInteractionTests.Run(root); return 0; }
             foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog", "SymbolUsagesControl" })
                 Validate(root, output, name);
             UsageLifecycleTests.Run();
@@ -34,6 +36,7 @@ internal static class Program
             NavigationIntegrationTests.Run();
             SearchHighlightTests.Run();
             CompletionInteractionTests.Run(root);
+            DocumentNavigationInteractionTests.Run(root);
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
             return 0;
         }

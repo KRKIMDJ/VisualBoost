@@ -35,6 +35,8 @@ public sealed class FittedResultsList : ListView
         grid.ColumnHeaderContextMenu = new ContextMenu();
         grid.ColumnHeaderContextMenu.Items.Add(reset);
         foreach (var column in grid.Columns) widthDescriptor.AddValueChanged(column, OnColumnWidthChanged);
+        // Popup 안에서는 Loaded 시점에도 기본 템플릿이 아직 생성되지 않을 수 있습니다.
+        ApplyTemplate();
         scroll = FindScrollViewer(this);
         if (scroll is not null) scroll.ScrollChanged += OnScrollChanged;
         SizeChanged += OnSizeChanged;
