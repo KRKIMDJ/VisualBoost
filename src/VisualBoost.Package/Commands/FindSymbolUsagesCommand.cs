@@ -63,7 +63,8 @@ internal sealed class FindSymbolUsagesCommand
 
         // 도구 창에 포커스가 넘어가기 전에 실행 문서의 소속을 캡처합니다.
         var sourceProject = dte.ActiveDocument?.ProjectItem?.ContainingProject;
-        var sourceProjectFile = sourceProject?.FullName;
+        var sourceProjectFile = SearchPath.TryNormalize(sourceProject?.FullName, out var projectPath)
+            ? projectPath : null;
         var sourceProjectName = sourceProject?.Name;
         var context = FileSearchContext.Collect(dte);
         var toolWindow = await package.ShowToolWindowAsync(
@@ -74,7 +75,7 @@ internal sealed class FindSymbolUsagesCommand
         if (toolWindow is null)
         {
             var statusBar = await package.GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
-            statusBar?.SetText("사용처 탐색 창을 열지 못했습니다.");
+            statusBar?.SetText("코드 검색 창을 열지 못했습니다.");
             return;
         }
 

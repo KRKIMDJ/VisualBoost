@@ -10,7 +10,7 @@ public sealed class SymbolUsagesToolWindow : ToolWindowPane
     public SymbolUsagesToolWindow()
         : base(null)
     {
-        Caption = "VisualBoost 사용처";
+        Caption = "VisualBoost 코드 검색";
         Content = new SymbolUsagesControl();
     }
 

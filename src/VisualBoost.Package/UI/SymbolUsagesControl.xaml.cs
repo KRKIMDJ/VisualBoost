@@ -55,7 +55,7 @@ public partial class SymbolUsagesControl : UserControl
         SymbolText.Text = symbol;
         CurrentProjectScopeItem.ToolTip = string.IsNullOrWhiteSpace(sourceProjectFile)
             ? "실행 문서의 소속 프로젝트를 확인할 수 없습니다."
-            : "실행 문서의 프로젝트: " + (sourceProjectName ?? Path.GetFileNameWithoutExtension(sourceProjectFile));
+            : "실행 문서의 프로젝트: " + (sourceProjectName ?? sourceProjectFile);
         suppressScopeChange = true;
         CurrentProjectScopeItem.IsEnabled = !string.IsNullOrWhiteSpace(sourceProjectFile);
         ScopeSelector.SelectedValue = scope.ToString();
@@ -104,7 +104,7 @@ public partial class SymbolUsagesControl : UserControl
         CancelSearchButton.Visibility = Visibility.Visible;
         ResultsList.ItemsSource = null;
         EmptyStatePanel.Visibility = Visibility.Visible;
-        EmptyStateTitle.Text = "사용처를 찾는 중입니다.";
+        EmptyStateTitle.Text = "코드를 검색하는 중입니다.";
         EmptyStateDescription.Text = selectedScope == SymbolUsageScope.CurrentProject
             ? "현재 프로젝트의 C++ 파일을 확인하고 있습니다."
             : "전체 솔루션의 C++ 파일을 확인하고 있습니다.";
@@ -149,7 +149,7 @@ public partial class SymbolUsagesControl : UserControl
             EmptyStatePanel.Visibility = items.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
             if (items.Count == 0)
             {
-                EmptyStateTitle.Text = "사용처를 찾지 못했습니다.";
+                EmptyStateTitle.Text = "일치하는 코드를 찾지 못했습니다.";
                 EmptyStateDescription.Text = "검색 범위를 변경하거나 인덱싱 상태를 확인하세요.";
             }
 
@@ -170,7 +170,7 @@ public partial class SymbolUsagesControl : UserControl
             if (!ReferenceEquals(searchCancellation, currentCancellation)) return;
             ResultsList.ItemsSource = null;
             EmptyStatePanel.Visibility = Visibility.Visible;
-            EmptyStateTitle.Text = "사용처 검색을 완료하지 못했습니다.";
+            EmptyStateTitle.Text = "코드 검색을 완료하지 못했습니다.";
             EmptyStateDescription.Text = exception.Message;
             StatusText.Text = "검색 오류";
         }
@@ -189,6 +189,28 @@ public partial class SymbolUsagesControl : UserControl
     internal void CancelSearch()
     {
         searchCancellation?.Cancel();
+    }
+
+    internal void ResetSearch()
+    {
+        // 닫힌 솔루션의 요청과 이동 콜백이 다음 솔루션에 남지 않도록 분리합니다.
+        var previous = searchCancellation;
+        searchCancellation = null;
+        previous?.Cancel();
+        provider = null;
+        fileIndex = null;
+        openLocation = null;
+        projects = Array.Empty<SolutionProjectInfo>();
+        sourceProjectFile = null;
+        symbol = string.Empty;
+        isSearching = false;
+        ResultsList.ItemsSource = null;
+        SymbolText.Text = string.Empty;
+        CancelSearchButton.Visibility = Visibility.Collapsed;
+        EmptyStatePanel.Visibility = Visibility.Visible;
+        EmptyStateTitle.Text = "검색할 심볼을 선택하세요.";
+        EmptyStateDescription.Text = "편집기에서 코드 검색을 실행하세요.";
+        StatusText.Text = "대기 중";
     }
 
     private void OnCancelSearchClick(object sender, RoutedEventArgs eventArgs) => searchCancellation?.Cancel();

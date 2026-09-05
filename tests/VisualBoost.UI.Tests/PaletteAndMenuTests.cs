@@ -48,6 +48,19 @@ internal static class PaletteAndMenuTests
         var actual = xml.Root.Element(ns + "KeyBindings")!.Elements(ns + "KeyBinding").Select(k =>
             string.Join("|", new[] { "id", "editor", "mod1", "key1" }.Select(name => (string?)k.Attribute(name))));
         Assert(actual.SequenceEqual(expected), "기존 단축키와 적용 범위 유지");
+        var codeSearch = commands.Element(ns + "Buttons")!.Elements(ns + "Button")
+            .Single(button => (string?)button.Attribute("id") == "FindSymbolUsagesCommand");
+        Assert((string?)codeSearch.Element(ns + "Strings")!.Element(ns + "ButtonText") == "코드 검색", "코드 검색 메뉴 표시 이름");
+        var view = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesControl.xaml"));
+        XNamespace wpf = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
+        Assert(view.Descendants(wpf + "TextBlock").Any(block => (string?)block.Attribute("Text") == "심볼:"), "코드 검색 상단 심볼 라벨");
+        var pane = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesToolWindow.cs"));
+        Assert(pane.Contains("Caption = \"VisualBoost 코드 검색\""), "코드 검색 도킹 창 제목");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count() == 7, "이름 기반 후보 검색을 포함한 일곱 명령");
+        var package = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs"));
+        Assert(package.Contains("ProvideToolWindow") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"), "이름 검색 창만 등록하고 정밀 옵션·인덱스는 제외");
+        var project = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoost.Package.csproj"));
+        Assert(!project.Contains("Clang") && !project.Contains("CodeAnalysis") && !project.Contains("LanguageServices"), "정밀 분석기 직접 의존성 재도입 방지");
         Console.WriteLine("PASS: 색상 선택·취소·기존 설정·견본 및 도구 하위 메뉴·단축키 검증");
     }
 

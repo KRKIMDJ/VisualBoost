@@ -4,11 +4,11 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="VisualBoost.2cf41e59-72ae-41ad-825d-38cc38607d71"
-              Version="0.12.3"
+              Version="0.18.2"
               Language="ko-KR"
               Publisher="VisualBoost" />
     <DisplayName>VisualBoost</DisplayName>
-    <Description xml:space="preserve">C++ 파일과 심볼 사이를 빠르게 탐색하는 Visual Studio 확장입니다.</Description>
+    <Description xml:space="preserve">빠른 파일·심볼 탐색, C++ 헤더·구현 전환과 편집기 색상 설정을 지원하는 Visual Studio 확장입니다.</Description>
     <License>LICENSE</License>
   </Metadata>
   <Installation>

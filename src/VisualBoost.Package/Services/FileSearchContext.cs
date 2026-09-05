@@ -4,6 +4,7 @@ using System.IO;
 using System.Runtime.InteropServices;
 using EnvDTE80;
 using Microsoft.VisualStudio.Shell;
+using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Services;
 
@@ -47,13 +48,9 @@ internal sealed class FileSearchContext
         {
             var activeDocument = dte.ActiveDocument;
             var projectFile = activeDocument?.ProjectItem?.ContainingProject?.FullName;
-            var projectDirectory = string.IsNullOrWhiteSpace(projectFile)
-                ? null
-                : Path.GetDirectoryName(projectFile);
+            var projectDirectory = SearchPath.DirectoryOf(projectFile);
             var activeDocumentPath = activeDocument?.FullName;
-            var documentDirectory = string.IsNullOrWhiteSpace(activeDocumentPath)
-                ? null
-                : Path.GetDirectoryName(activeDocumentPath);
+            var documentDirectory = SearchPath.DirectoryOf(activeDocumentPath);
             return FindCommonDirectory(projectDirectory, documentDirectory) ?? projectDirectory;
         }
         catch (COMException)
@@ -67,9 +64,7 @@ internal sealed class FileSearchContext
         ThreadHelper.ThrowIfNotOnUIThread();
         try
         {
-            return string.IsNullOrWhiteSpace(dte.Solution.FullName)
-                ? null
-                : Path.GetDirectoryName(dte.Solution.FullName);
+            return SearchPath.DirectoryOf(dte.Solution.FullName);
         }
         catch (COMException)
         {
@@ -85,9 +80,9 @@ internal sealed class FileSearchContext
         {
             foreach (EnvDTE.Document document in dte.Documents)
             {
-                if (!string.IsNullOrWhiteSpace(document.FullName))
+                if (SearchPath.TryNormalize(document.FullName, out var path))
                 {
-                    paths.Add(Path.GetFullPath(document.FullName));
+                    paths.Add(path);
                 }
             }
         }

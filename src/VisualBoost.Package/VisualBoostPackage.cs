@@ -16,14 +16,11 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.12.3")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.18.2")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
-[ProvideToolWindow(
-    typeof(UI.SymbolUsagesToolWindow),
-    Style = VsDockStyle.Tabbed,
-    Window = EnvDTE.Constants.vsWindowKindOutput,
-    DockedHeight = 320)]
+[ProvideToolWindow(typeof(UI.SymbolUsagesToolWindow), Style = VsDockStyle.Tabbed,
+    Window = EnvDTE.Constants.vsWindowKindOutput, DockedHeight = 320)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideProfile(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideOptionPage(typeof(FileSearchOptionsPage), "VisualBoost", "파일 탐색", 0, 0, true)]
@@ -82,6 +79,7 @@ public sealed class VisualBoostPackage : AsyncPackage
             {
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 UnsubscribeSolutionEvents();
+                ResetUsageSearch();
                 Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
                 Coloring.SharedColorPalette.Detach();
             });
@@ -135,7 +133,15 @@ public sealed class VisualBoostPackage : AsyncPackage
     private void OnSolutionClosed()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        ResetUsageSearch();
         fileIndex.Clear();
+    }
+
+    private void ResetUsageSearch()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (FindToolWindow(typeof(UI.SymbolUsagesToolWindow), 0, create: false) is UI.SymbolUsagesToolWindow window)
+            window.View.ResetSearch();
     }
 
     private void OnProjectChanged(Project project)

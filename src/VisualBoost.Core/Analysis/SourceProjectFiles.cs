@@ -13,8 +13,10 @@ public static class SourceProjectFiles
         CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
+        if (!SearchPath.TryNormalize(projectFile, out var normalizedProject))
+            throw new ArgumentException("실행 문서의 프로젝트 파일 경로를 확인할 수 없습니다.", nameof(projectFile));
         var files = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        ReadProject(Path.GetFullPath(projectFile), Path.GetDirectoryName(Path.GetFullPath(projectFile))!,
+        ReadProject(normalizedProject, Path.GetDirectoryName(normalizedProject)!,
             indexedPaths, files, new HashSet<string>(StringComparer.OrdinalIgnoreCase), cancellationToken);
         return files;
     }

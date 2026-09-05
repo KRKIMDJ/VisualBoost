@@ -6,6 +6,7 @@ using System.Runtime.InteropServices;
 using EnvDTE;
 using EnvDTE80;
 using Microsoft.VisualStudio.Shell;
+using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Services;
 
@@ -70,7 +71,7 @@ internal static class SolutionProjectCatalog
                 return;
             }
 
-            Add(project.Name, Path.GetDirectoryName(project.FullName), projects, visited);
+            Add(project.Name, SearchPath.DirectoryOf(project.FullName), projects, visited);
         }
         catch (COMException)
         {

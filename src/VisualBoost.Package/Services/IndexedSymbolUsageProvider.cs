@@ -26,6 +26,8 @@ internal sealed class IndexedSymbolUsageProvider : ISymbolUsageProvider
         int maximumResults,
         CancellationToken cancellationToken)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        if (maximumResults <= 0 || string.IsNullOrWhiteSpace(symbol)) return Array.Empty<SourceUsageLocation>();
         var projectPaths = scope == SymbolUsageScope.CurrentProject
             ? new HashSet<string>(SourceProjectFiles.Read(
                 sourceProjectFile ?? throw new InvalidOperationException("실행 문서의 소속 프로젝트를 확인할 수 없습니다."),
@@ -33,7 +35,9 @@ internal sealed class IndexedSymbolUsageProvider : ISymbolUsageProvider
             : null;
         var results = new ConcurrentBag<SourceUsageLocation>();
         var resultCount = 0;
-        var candidates = paths.Where(path =>
+        var candidates = paths.Select(path => SearchPath.TryNormalize(path, out var normalized) ? normalized : null)
+            .Where(path => path is not null).Select(path => path!)
+            .Distinct(StringComparer.OrdinalIgnoreCase).Where(path =>
             CppExtensions.Contains(Path.GetExtension(path)) &&
             (scope == SymbolUsageScope.EntireSolution ||
              projectPaths!.Contains(path)));
@@ -60,10 +64,14 @@ internal sealed class IndexedSymbolUsageProvider : ISymbolUsageProvider
                     return;
                 }
 
+                var source = File.ReadAllText(path);
+                cancellationToken.ThrowIfCancellationRequested();
+                // 파일 전체에 이름이 없으면 줄 단위 스캔과 표시 메타데이터 생성을 생략합니다.
+                if (source.IndexOf(symbol, StringComparison.Ordinal) < 0) return;
                 var matches = CppIdentifierUsageScanner.Find(
                     symbol,
                     path,
-                    File.ReadAllText(path),
+                    source,
                     maximumResults,
                     cancellationToken);
                 foreach (var match in matches)

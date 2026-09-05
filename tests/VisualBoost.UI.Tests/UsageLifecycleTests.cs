@@ -52,6 +52,18 @@ internal static class UsageLifecycleTests
             throw new InvalidOperationException("결과를 연 뒤 실행 문서의 프로젝트가 변경되었습니다.");
         Console.WriteLine("PASS: 사용처 검색 교체 12회, 지연 오류 격리, 인덱싱 대기 취소 및 재실행");
         Console.WriteLine("PASS: 결과 이동 및 범위 전환 후에도 실행 프로젝트 유지");
+        provider.Reset();
+        view.StartSearch(index, provider, "Old", null, projects, _ => { });
+        Until(() => provider.Started.IsSet);
+        view.ResetSearch();
+        provider.Release.Set();
+        Until(() => provider.Finished.IsSet);
+        Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+        if (view.TestResultSymbol is not null || view.TestStatus != "대기 중")
+            throw new InvalidOperationException("솔루션 초기화 뒤 이전 검색이 복원되었습니다.");
+        view.StartSearch(index, provider, "NextSolution", null, projects, _ => { });
+        Until(() => view.TestResultSymbol == "NextSolution");
+        Console.WriteLine("PASS: 솔루션 종료 시 진행 요청 폐기 및 다음 솔루션 재검색");
     }
 
     private static void Until(Func<bool> condition)

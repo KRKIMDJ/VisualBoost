@@ -63,7 +63,7 @@
       <Button guid="guidVisualBoostCommandSet" id="FindSymbolUsagesCommand" priority="0x01B0" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
-          <ButtonText>사용처 탐색</ButtonText>
+          <ButtonText>코드 검색</ButtonText>
           <CanonicalName>VisualBoost.FindSymbolUsages</CanonicalName>
         </Strings>
       </Button>
