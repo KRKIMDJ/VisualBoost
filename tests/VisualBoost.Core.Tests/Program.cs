@@ -7,6 +7,7 @@ using VisualBoost.Core.FilePairing;
 using VisualBoost.Core.Indexing;
 using VisualBoost.Core.Searching;
 using VisualBoost.Core.Analysis;
+using VisualBoost.Core.Coloring;
 
 namespace VisualBoost.Core.Tests;
 
@@ -52,6 +53,7 @@ internal static class Program
         Run("실행 프로젝트의 외부 연결 파일을 포함하고 다른 프로젝트는 제외한다", SourceProjectMembershipIsExact);
         Run("C++ 사용처 검색은 정확한 식별자 경계를 찾는다", CppUsageSearchMatchesIdentifierBoundaries);
         Run("C++ 사용처 검색은 주석과 문자열을 제외한다", CppUsageSearchIgnoresCommentsAndStrings);
+        Run("색상 입력과 테마별 기본 팔레트를 검증한다", SemanticColorsAreValid);
 
         Console.WriteLine(failures == 0
             ? "모든 VisualBoost.Core 테스트가 통과했습니다."
@@ -638,6 +640,21 @@ internal static class Program
 
         Equal(1, matches.Count);
         Equal(5, matches[0].Line);
+    }
+
+    private static void SemanticColorsAreValid()
+    {
+        foreach (SemanticColorKind kind in Enum.GetValues(typeof(SemanticColorKind)))
+        foreach (var dark in new[] { true, false })
+        {
+            Equal(true, SemanticColorPalette.TryParse(SemanticColorPalette.Default(kind, dark), out _));
+        }
+        Equal(true, SemanticColorPalette.TryParse(" #a1B2c3 ", out var rgb));
+        Equal(0xA1B2C3, rgb);
+        foreach (var invalid in new[] { null, "", "red", "#123", "#GGGGGG", "#FF000000", "123456" })
+            Equal(false, SemanticColorPalette.TryParse(invalid, out _));
+        Equal(true, SemanticColorPalette.IsDark(30, 30, 30));
+        Equal(false, SemanticColorPalette.IsDark(255, 255, 255));
     }
 
     private static FilePairResolver Resolver() => new();

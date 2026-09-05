@@ -4,9 +4,23 @@
   <Extern href="vsshlids.h" />
 
   <Commands package="guidVisualBoostPackage">
+    <Menus>
+      <Menu guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" priority="0x0100" type="Menu">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostToolsGroup" />
+        <Strings>
+          <ButtonText>Visual Boost</ButtonText>
+        </Strings>
+      </Menu>
+    </Menus>
     <Groups>
-      <Group guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" priority="0x0600">
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostToolsGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
+      </Group>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" priority="0x0100">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" />
+      </Group>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostSettingsGroup" priority="0x0200">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" />
       </Group>
     </Groups>
 
@@ -19,44 +33,44 @@
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenOptionsCommand" priority="0x0200" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSettingsGroup" />
         <Strings>
-          <ButtonText>VisualBoost 옵션...</ButtonText>
+          <ButtonText>옵션...</ButtonText>
           <CanonicalName>VisualBoost.OpenOptions</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" priority="0x0180" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
-          <ButtonText>VisualBoost 파일 탐색...</ButtonText>
+          <ButtonText>파일 탐색...</ButtonText>
           <CanonicalName>VisualBoost.OpenFileSearch</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenSymbolSearchCommand" priority="0x0190" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
-          <ButtonText>VisualBoost 심볼 탐색...</ButtonText>
+          <ButtonText>심볼 탐색...</ButtonText>
           <CanonicalName>VisualBoost.OpenSymbolSearch</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="NavigateToDefinitionCommand" priority="0x01A0" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
-          <ButtonText>VisualBoost 선언/정의로 이동</ButtonText>
+          <ButtonText>선언/정의로 이동</ButtonText>
           <CanonicalName>VisualBoost.NavigateToDefinition</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="FindSymbolUsagesCommand" priority="0x01B0" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
-          <ButtonText>VisualBoost 사용처 탐색</ButtonText>
+          <ButtonText>사용처 탐색</ButtonText>
           <CanonicalName>VisualBoost.FindSymbolUsages</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="ShowIndexStatusCommand" priority="0x0300" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSettingsGroup" />
         <Strings>
-          <ButtonText>VisualBoost 인덱스 상태...</ButtonText>
+          <ButtonText>인덱스 상태...</ButtonText>
           <CanonicalName>VisualBoost.ShowIndexStatus</CanonicalName>
         </Strings>
       </Button>
@@ -75,6 +89,9 @@
     <GuidSymbol name="guidVisualBoostPackage" value="{d54a4377-4869-4f58-a583-5318b38d77f2}" />
     <GuidSymbol name="guidVisualBoostCommandSet" value="{4cce3464-a08f-4e0d-a5fd-a297c7fcd41e}">
       <IDSymbol name="VisualBoostCommandGroup" value="0x1020" />
+      <IDSymbol name="VisualBoostToolsGroup" value="0x1021" />
+      <IDSymbol name="VisualBoostSubmenu" value="0x1022" />
+      <IDSymbol name="VisualBoostSettingsGroup" value="0x1023" />
       <IDSymbol name="SwitchHeaderSourceCommand" value="0x0100" />
       <IDSymbol name="OpenOptionsCommand" value="0x0101" />
       <IDSymbol name="ShowIndexStatusCommand" value="0x0102" />

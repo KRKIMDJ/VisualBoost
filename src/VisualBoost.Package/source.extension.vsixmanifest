@@ -4,7 +4,7 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="VisualBoost.2cf41e59-72ae-41ad-825d-38cc38607d71"
-              Version="0.9.5"
+              Version="0.10.1"
               Language="ko-KR"
               Publisher="VisualBoost" />
     <DisplayName>VisualBoost</DisplayName>
@@ -29,6 +29,7 @@
     <Prerequisite Id="Microsoft.VisualStudio.Component.CoreEditor" Version="[17.14,)" DisplayName="Visual Studio core editor" />
   </Prerequisites>
   <Assets>
+    <Asset Type="Microsoft.VisualStudio.MefComponent" d:Source="Project" d:ProjectName="VisualBoost.Package" Path="|VisualBoost.Package|" />
     <Asset Type="Microsoft.VisualStudio.VsPackage" d:Source="Project" d:ProjectName="VisualBoost.Package" Path="|VisualBoost.Package;PkgdefProjectOutputGroup|" />
   </Assets>
 </PackageManifest>

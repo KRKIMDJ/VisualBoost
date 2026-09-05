@@ -179,7 +179,7 @@
         </ListView.View>
       </ui:FittedResultsList>
 
-      <StackPanel x:Name="EmptyStatePanel" 
+      <StackPanel x:Name="EmptyStatePanel"
                   HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
         <TextBlock x:Name="EmptyStateTitle" HorizontalAlignment="Center" FontSize="15"
                    FontWeight="SemiBold" Text="심볼명을 입력하세요." />

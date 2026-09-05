@@ -24,6 +24,8 @@ internal static class Program
             foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog", "SymbolUsagesControl" })
                 Validate(root, output, name);
             UsageLifecycleTests.Run();
+            ColorFormatTests.Run();
+            PaletteAndMenuTests.Run(root);
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
             return 0;
         }

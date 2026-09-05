@@ -14,7 +14,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.9.5")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.10.1")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(
@@ -28,6 +28,8 @@ namespace VisualBoost;
 [ProvideProfile(typeof(FileSearchOptionsPage), "VisualBoost", "파일 탐색", 0, 0, true)]
 [ProvideOptionPage(typeof(IndexingOptionsPage), "VisualBoost", "인덱싱", 0, 0, true)]
 [ProvideProfile(typeof(IndexingOptionsPage), "VisualBoost", "인덱싱", 0, 0, true)]
+[ProvideOptionPage(typeof(ColoringOptionsPage), "VisualBoost", "Coloring", 0, 0, true)]
+[ProvideProfile(typeof(ColoringOptionsPage), "VisualBoost", "Coloring", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
@@ -56,6 +58,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         MigrateLegacyOptions();
+        Coloring.ColoringSettings.Publish(((ColoringOptionsPage)GetDialogPage(typeof(ColoringOptionsPage))).CreateSettings());
         StartFileIndex(dte);
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
@@ -74,6 +77,7 @@ public sealed class VisualBoostPackage : AsyncPackage
             {
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 UnsubscribeSolutionEvents();
+                Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
             });
             fileIndex.Dispose();
             solutionEvents = null;

@@ -1,0 +1,81 @@
+using System;
+using System.ComponentModel;
+using System.Drawing;
+using System.Drawing.Design;
+using System.IO;
+using System.Linq;
+using System.Xml.Linq;
+using VisualBoost.Options;
+
+internal static class PaletteAndMenuTests
+{
+    public static void Run(string root)
+    {
+        var context = new TestContext();
+        var editor = new TestEditor();
+        Assert(editor.GetEditStyle(context) == UITypeEditorEditStyle.Modal, "색상 선택 창 등록");
+        Assert(editor.GetPaintValueSupported(context), "색상 미리보기 등록");
+        Assert((string?)editor.EditValue(context, null, "") == "", "선택 취소 시 기본색 설정 유지");
+        Assert(editor.Initial.ToArgb() == Color.FromArgb(0x68, 0xD5, 0xC4).ToArgb(), "기본 팔레트로 선택 창 초기화");
+        Assert((string?)editor.EditValue(context, null, "#123456") == "#123456", "선택 취소 시 저장된 값 유지");
+        Assert(editor.Initial.ToArgb() == Color.FromArgb(0x12, 0x34, 0x56).ToArgb(), "저장된 색상으로 초기화");
+        editor.Selection = Color.FromArgb(0, 128, 255);
+        Assert((string?)editor.EditValue(context, null, "") == "#0080FF", "선택 색상을 기존 저장 형식으로 변환");
+        using (var bitmap = new Bitmap(16, 16))
+        {
+            using (var graphics = Graphics.FromImage(bitmap))
+                editor.PaintValue(new PaintValueEventArgs(context, "", graphics, new Rectangle(0, 0, 16, 16)));
+            Assert(bitmap.GetPixel(8, 8).ToArgb() == Color.FromArgb(0x68, 0xD5, 0xC4).ToArgb(), "기본색 견본 표시");
+        }
+
+        var xml = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "Commands.vsct"));
+        XNamespace ns = xml.Root!.Name.Namespace;
+        var commands = xml.Root.Element(ns + "Commands")!;
+        var menu = commands.Element(ns + "Menus")!.Elements(ns + "Menu").Single();
+        Assert((string?)menu.Attribute("id") == "VisualBoostSubmenu" && (string?)menu.Element(ns + "Strings")!.Element(ns + "ButtonText") == "Visual Boost", "하위 메뉴 제목");
+        var groups = commands.Element(ns + "Groups")!.Elements(ns + "Group").ToDictionary(g => (string)g.Attribute("id")!);
+        Assert(groups.Values.Count(g => (string?)g.Element(ns + "Parent")!.Attribute("id") == "IDM_VS_MENU_TOOLS") == 1, "도구 메뉴 직접 그룹은 하나");
+        Assert((string?)menu.Element(ns + "Parent")!.Attribute("id") == "VisualBoostToolsGroup", "하위 메뉴를 도구 그룹에 연결");
+        foreach (var button in commands.Element(ns + "Buttons")!.Elements(ns + "Button"))
+        {
+            var group = groups[(string)button.Element(ns + "Parent")!.Attribute("id")!];
+            Assert((string?)group.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu", "모든 명령은 하위 메뉴 안에 배치");
+            Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
+        }
+        var expected = new[] { "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
+            "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S", "FindSymbolUsagesCommand|GUID_TextEditorFactory|Shift Alt|F",
+            "NavigateToDefinitionCommand|GUID_TextEditorFactory|ALT|G" };
+        var actual = xml.Root.Element(ns + "KeyBindings")!.Elements(ns + "KeyBinding").Select(k =>
+            string.Join("|", new[] { "id", "editor", "mod1", "key1" }.Select(name => (string?)k.Attribute(name))));
+        Assert(actual.SequenceEqual(expected), "기존 단축키와 적용 범위 유지");
+        Console.WriteLine("PASS: 색상 선택·취소·기존 설정·견본 및 도구 하위 메뉴·단축키 검증");
+    }
+
+    private static void Assert(bool condition, string message)
+    {
+        if (!condition) throw new InvalidOperationException(message);
+    }
+
+    private sealed class TestEditor : PaletteColorEditor
+    {
+        public Color Initial { get; private set; }
+        public Color? Selection { get; set; }
+        protected override Color? PickColor(Color initial, IServiceProvider? provider) { Initial = initial; return Selection; }
+    }
+
+    private sealed class Sample
+    {
+        [PaletteDefault("#68D5C4")]
+        public string ColorValue { get; set; } = "";
+    }
+
+    private sealed class TestContext : ITypeDescriptorContext
+    {
+        public IContainer? Container => null;
+        public object Instance { get; } = new Sample();
+        public PropertyDescriptor PropertyDescriptor => TypeDescriptor.GetProperties(typeof(Sample))[nameof(Sample.ColorValue)]!;
+        public object? GetService(Type serviceType) => null;
+        public bool OnComponentChanging() => true;
+        public void OnComponentChanged() { }
+    }
+}
