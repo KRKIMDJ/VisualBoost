@@ -5,6 +5,8 @@ using System.Threading.Tasks;
 using EnvDTE;
 using EnvDTE80;
 using Microsoft;
+using Microsoft.VisualStudio.ComponentModelHost;
+using Microsoft.VisualStudio.Text.Classification;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using VisualBoost.Commands;
@@ -14,7 +16,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.10.1")]
+[InstalledProductRegistration("VisualBoost", "C++ 탐색 작업을 빠르게 수행합니다.", "0.11.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(
@@ -58,6 +60,9 @@ public sealed class VisualBoostPackage : AsyncPackage
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         MigrateLegacyOptions();
+        var components = await GetServiceAsync(typeof(SComponentModel)) as IComponentModel;
+        Assumes.Present(components);
+        Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
         Coloring.ColoringSettings.Publish(((ColoringOptionsPage)GetDialogPage(typeof(ColoringOptionsPage))).CreateSettings());
         StartFileIndex(dte);
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
@@ -78,6 +83,7 @@ public sealed class VisualBoostPackage : AsyncPackage
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 UnsubscribeSolutionEvents();
                 Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
+                Coloring.SharedColorPalette.Detach();
             });
             fileIndex.Dispose();
             solutionEvents = null;

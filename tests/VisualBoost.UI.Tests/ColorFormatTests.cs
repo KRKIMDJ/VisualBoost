@@ -64,6 +64,7 @@ internal static class ColorFormatTests
     {
         public Dictionary<string, ResourceDictionary> Items { get; } = new();
         public int Writes { get; private set; }
+        public event EventHandler<FormatItemsEventArgs> FormatMappingChanged { add { } remove { } }
         public bool IsInBatchUpdate { get; private set; }
         public ResourceDictionary GetProperties(string key) => Items.TryGetValue(key, out var value) ? value : new();
         public void SetProperties(string key, ResourceDictionary value) { Items[key] = value; Writes++; }
@@ -77,10 +78,16 @@ namespace Microsoft.VisualStudio.Text.Classification
     // 실제 색상 세션 코드를 실행하되 VS 호스트의 서식 저장소만 대역으로 치환합니다.
     internal interface IEditorFormatMap
     {
+        event EventHandler<FormatItemsEventArgs> FormatMappingChanged;
         ResourceDictionary GetProperties(string key);
         void SetProperties(string key, ResourceDictionary value);
         void BeginBatchUpdate();
         void EndBatchUpdate();
+    }
+    internal sealed class FormatItemsEventArgs : EventArgs
+    {
+        public FormatItemsEventArgs(System.Collections.ObjectModel.ReadOnlyCollection<string> changedItems) => ChangedItems = changedItems;
+        public System.Collections.ObjectModel.ReadOnlyCollection<string> ChangedItems { get; }
     }
     internal static class EditorFormatDefinition
     {

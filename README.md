@@ -25,6 +25,8 @@ VisualBoost는 Visual Studio에서 일반 C++ 프로젝트의 반복적인 탐�
 - `Tools > Options > VisualBoost > 인덱싱`에서 영구 캐시, 소스 분석과 진단 설정
 - `Tools > Visual Boost` 하위 메뉴에서 탐색 명령, 옵션과 인덱스 상태에 접근
 - `Tools > Options > VisualBoost > Coloring`에서 색상 견본과 팔레트 선택 창으로 C++ 의미 색상 설정
+- `Coloring`의 색상 설정 기준을 `FontsAndColors`로 선택하면 `환경 > 글꼴 및 색 > 텍스트 편집기`의 테마별 `VisualBoost` 전경색 사용
+- C++ 편집기와 심볼 탐색 창에서 의미 색상을 공유하며, 선택 행과 고대비 모드의 기본 강조색 유지
 - `.git`, `.vs`, `bin`, `obj`, `packages`, `node_modules` 및 대형 생성물 디렉터리 제외
 
 ## 테스트

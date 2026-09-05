@@ -6,6 +6,10 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/Coloring/ColoringColorSource.cs" Link="ColoringColorSource.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Coloring/SemanticFormatNames.cs" Link="SemanticFormatNames.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Coloring/SharedColorPalette.cs" Link="SharedColorPalette.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/SearchPalette.cs" Link="SearchPalette.cs" />
     <Compile Include="../../src/VisualBoost.Package/Options/PaletteColorEditor.cs" Link="PaletteColorEditor.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/ColoringSettings.cs" Link="ColoringSettings.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/CppColorFormatSession.cs" Link="CppColorFormatSession.cs" />

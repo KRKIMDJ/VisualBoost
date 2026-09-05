@@ -15,6 +15,10 @@ public sealed class ColoringOptionsPage : DialogPage
     [Description("VS가 판별한 타입·변수·함수·매크로에 색상을 적용합니다. 고대비 모드에서는 VS 색상을 유지합니다.")]
     public bool Enabled { get; set; } = true;
 
+    [Category("일반"), DisplayName("색상 설정 기준"), DefaultValue(ColoringColorSource.Palette)]
+    [Description("Palette: 아래 테마별 팔레트. FontsAndColors: 환경 > 글꼴 및 색 > 텍스트 편집기의 VisualBoost 항목 전경색. 두 설정은 서로 덮어쓰지 않습니다.")]
+    public ColoringColorSource ColorSource { get; set; } = ColoringColorSource.Palette;
+
     [Category("어두운 테마"), DisplayName("타입"), DefaultValue("")]
     [Editor(typeof(PaletteColorEditor), typeof(UITypeEditor)), PaletteDefault("#68D5C4")]
     [Description("… 버튼으로 색상 팔레트를 엽니다. 기본색으로 돌아가려면 값을 비우거나 항목을 다시 설정하세요.")]
@@ -49,7 +53,7 @@ public sealed class ColoringOptionsPage : DialogPage
     [Description("… 버튼으로 색상 팔레트를 엽니다. 기본색으로 돌아가려면 값을 비우거나 항목을 다시 설정하세요.")]
     public string LightMacro { get; set; } = "";
 
-    internal ColoringSettings CreateSettings() => new(Enabled, Values());
+    internal ColoringSettings CreateSettings() => new(Enabled, Values(), ColorSource);
     private string[] Values() => new[] { DarkType, DarkVariable, DarkFunction, DarkMacro,
         LightType, LightVariable, LightFunction, LightMacro };
 

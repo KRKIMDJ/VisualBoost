@@ -10,6 +10,8 @@ using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Xml.Linq;
 using VisualBoost.UI;
+using VisualBoost.Coloring;
+using VisualBoost.Core.Analysis;
 
 internal static class Program
 {
@@ -21,11 +23,13 @@ internal static class Program
             var root = Path.GetFullPath(args[0]);
             var output = Path.Combine(root, "artifacts", "ui-validation");
             Directory.CreateDirectory(output);
+            ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
             foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog", "SymbolUsagesControl" })
                 Validate(root, output, name);
             UsageLifecycleTests.Run();
             ColorFormatTests.Run();
             PaletteAndMenuTests.Run(root);
+            SharedColorTests.Run();
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
             return 0;
         }
@@ -50,6 +54,7 @@ internal static class Program
             if (node.Name.LocalName == "DialogWindow") node.Name = wpf + "Window";
             if (node.Name.LocalName == "DialogWindow.Resources") node.Name = wpf + "Window.Resources";
             if (node.Name.LocalName == "FittedResultsList") node.Name = ui + "FittedResultsList";
+            if (node.Name.NamespaceName.StartsWith("clr-namespace:VisualBoost.UI", StringComparison.Ordinal)) node.Name = ui + node.Name.LocalName;
             if (node.Name.LocalName == "CrispImage")
             {
                 node.Name = wpf + "Border";
@@ -57,6 +62,12 @@ internal static class Program
             }
             foreach (var attribute in node.Attributes().ToArray())
             {
+                if (attribute.Name.NamespaceName.StartsWith("clr-namespace:VisualBoost.UI", StringComparison.Ordinal))
+                {
+                    node.Add(new XAttribute(ui + attribute.Name.LocalName, attribute.Value));
+                    attribute.Remove();
+                    continue;
+                }
                 if (attribute.Name == x + "Class" || events.Contains(attribute.Name.LocalName)) attribute.Remove();
                 else if (attribute.IsNamespaceDeclaration && attribute.Name.LocalName == "ui") attribute.Value = ui.NamespaceName;
                 else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsBrushes."))
@@ -112,6 +123,19 @@ internal static class Program
             list.SelectedIndex = 2;
         }
         Pump();
+        if (name == "SymbolSearchDialog")
+        {
+            var symbolItems = Descendants<ListViewItem>(items).ToArray();
+            var unselectedText = Descendants<TextBlock>(symbolItems.First(item => !item.IsSelected)).First(text => text.Text == "SetMovementMode");
+            var selectedText = Descendants<TextBlock>(symbolItems.First(item => item.IsSelected)).First(text => text.Text == "SetMovementMode");
+            Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0xF2, 0xCB, 0x8D), "심볼 팔레트 적용 실패");
+            Assert(((SolidColorBrush)selectedText.Foreground).Color == Colors.White, "선택 행 색상 우선순위 실패");
+            ColoringSettings.Publish(new ColoringSettings(true, new[] { "", "", "#11AA66", "", "", "", "", "" }));
+            Pump();
+            Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0x11, 0xAA, 0x66), "열린 창 색상 변경 반영 실패");
+            ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
+            Pump();
+        }
         var surface = (FrameworkElement)window.Content;
         var image = new RenderTargetBitmap((int)surface.ActualWidth, (int)surface.ActualHeight, 96, 96, PixelFormats.Pbgra32);
         var drawing = new DrawingVisual();
@@ -122,6 +146,11 @@ internal static class Program
         encoder.Frames.Add(BitmapFrame.Create(image));
         using (var stream = File.Create(Path.Combine(output, name + ".png"))) encoder.Save(stream);
         window.Close();
+        Pump();
+        var closedRevision = SearchPalette.GetRevision(element);
+        ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
+        Pump();
+        Assert(SearchPalette.GetRevision(element) == closedRevision, "닫은 창의 팔레트 이벤트 해제 실패");
         Console.WriteLine("PASS: " + name);
     }
 
@@ -145,6 +174,7 @@ internal static class Program
     {
         public Row(int line) { Line = line; }
         public string Name => "SetMovementMode";
+        public SourceSymbolLocation Location => new(Name, FullPath, Line, 1, SourceSymbolKind.Function);
         public string FileName => "CharacterMovementComponent.cpp";
         public string ProjectName => "Engine";
         public string DirectoryPath => "Engine/Source/Runtime/Engine/Private/Components";

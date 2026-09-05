@@ -5,6 +5,7 @@
                        xmlns:platform="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
                        xmlns:vsshell="clr-namespace:Microsoft.VisualStudio.Shell;assembly=Microsoft.VisualStudio.Shell.15.0"
                        Title="VisualBoost 심볼 탐색"
+                       ui:SearchPalette.Track="True"
                        Width="980"
                        Height="560"
                        MinWidth="720"
@@ -15,6 +16,7 @@
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
+    <ui:SymbolColorConverter x:Key="SymbolColorConverter" />
 
     <Style TargetType="Button">
       <Setter Property="Foreground" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}" />
@@ -146,7 +148,17 @@
                 <DataTemplate>
                   <TextBlock Margin="6,0" VerticalAlignment="Center" FontWeight="SemiBold"
                              Text="{Binding Name}" TextTrimming="CharacterEllipsis"
-                             ToolTip="{Binding Name}" />
+                             ToolTip="{Binding Name}">
+                    <TextBlock.Foreground>
+                      <MultiBinding Converter="{StaticResource SymbolColorConverter}">
+                        <Binding Path="Location.Kind" />
+                        <Binding Path="IsSelected" RelativeSource="{RelativeSource AncestorType=ListViewItem}" />
+                        <Binding Path="Foreground" RelativeSource="{RelativeSource AncestorType=ListViewItem}" />
+                        <Binding Path="Background" RelativeSource="{RelativeSource AncestorType=Window}" />
+                        <Binding Path="(ui:SearchPalette.Revision)" RelativeSource="{RelativeSource AncestorType=Window}" />
+                      </MultiBinding>
+                    </TextBlock.Foreground>
+                  </TextBlock>
                 </DataTemplate>
               </GridViewColumn.CellTemplate>
             </GridViewColumn>
