@@ -4,6 +4,17 @@
     <TargetFramework>net472</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileCatalog.cs" Link="SolutionFileCatalog.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexService.cs" Link="SolutionFileIndexService.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexSnapshot.cs" Link="SolutionFileIndexSnapshot.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexConfiguration.cs" Link="SolutionFileIndexConfiguration.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionIndexDiscoveryResult.cs" Link="SolutionIndexDiscoveryResult.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/FileIndexCache.cs" Link="FileIndexCache.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/UnrealEngineSourceLocator.cs" Link="UnrealEngineSourceLocator.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/CppProjectSearchRootLocator.cs" Link="CppProjectSearchRootLocator.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Analysis/SolutionSourceAnalyzer.cs" Link="SolutionSourceAnalyzer.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Analysis/SourceAnalysisCache.cs" Link="SourceAnalysisCache.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Analysis/CachedSourceAnalysis.cs" Link="CachedSourceAnalysis.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/IndexedSymbolUsageProvider.cs" Link="IndexedSymbolUsageProvider.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/ISymbolUsageProvider.cs" Link="ISymbolUsageProvider.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SymbolUsageScope.cs" Link="SymbolUsageScope.cs" />

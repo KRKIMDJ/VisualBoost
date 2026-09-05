@@ -31,7 +31,15 @@ internal static class SearchHighlightTests
             Check(string.Concat(runs.Where(run => run.TextDecorations?.Any(d => d.Location == TextDecorationLocation.Underline) == true).Select(run => run.Text)) == expected, "일치 밑줄");
             Check(runs.All(run => run.Foreground == block.Foreground), "색상 상속");
         }
-        Console.WriteLine("PASS: 일치 문자 굵기·밑줄, 퍼지/복수 토큰, 검색어 교체·빈 검색·색상 상속");
+        SearchTextHighlight.SetText(block, "Move");
+        SearchTextHighlight.SetQuery(block, "Move");
+        SearchTextHighlight.SetSuffix(block, "(MoveType value) · Game::MoveOwner");
+        var detail = block.Inlines.OfType<Run>().Last();
+        Check(detail.FontWeight == FontWeights.Normal && detail.TextDecorations?.Count is null or 0, "인수·소속의 같은 이름에는 굵기·밑줄을 붙이지 않음");
+        Check(string.Concat(block.Inlines.OfType<Run>().Select(run => run.Text)) == "Move(MoveType value) · Game::MoveOwner", "한 행의 이름·인수·소속 보존");
+        SearchTextHighlight.SetSuffix(block, "");
+        Check(string.Concat(block.Inlines.OfType<Run>().Select(run => run.Text)) == "Move", "행 재활용 시 이전 상세 정보 제거");
+        Console.WriteLine("PASS: 일치 문자 굵기·밑줄, 퍼지/복수 토큰, 검색어 교체·빈 검색·색상 상속 및 심볼 상세 정보");
     }
 
     private static void Check(bool valid, string message)

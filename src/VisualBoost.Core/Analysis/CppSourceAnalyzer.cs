@@ -3,41 +3,44 @@ using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Text.RegularExpressions;
+using System.Threading;
 
 namespace VisualBoost.Core.Analysis;
 
 public static class CppSourceAnalyzer
 {
+    private static readonly TimeSpan MatchTimeout = TimeSpan.FromMilliseconds(100);
     private static readonly Regex IncludePattern = new(
         @"^\s*#\s*include\s*(?<open>[<""])(?<value>[^>""]+)[>""]",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly Regex MacroPattern = new(
         @"^\s*#\s*define\s+(?<name>[A-Za-z_]\w*)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly Regex NamespacePattern = new(
         @"\bnamespace\s+(?<name>[A-Za-z_]\w*)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly Regex TypePattern = new(
-        @"\b(?:(?:class|struct|union)\s+(?:[A-Za-z_]\w*_API\s+)?|enum(?:\s+class)?\s+)(?<name>[A-Za-z_]\w*)",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"\b(?:(?<kind>class|struct|union)\s+(?:[A-Za-z_]\w*_API\s+)?|(?<kind>enum)(?:\s+(?:class|struct))?\s+)(?<name>[A-Za-z_]\w*)",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly Regex FunctionPattern = new(
-        @"(?<name>[A-Za-z_~]\w*(?:::[A-Za-z_~]\w*)*)\s*\([^;{}]*\)\s*(?:const\s*)?(?:noexcept\s*)?(?:(?:override|final)\s*)?(?:->[^;{]+)?\s*(?<terminator>[;{]?)\s*$",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        // 공백과 식별자를 되감아 분할하지 않습니다. 마스킹된 긴 주석에서도 탐색 비용을 제한합니다.
+        @"(?<![\w:~])(?<name>[A-Za-z_~](?>\w*)(?:::[A-Za-z_~](?>\w*))*)(?>\s*)\([^;{}]*\)(?>\s*)(?:const\b(?>\s*))?(?:noexcept\b(?>\s*))?(?:(?:override|final)\b(?>\s*))?(?:->[^;{]+)?(?<terminator>[;{]?)(?>\s*)$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly Regex VariablePattern = new(
-        @"^\s*(?:(?:static|const|constexpr|inline|extern|mutable|thread_local)\s+)*(?:[A-Za-z_]\w*(?:::\w+)*(?:\s*[*&])?\s+)+(?<name>[A-Za-z_]\w*)\s*(?:[=;,\[])",
-        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+        @"^(?>\s*)(?>(?:(?:static|const|constexpr|inline|extern|mutable|thread_local)\s+)*)(?:[A-Za-z_](?>\w*)(?:::(?>\w+))*(?:\s*[*&])?(?>\s+))+(?<name>[A-Za-z_](?>\w*))(?>\s*)(?:[=;,\[])",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly HashSet<string> ControlKeywords = new(StringComparer.Ordinal)
     {
         "if", "for", "while", "switch", "catch", "return", "sizeof", "alignof", "decltype",
     };
 
-    public static SourceFileAnalysis Analyze(string path, string source)
+    public static SourceFileAnalysis Analyze(string path, string source, CancellationToken cancellationToken = default)
     {
         if (path is null)
         {
@@ -52,19 +55,28 @@ public static class CppSourceAnalyzer
         var includes = new List<SourceIncludeReference>();
         var symbols = new List<SourceSymbolLocation>();
         var inBlockComment = false;
+        cancellationToken.ThrowIfCancellationRequested();
+        var maskedSource = CppSymbolDetails.Mask(source, cancellationToken);
+        using var maskedReader = new StringReader(maskedSource);
         using var reader = new StringReader(source);
         string? line;
         var lineNumber = 0;
+        var sourceOffset = 0;
         while ((line = reader.ReadLine()) is not null)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             lineNumber++;
-            var code = RemoveComments(line, ref inBlockComment);
+            var code = maskedReader.ReadLine() ?? string.Empty;
+            var lineOffset = sourceOffset;
+            var nextLine = maskedSource.IndexOf('\n', sourceOffset);
+            sourceOffset = nextLine < 0 ? maskedSource.Length : nextLine + 1;
+            var includeCode = RemoveComments(line, ref inBlockComment);
             if (code.Length == 0)
             {
                 continue;
             }
 
-            var includeMatch = IncludePattern.Match(code);
+            var includeMatch = code.TrimStart().StartsWith("#", StringComparison.Ordinal) ? IncludePattern.Match(includeCode) : Match.Empty;
             if (includeMatch.Success)
             {
                 includes.Add(new SourceIncludeReference(
@@ -74,7 +86,8 @@ public static class CppSourceAnalyzer
                 continue;
             }
 
-            AddMatch(symbols, MacroPattern.Match(code), path, lineNumber, SourceSymbolKind.Macro);
+            var macro = MacroPattern.Match(code);
+            if (macro.Success) { AddMatch(symbols, macro, path, lineNumber, SourceSymbolKind.Macro); continue; }
             AddMatch(symbols, NamespacePattern.Match(code), path, lineNumber, SourceSymbolKind.Namespace);
             foreach (Match typeMatch in TypePattern.Matches(code))
             {
@@ -83,10 +96,34 @@ public static class CppSourceAnalyzer
                     continue;
                 }
 
-                AddMatch(symbols, typeMatch, path, lineNumber, SourceSymbolKind.Type);
+                var kind = typeMatch.Groups["kind"].Value switch
+                {
+                    "class" => SourceSymbolKind.Class,
+                    "struct" => SourceSymbolKind.Struct,
+                    "union" => SourceSymbolKind.Union,
+                    "enum" => SourceSymbolKind.Enum,
+                    _ => SourceSymbolKind.Type,
+                };
+                AddMatch(symbols, typeMatch, path, lineNumber, kind);
             }
 
             var functionMatch = FunctionPattern.Match(code);
+            if (!functionMatch.Success && code.IndexOf('(') >= 0 && code.IndexOfAny(new[] { ';', '{', '}' }) < 0)
+            {
+                // 여러 줄 인수 목록만 제한적으로 이어 읽습니다. 파일 전체 정규식 검색은 하지 않습니다.
+                var end = sourceOffset;
+                for (var count = 0; count < 16 && end < maskedSource.Length && end - lineOffset < 4096; count++)
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    var newline = maskedSource.IndexOf('\n', end);
+                    end = newline < 0 ? maskedSource.Length : newline + 1;
+                    if (end - lineOffset > 4096) break;
+                    var candidate = maskedSource.Substring(lineOffset, end - lineOffset);
+                    var match = FunctionPattern.Match(candidate);
+                    if (match.Success && match.Groups["name"].Index < code.Length) { code = candidate; functionMatch = match; break; }
+                    if (candidate.IndexOfAny(new[] { ';', '{', '}' }) >= 0) break;
+                }
+            }
             if (functionMatch.Success && IsFunctionDeclarationOrDefinition(code, functionMatch))
             {
                 var name = LastNameSegment(functionMatch.Groups["name"].Value);
@@ -100,7 +137,7 @@ public static class CppSourceAnalyzer
             AddMatch(symbols, VariablePattern.Match(code), path, lineNumber, SourceSymbolKind.Variable);
         }
 
-        return new SourceFileAnalysis(path, includes, symbols);
+        return new SourceFileAnalysis(path, includes, CppSymbolDetails.Enrich(source, symbols, maskedSource, cancellationToken));
     }
 
     private static bool IsForwardDeclaration(string code, Match match)
@@ -177,7 +214,7 @@ public static class CppSourceAnalyzer
 
         var nameGroup = match.Groups["name"];
         symbols.Add(new SourceSymbolLocation(
-            nameGroup.Value,
+            kind == SourceSymbolKind.Function ? LastNameSegment(nameGroup.Value) : nameGroup.Value,
             path,
             line,
             nameGroup.Index + 1,

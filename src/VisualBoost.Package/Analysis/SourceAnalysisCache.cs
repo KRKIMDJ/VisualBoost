@@ -12,12 +12,16 @@ namespace VisualBoost.Analysis;
 internal sealed class SourceAnalysisCache
 {
     private const string Magic = "VisualBoost.SourceAnalysis";
-    private const int Version = 2;
+    private const int Version = 3;
     private const int MaximumFiles = 1_000_000;
     private const int MaximumItemsPerFile = 100_000;
-    private readonly string directory = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        "VisualBoost", "Cache", "Analysis");
+    private readonly string directory;
+
+    internal SourceAnalysisCache(string? directory = null)
+    {
+        this.directory = directory ?? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+            "VisualBoost", "Cache", "Analysis");
+    }
 
     public IReadOnlyDictionary<string, CachedSourceAnalysis> Load(string solutionPath)
     {
@@ -58,7 +62,7 @@ internal sealed class SourceAnalysisCache
                     var line = reader.ReadInt32();
                     var column = reader.ReadInt32();
                     var kind = (SourceSymbolKind)reader.ReadInt32();
-                    symbols.Add(new SourceSymbolLocation(name, file, line, column, kind));
+                    symbols.Add(new SourceSymbolLocation(name, file, line, column, kind, reader.ReadString(), reader.ReadString()));
                 }
 
                 entries[file] = new CachedSourceAnalysis(
@@ -116,6 +120,8 @@ internal sealed class SourceAnalysisCache
                         writer.Write(symbol.Line);
                         writer.Write(symbol.Column);
                         writer.Write((int)symbol.Kind);
+                        writer.Write(symbol.Scope);
+                        writer.Write(symbol.Signature);
                     }
                 }
             }

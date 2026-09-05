@@ -33,6 +33,7 @@ internal static class Program
             SharedColorTests.Run();
             NavigationIntegrationTests.Run();
             SearchHighlightTests.Run();
+            CompletionInteractionTests.Run(root);
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
             return 0;
         }
@@ -138,9 +139,13 @@ internal static class Program
             Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0x11, 0xAA, 0x66), "열린 창 색상 변경 반영 실패");
             if (name == "SymbolSearchDialog")
             {
+                var headers = ((GridView)((ListView)items).View).Columns.Select(c => c.Header.ToString()).ToArray();
+                Assert(headers.SequenceEqual(new[] { "심볼", "종류", "파일", "라인", "프로젝트" }), "심볼 종류 열과 표시 순서");
+                Assert(Descendants<TextBlock>(symbolItems[0]).Any(t => t.Text == "function"), "종류 셀 값 표시");
                 foreach (var block in new[] { unselectedText, selectedText })
                 {
                     var runs = block.Inlines.OfType<Run>().ToArray();
+                    Assert(string.Concat(runs.Select(run => run.Text)) == "SetMovementMode", "심볼 셀에 인수·소속을 표시하지 않음");
                     Assert(string.Concat(runs.Where(run => run.FontWeight == FontWeights.Bold).Select(run => run.Text)) == "Move", "심볼 일치 문자만 굵게 표시");
                     Assert(string.Concat(runs.Where(run => run.TextDecorations?.Any(d => d.Location == TextDecorationLocation.Underline) == true).Select(run => run.Text)) == "Move", "심볼 일치 문자만 밑줄 표시");
                     Assert(runs.All(run => ((SolidColorBrush)run.Foreground).Color == ((SolidColorBrush)block.Foreground).Color), "심볼 구간은 팔레트/선택 색상 상속");
@@ -218,6 +223,10 @@ internal static class Program
     {
         public Row(int line) { Line = line; }
         public string Name => "SetMovementMode";
+        public string Kind => "function";
+        public string Detail => "(MovementMode mode, byte customMode = 0)";
+        public string OwnerDisplay => " · Game::Character";
+        public string Description => Name + Detail;
         public string SearchQuery => "Move";
         public SourceSymbolLocation Location => new(Name, FullPath, Line, 1, SourceSymbolKind.Function);
         public string FileName => "CharacterMovementComponent.cpp";

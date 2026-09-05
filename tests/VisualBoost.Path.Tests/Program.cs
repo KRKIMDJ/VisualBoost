@@ -15,6 +15,8 @@ internal static class Program
             foreach (var invalid in new[] { "", "C:relative.cpp", "metadata://assembly/Type.cs", "vsls://session/Main.cpp", "C:\\bad\"file.cpp", "C:\\bad:file.cpp", "\\only-root.cpp", "\\\\server" })
                 Check(!SearchPath.TryNormalize(invalid, out _), "비파일·불완전 경로 제외: " + invalid);
             NameUsageProviderTests.Run();
+            SymbolCacheTests.Run();
+            SourceAnalysisRegressionTests.Run();
             Console.WriteLine("모든 .NET Framework 경로·이름 검색 회귀 테스트가 통과했습니다.");
             return 0;
         }

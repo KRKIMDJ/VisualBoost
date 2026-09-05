@@ -16,7 +16,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.18.2")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.19.2")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(typeof(UI.SymbolUsagesToolWindow), Style = VsDockStyle.Tabbed,
@@ -29,6 +29,8 @@ namespace VisualBoost;
 [ProvideProfile(typeof(IndexingOptionsPage), "VisualBoost", "인덱싱", 0, 0, true)]
 [ProvideOptionPage(typeof(ColoringOptionsPage), "VisualBoost", "Coloring", 0, 0, true)]
 [ProvideProfile(typeof(ColoringOptionsPage), "VisualBoost", "Coloring", 0, 0, true)]
+[ProvideOptionPage(typeof(CompletionOptionsPage), "VisualBoost", "자동완성", 0, 0, true)]
+[ProvideProfile(typeof(CompletionOptionsPage), "VisualBoost", "자동완성", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
@@ -57,6 +59,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         MigrateLegacyOptions();
+        ((CompletionOptionsPage)GetDialogPage(typeof(CompletionOptionsPage))).Publish();
         var components = await GetServiceAsync(typeof(SComponentModel)) as IComponentModel;
         Assumes.Present(components);
         Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
@@ -79,6 +82,7 @@ public sealed class VisualBoostPackage : AsyncPackage
             {
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 UnsubscribeSolutionEvents();
+                Completion.CompletionRuntime.GetSnapshot = null;
                 ResetUsageSearch();
                 Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
                 Coloring.SharedColorPalette.Detach();
@@ -133,6 +137,7 @@ public sealed class VisualBoostPackage : AsyncPackage
     private void OnSolutionClosed()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        Completion.CompletionRuntime.GetSnapshot = null;
         ResetUsageSearch();
         fileIndex.Clear();
     }
@@ -169,6 +174,7 @@ public sealed class VisualBoostPackage : AsyncPackage
     private void StartFileIndex(DTE2 dte)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        Completion.CompletionRuntime.GetSnapshot = () => fileIndex.CompletionSnapshot;
         fileIndex.Configure(GetIndexingOptions().CreateConfiguration());
         fileIndex.Start(SolutionSearchRootCollector.Collect(dte));
     }

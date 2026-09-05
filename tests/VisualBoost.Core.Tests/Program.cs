@@ -17,6 +17,7 @@ internal static class Program
 
     private static int Main()
     {
+        Run("심볼 상세 정보 및 입력 보조", SymbolAssistanceTests.Run);
         Run("같은 디렉터리의 구현 파일을 가장 먼저 선택한다", SameDirectoryWins);
         Run("include와 src 디렉터리를 대응시킨다", IncludeAndSrcArePaired);
         Run("파일명은 대소문자를 구분하지 않는다", FileNameMatchingIsCaseInsensitive);
@@ -477,7 +478,7 @@ internal static class Program
         Equal(true, analysis.Symbols.Any(symbol =>
             symbol.Name == "Demo" && symbol.Kind == SourceSymbolKind.Namespace));
         Equal(true, analysis.Symbols.Any(symbol =>
-            symbol.Name == "Widget" && symbol.Kind == SourceSymbolKind.Type));
+            symbol.Name == "Widget" && symbol.Kind == SourceSymbolKind.Class));
         Equal(true, analysis.Symbols.Any(symbol =>
             symbol.Name == "BuildWidget" && symbol.Kind == SourceSymbolKind.Function));
         Equal(true, analysis.Symbols.Any(symbol =>
@@ -534,7 +535,7 @@ internal static class Program
             """;
 
         var analysis = CppSourceAnalyzer.Analyze("Types.h", source);
-        var types = analysis.Symbols.Where(symbol => symbol.Kind == SourceSymbolKind.Type).ToArray();
+        var types = analysis.Symbols.Where(symbol => symbol.Kind == SourceSymbolKind.Class).ToArray();
 
         Equal(2, types.Length);
         Equal("DefinedType", types[0].Name);

@@ -26,6 +26,7 @@ public partial class SymbolSearchDialog : DialogWindow
     private bool isClosed;
     private int observedSymbolCount = -1;
     private bool observedIsAnalyzing;
+    private string? observedAnalysisError;
 
     internal SymbolSearchDialog(
         SolutionFileIndexService fileIndex,
@@ -124,12 +125,13 @@ public partial class SymbolSearchDialog : DialogWindow
                     : "일치하는 심볼이 없습니다.";
                 EmptyStateDescription.Text = snapshot.IsAnalyzing
                     ? "캐시 또는 새 분석 결과가 준비되면 자동으로 다시 검색합니다."
-                    : "심볼명을 변경해 보세요.";
+                    : snapshot.AnalysisError ?? "심볼명을 변경해 보세요.";
             }
 
             var currentSnapshot = fileIndex.GetSnapshot();
             StatusText.Text = $"{items.Length:N0}개 결과 · {currentSnapshot.SymbolCount:N0}개 심볼" +
-                              (currentSnapshot.IsAnalyzing ? " · 소스 분석 중" : string.Empty);
+                              AnalysisStatus(currentSnapshot);
+            StatusText.ToolTip = currentSnapshot.AnalysisError;
         }
         catch (OperationCanceledException)
         {
@@ -166,13 +168,15 @@ public partial class SymbolSearchDialog : DialogWindow
     {
         if (isClosed || isSearching) return;
         var snapshot = fileIndex.GetSnapshot();
-        if (snapshot.SymbolCount == observedSymbolCount && snapshot.IsAnalyzing == observedIsAnalyzing)
+        if (snapshot.SymbolCount == observedSymbolCount && snapshot.IsAnalyzing == observedIsAnalyzing &&
+            snapshot.AnalysisError == observedAnalysisError)
         {
             return;
         }
 
         observedSymbolCount = snapshot.SymbolCount;
         observedIsAnalyzing = snapshot.IsAnalyzing;
+        observedAnalysisError = snapshot.AnalysisError;
         if (string.IsNullOrWhiteSpace(SearchBox.Text))
         {
             UpdateIdleState(snapshot);
@@ -192,12 +196,17 @@ public partial class SymbolSearchDialog : DialogWindow
         else
         {
             EmptyStateTitle.Text = "심볼명을 입력하세요.";
-            EmptyStateDescription.Text = "심볼 이름만 검색합니다.";
+            EmptyStateDescription.Text = snapshot.AnalysisError ?? "심볼 이름만 검색합니다.";
         }
 
         StatusText.Text = $"0개 결과 · {snapshot.SymbolCount:N0}개 심볼" +
-                          (snapshot.IsAnalyzing ? " · 소스 분석 중" : string.Empty);
+                          AnalysisStatus(snapshot);
+        StatusText.ToolTip = snapshot.AnalysisError;
     }
+
+    private static string AnalysisStatus(SolutionFileIndexSnapshot snapshot) => snapshot.IsAnalyzing
+        ? " · 소스 분석 중"
+        : snapshot.AnalysisError is not null ? " · 분석 확인 필요" : string.Empty;
 
     private void OnClearSearchClick(object sender, RoutedEventArgs eventArgs)
     {
@@ -306,11 +315,15 @@ internal sealed class SymbolSearchResultItem
 
     private static string GetKindText(SourceSymbolKind kind) => kind switch
     {
-        SourceSymbolKind.Namespace => "네임스페이스",
-        SourceSymbolKind.Type => "타입",
-        SourceSymbolKind.Function => "함수",
-        SourceSymbolKind.Variable => "변수",
-        SourceSymbolKind.Macro => "매크로",
-        _ => "기타",
+        SourceSymbolKind.Namespace => "namespace",
+        SourceSymbolKind.Type => "type",
+        SourceSymbolKind.Class => "class",
+        SourceSymbolKind.Struct => "struct",
+        SourceSymbolKind.Union => "union",
+        SourceSymbolKind.Enum => "enum",
+        SourceSymbolKind.Function => "function",
+        SourceSymbolKind.Variable => "variable",
+        SourceSymbolKind.Macro => "macro",
+        _ => "unknown",
     };
 }

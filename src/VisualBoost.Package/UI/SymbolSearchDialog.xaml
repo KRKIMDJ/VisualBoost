@@ -143,7 +143,7 @@
                MouseDoubleClick="OnResultDoubleClick">
         <ListView.View>
           <GridView AllowsColumnReorder="False">
-            <GridViewColumn Header="심볼" Width="460">
+            <GridViewColumn Header="심볼" Width="390">
               <GridViewColumn.CellTemplate>
                 <DataTemplate>
                   <TextBlock Margin="6,0" VerticalAlignment="Center" FontWeight="Normal"
@@ -163,7 +163,15 @@
                 </DataTemplate>
               </GridViewColumn.CellTemplate>
             </GridViewColumn>
-            <GridViewColumn Header="파일" Width="290">
+            <GridViewColumn Header="종류" Width="90">
+              <GridViewColumn.CellTemplate>
+                <DataTemplate>
+                  <TextBlock Margin="6,0" VerticalAlignment="Center" Text="{Binding Kind}"
+                             TextTrimming="CharacterEllipsis" ToolTip="{Binding Kind}" Opacity="0.8" />
+                </DataTemplate>
+              </GridViewColumn.CellTemplate>
+            </GridViewColumn>
+            <GridViewColumn Header="파일" Width="270">
               <GridViewColumn.CellTemplate>
                 <DataTemplate>
                   <TextBlock Margin="6,0" VerticalAlignment="Center"

@@ -17,7 +17,7 @@ internal sealed class SolutionFileIndexService : IDisposable
     private readonly object gate = new();
     private readonly FilePathIndex index = new();
     private readonly FileIndexCache cache = new();
-    private readonly SolutionSourceAnalyzer sourceAnalyzer = new();
+    private readonly SolutionSourceAnalyzer sourceAnalyzer;
     private CancellationTokenSource rebuildCancellation = new();
     private IReadOnlyList<string> roots = Array.Empty<string>();
     private IReadOnlyList<string> explicitFiles = Array.Empty<string>();
@@ -37,7 +37,13 @@ internal sealed class SolutionFileIndexService : IDisposable
     private SolutionFileIndexConfiguration configuration = SolutionFileIndexConfiguration.Default;
     private bool disposed;
 
+    internal SolutionFileIndexService(SolutionSourceAnalyzer? sourceAnalyzer = null)
+    {
+        this.sourceAnalyzer = sourceAnalyzer ?? new SolutionSourceAnalyzer();
+    }
+
     public int Count => index.Count;
+    public SymbolCompletionSnapshot CompletionSnapshot => sourceAnalyzer.CompletionSnapshot;
 
     public void Configure(SolutionFileIndexConfiguration value)
     {
@@ -546,20 +552,12 @@ internal sealed class SolutionFileIndexService : IDisposable
                     analysisError = null;
                     activeAnalysis = currentConfiguration.EnableSourceAnalysis
                         ? Task.Run(
-                            async () =>
-                            {
-                                // 이전 실행의 심볼을 먼저 공개해 전체 재검증을 기다리지 않고 탐색할 수 있게 합니다.
-                                sourceAnalyzer.LoadCachedSymbols(currentSolutionPath, cancellationToken);
-                                // Solution 로드 직후의 Visual Studio 작업과 CPU 및 디스크 사용이 겹치지 않게 양보합니다.
-                                await Task.Delay(
-                                    currentConfiguration.SourceAnalysisDelay,
-                                    cancellationToken).ConfigureAwait(false);
-                                AnalyzeSources(
+                            () => AnalyzeSourcesAsync(
                                     currentSolutionPath,
                                     files,
                                     effectiveRoots,
-                                    cancellationToken);
-                            },
+                                    currentConfiguration.SourceAnalysisDelay,
+                                    cancellationToken),
                             cancellationToken)
                         : Task.CompletedTask;
                 }
@@ -590,14 +588,18 @@ internal sealed class SolutionFileIndexService : IDisposable
         }
     }
 
-    private void AnalyzeSources(
+    private async Task AnalyzeSourcesAsync(
         string currentSolutionPath,
         IReadOnlyList<string> files,
         IReadOnlyList<string> includeRoots,
+        TimeSpan delay,
         CancellationToken cancellationToken)
     {
         try
         {
+            // 캐시 로딩과 시작 대기도 같은 오류 경계에 포함해 분석 중 표시가 남지 않게 합니다.
+            sourceAnalyzer.LoadCachedSymbols(currentSolutionPath, cancellationToken);
+            await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
             var externalFiles = sourceAnalyzer.Analyze(
                 currentSolutionPath,
                 files,
@@ -614,7 +616,7 @@ internal sealed class SolutionFileIndexService : IDisposable
                 if (!disposed && !cancellationToken.IsCancellationRequested)
                 {
                     isAnalyzing = false;
-                    analysisError = null;
+                    analysisError = sourceAnalyzer.LastWarning;
                 }
             }
         }

@@ -10,6 +10,10 @@ public static class SearchTextHighlight
         "Text", typeof(string), typeof(SearchTextHighlight), new PropertyMetadata(string.Empty, Refresh));
     public static readonly DependencyProperty QueryProperty = DependencyProperty.RegisterAttached(
         "Query", typeof(string), typeof(SearchTextHighlight), new PropertyMetadata(string.Empty, Refresh));
+    public static readonly DependencyProperty SuffixProperty = DependencyProperty.RegisterAttached(
+        "Suffix", typeof(string), typeof(SearchTextHighlight), new PropertyMetadata(string.Empty, Refresh));
+    public static string GetSuffix(DependencyObject target) => (string)target.GetValue(SuffixProperty);
+    public static void SetSuffix(DependencyObject target, string value) => target.SetValue(SuffixProperty, value);
 
     public static string GetText(DependencyObject target) => (string)target.GetValue(TextProperty);
     public static void SetText(DependencyObject target, string value) => target.SetValue(TextProperty, value);
@@ -30,5 +34,6 @@ public static class SearchTextHighlight
                 TextDecorations = segment.IsMatch ? TextDecorations.Underline : null,
             });
         }
+        textBlock.Inlines.Add(new Run(GetSuffix(target) ?? string.Empty) { FontWeight = FontWeights.Normal });
     }
 }

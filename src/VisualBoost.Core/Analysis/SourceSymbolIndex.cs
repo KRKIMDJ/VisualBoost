@@ -12,17 +12,23 @@ public sealed class SourceSymbolIndex : IDisposable
     private Dictionary<string, SourceSymbolLocation[]> locationsByName =
         new(StringComparer.OrdinalIgnoreCase);
     private SymbolSearchSnapshot searchSnapshot = new(Array.Empty<SourceSymbolLocation>());
+    private SymbolCompletionSnapshot completionSnapshot = SymbolCompletionSnapshot.Empty;
 
     public int Count { get; private set; }
 
-    public void ReplaceAll(IEnumerable<SourceSymbolLocation> locations)
+    public void ReplaceAll(IEnumerable<SourceSymbolLocation> locations, CancellationToken cancellationToken = default)
     {
         if (locations is null)
         {
             throw new ArgumentNullException(nameof(locations));
         }
 
-        var replacement = locations
+        cancellationToken.ThrowIfCancellationRequested();
+        var replacement = locations.Select(location =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return location;
+            })
             .GroupBy(location => location.Name, StringComparer.OrdinalIgnoreCase)
             .ToDictionary(
                 group => group.Key,
@@ -34,12 +40,15 @@ public sealed class SourceSymbolIndex : IDisposable
                 StringComparer.OrdinalIgnoreCase);
         var count = replacement.Values.Sum(items => items.Length);
         var snapshot = new SymbolSearchSnapshot(replacement.Values.SelectMany(items => items));
+        var completion = new SymbolCompletionSnapshot(replacement.Values.SelectMany(items => items));
 
         gate.EnterWriteLock();
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             locationsByName = replacement;
             searchSnapshot = snapshot;
+            Volatile.Write(ref completionSnapshot, completion);
             Count = count;
         }
         finally
@@ -89,4 +98,6 @@ public sealed class SourceSymbolIndex : IDisposable
     }
 
     public void Dispose() => gate.Dispose();
+
+    public SymbolCompletionSnapshot CompletionSnapshot => Volatile.Read(ref completionSnapshot);
 }

@@ -94,7 +94,8 @@ public sealed class SymbolColorConverter : IMultiValueConverter
             return fallback;
         var kind = values[0] is SourceSymbolKind sourceKind ? sourceKind switch
         {
-            SourceSymbolKind.Type => (SemanticColorKind?)SemanticColorKind.Type,
+            SourceSymbolKind.Type or SourceSymbolKind.Class or SourceSymbolKind.Struct or
+                SourceSymbolKind.Union or SourceSymbolKind.Enum => (SemanticColorKind?)SemanticColorKind.Type,
             SourceSymbolKind.Function => SemanticColorKind.Function,
             SourceSymbolKind.Variable => SemanticColorKind.Variable,
             SourceSymbolKind.Macro => SemanticColorKind.Macro,

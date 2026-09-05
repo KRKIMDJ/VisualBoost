@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Text.RegularExpressions;
 using VisualBoost.Core.Analysis;
 using VisualBoost.Core.Searching;
 
@@ -18,14 +19,21 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         ".c", ".cc", ".cpp", ".cxx", ".h", ".hh", ".hpp", ".hxx", ".inl", ".ixx", ".cppm",
     };
 
-    private readonly SourceAnalysisCache cache = new();
+    private readonly SourceAnalysisCache cache;
     private readonly SourceSymbolIndex symbols = new();
     private readonly object gate = new();
     private IReadOnlyDictionary<string, string[]> includeGraph =
         new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
     private int includeEdgeCount;
 
+    internal SolutionSourceAnalyzer(SourceAnalysisCache? cache = null)
+    {
+        this.cache = cache ?? new SourceAnalysisCache();
+    }
+
     public int SymbolCount => symbols.Count;
+    public string? LastWarning { get; private set; }
+    public SymbolCompletionSnapshot CompletionSnapshot => symbols.CompletionSnapshot;
 
     public int IncludeEdgeCount
     {
@@ -41,8 +49,10 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         IReadOnlyList<string> includeRoots,
         CancellationToken cancellationToken)
     {
+        LastWarning = null;
         var previous = cache.Load(solutionPath);
         var current = new ConcurrentDictionary<string, CachedSourceAnalysis>(StringComparer.OrdinalIgnoreCase);
+        var timedOutFiles = 0;
         var parallelOptions = new ParallelOptions
         {
             CancellationToken = cancellationToken,
@@ -55,8 +65,10 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             var info = TryGetInfo(file);
             if (info is null || info.Length > MaximumSourceLength) return;
 
+            // 구 캐시는 먼저 검색에 사용하고, 상세 타입이 없는 파일만 한 번 재분석해 보강합니다.
             if (previous.TryGetValue(file, out var cached) &&
-                cached.Length == info.Length && cached.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks)
+                cached.Length == info.Length && cached.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks &&
+                !cached.Analysis.Symbols.Any(symbol => symbol.Kind == SourceSymbolKind.Type))
             {
                 current[file] = cached;
                 return;
@@ -64,8 +76,13 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
 
             try
             {
-                var analysis = CppSourceAnalyzer.Analyze(file, File.ReadAllText(file));
+                var analysis = CppSourceAnalyzer.Analyze(file, File.ReadAllText(file), cancellationToken);
                 current[file] = new CachedSourceAnalysis(info.Length, info.LastWriteTimeUtc.Ticks, analysis);
+            }
+            catch (RegexMatchTimeoutException)
+            {
+                // 비정상 구문 하나가 전체 탐색을 막지 않게 격리하고, 불완전한 결과는 캐시하지 않습니다.
+                Interlocked.Increment(ref timedOutFiles);
             }
             catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
             {
@@ -73,6 +90,10 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             }
         });
 
+        cancellationToken.ThrowIfCancellationRequested();
+        LastWarning = timedOutFiles == 0 ? null : $"복잡한 구문으로 {timedOutFiles:N0}개 파일 분석을 건너뛰었습니다. 일부 심볼이 누락될 수 있습니다.";
+        // 검색에 필요하지 않은 include 경로 확인 및 캐시 저장이 완료되기 전에 심볼을 공개합니다.
+        symbols.ReplaceAll(current.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
         var knownFiles = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
         var filesByName = knownFiles
             .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
@@ -95,7 +116,6 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             }
         }
 
-        symbols.ReplaceAll(current.Values.SelectMany(entry => entry.Analysis.Symbols));
         lock (gate)
         {
             includeGraph = graph;
@@ -110,7 +130,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         var cached = cache.Load(solutionPath);
         cancellationToken.ThrowIfCancellationRequested();
-        symbols.ReplaceAll(cached.Values.SelectMany(entry => entry.Analysis.Symbols));
+        symbols.ReplaceAll(cached.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
     }
 
     public IReadOnlyList<SourceSymbolLocation> FindSymbol(string name) => symbols.Find(name);
