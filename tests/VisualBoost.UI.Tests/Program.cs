@@ -25,6 +25,8 @@ internal static class Program
             var output = Path.Combine(root, "artifacts", "ui-validation");
             Directory.CreateDirectory(output);
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
+            if (args.Skip(1).Contains("--code-generation"))
+            { GenerationInteractionTests.Run(output); return 0; }
             if (args.Skip(1).Contains("--document-navigation"))
             { DocumentNavigationInteractionTests.Run(root); return 0; }
             foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog", "SymbolUsagesControl" })
@@ -32,6 +34,7 @@ internal static class Program
             UsageLifecycleTests.Run();
             ColorFormatTests.Run();
             PaletteAndMenuTests.Run(root);
+            GenerationInteractionTests.Run(output);
             SharedColorTests.Run();
             NavigationIntegrationTests.Run();
             SearchHighlightTests.Run();

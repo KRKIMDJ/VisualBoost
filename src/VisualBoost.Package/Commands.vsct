@@ -5,6 +5,10 @@
 
   <Commands package="guidVisualBoostPackage">
     <Menus>
+      <Menu guid="guidVisualBoostCommandSet" id="VisualBoostCodeMenu" priority="0x0100" type="Menu">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCodeContextGroup" />
+        <Strings><ButtonText>Visual Boost</ButtonText></Strings>
+      </Menu>
       <Menu guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" priority="0x0100" type="Menu">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostToolsGroup" />
         <Strings>
@@ -13,6 +17,12 @@
       </Menu>
     </Menus>
     <Groups>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostCodeContextGroup" priority="0x0800">
+        <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
+      </Group>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostGenerationContextGroup" priority="0x0100">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCodeMenu" />
+      </Group>
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostToolsGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
       </Group>
@@ -25,6 +35,10 @@
     </Groups>
 
     <Buttons>
+      <Button guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x01C0" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings><ButtonText>현재 코드 도구...</ButtonText><CanonicalName>VisualBoost.GenerateFunction</CanonicalName></Strings>
+      </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenDocumentMembersCommand" priority="0x0195" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
@@ -84,7 +98,13 @@
     </Buttons>
   </Commands>
 
+  <CommandPlacements>
+    <CommandPlacement guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x0100">
+      <Parent guid="guidVisualBoostCommandSet" id="VisualBoostGenerationContextGroup" />
+    </CommandPlacement>
+  </CommandPlacements>
   <KeyBindings>
+    <KeyBinding guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="Q" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenDocumentMembersCommand" editor="GUID_TextEditorFactory" mod1="ALT" key1="M" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="O" />
@@ -100,6 +120,9 @@
       <IDSymbol name="VisualBoostToolsGroup" value="0x1021" />
       <IDSymbol name="VisualBoostSubmenu" value="0x1022" />
       <IDSymbol name="VisualBoostSettingsGroup" value="0x1023" />
+      <IDSymbol name="VisualBoostCodeMenu" value="0x1024" />
+      <IDSymbol name="VisualBoostCodeContextGroup" value="0x1025" />
+      <IDSymbol name="VisualBoostGenerationContextGroup" value="0x1026" />
       <IDSymbol name="SwitchHeaderSourceCommand" value="0x0100" />
       <IDSymbol name="OpenOptionsCommand" value="0x0101" />
       <IDSymbol name="ShowIndexStatusCommand" value="0x0102" />
@@ -108,6 +131,7 @@
       <IDSymbol name="NavigateToDefinitionCommand" value="0x0105" />
       <IDSymbol name="FindSymbolUsagesCommand" value="0x0106" />
       <IDSymbol name="OpenDocumentMembersCommand" value="0x0107" />
+      <IDSymbol name="GenerateFunctionCommand" value="0x0108" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

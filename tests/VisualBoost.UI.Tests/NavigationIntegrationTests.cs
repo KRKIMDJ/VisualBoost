@@ -108,7 +108,7 @@ internal static class NavigationIntegrationTests
 namespace EnvDTE
 {
     internal enum vsCMElement { vsCMElementFunction }
-    internal enum vsCMPart { vsCMPartName }
+    internal enum vsCMPart { vsCMPartName, vsCMPartWhole }
     internal sealed class TextPoint
     {
         public TextPoint(int line, int column) { Line = line; LineCharOffset = column; }
@@ -132,7 +132,7 @@ namespace EnvDTE
         public object? FileCodeModel { get; set; }
         public Project ContainingProject { get; set; } = new();
     }
-    internal sealed class Project { public object? CodeModel { get; set; } }
+    internal sealed class Project { public object? CodeModel { get; set; } public string UniqueName { get; set; } = "Sample"; }
 }
 namespace EnvDTE80
 {
@@ -150,12 +150,32 @@ namespace Microsoft.VisualStudio.VCCodeModel
     }
     internal sealed class VCCodeFunction
     {
+        public string Name { get; set; } = "Reset";
+        public object Parent { get; set; } = new VCCodeClass();
+        public bool IsTemplate { get; set; }
+        public bool IsInjected { get; set; }
+        public bool IsDefault { get; set; }
+        public bool IsDelete { get; set; }
+        public Func<vsCMPart, vsCMWhere, TextPoint>? StartReader { get; set; }
+        public Func<vsCMPart, vsCMWhere, TextPoint>? EndReader { get; set; }
+        public Func<vsCMWhere, string>? LocationReader { get; set; }
         public bool FailLocation { get; set; }
-        public TextPoint get_StartPointOf(vsCMPart part, vsCMWhere where) => where == vsCMWhere.vsCMWhereDeclaration ? new(5, 10) : new(20, 15);
-        public TextPoint get_EndPointOf(vsCMPart part, vsCMWhere where) => where == vsCMWhere.vsCMWhereDeclaration ? new(5, 16) : new(20, 21);
+        public TextPoint get_StartPointOf(vsCMPart part, vsCMWhere where) => StartReader?.Invoke(part, where) ?? (where == vsCMWhere.vsCMWhereDeclaration ? new(5, 10) : new(20, 15));
+        public TextPoint get_EndPointOf(vsCMPart part, vsCMWhere where) => EndReader?.Invoke(part, where) ?? (where == vsCMWhere.vsCMWhereDeclaration ? new(5, 16) : new(20, 21));
         public string get_Location(vsCMWhere where) => FailLocation ? throw new COMException("Missing location") :
-            where == vsCMWhere.vsCMWhereDeclaration ? "C:/Sample/Widget.h" : "C:/Sample/Widget.cpp";
+            LocationReader?.Invoke(where) ?? (where == vsCMWhere.vsCMWhereDeclaration ? "C:/Sample/Widget.h" : "C:/Sample/Widget.cpp");
     }
+    internal class VCCodeClass
+    {
+        public object? Parent { get; set; }
+        public string FullName { get; set; } = "Widget";
+        public bool IsTemplate { get; set; }
+        public bool IsInjected { get; set; }
+        public string get_Location(vsCMWhere where) => "C:/Sample/Widget.h";
+        public TextPoint get_StartPointOf(vsCMPart part) => part == vsCMPart.vsCMPartName ? new(1, 7) : new(1, 1);
+        public TextPoint get_EndPointOf(vsCMPart part) => new(3, 3);
+    }
+    internal sealed class VCCodeStruct : VCCodeClass { }
 }
 namespace Microsoft.VisualStudio
 {

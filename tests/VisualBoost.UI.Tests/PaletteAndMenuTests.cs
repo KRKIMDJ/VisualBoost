@@ -31,7 +31,7 @@ internal static class PaletteAndMenuTests
         var xml = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "Commands.vsct"));
         XNamespace ns = xml.Root!.Name.Namespace;
         var commands = xml.Root.Element(ns + "Commands")!;
-        var menu = commands.Element(ns + "Menus")!.Elements(ns + "Menu").Single();
+        var menu = commands.Element(ns + "Menus")!.Elements(ns + "Menu").Single(m => (string?)m.Attribute("id") == "VisualBoostSubmenu");
         Assert((string?)menu.Attribute("id") == "VisualBoostSubmenu" && (string?)menu.Element(ns + "Strings")!.Element(ns + "ButtonText") == "Visual Boost", "하위 메뉴 제목");
         var groups = commands.Element(ns + "Groups")!.Elements(ns + "Group").ToDictionary(g => (string)g.Attribute("id")!);
         Assert(groups.Values.Count(g => (string?)g.Element(ns + "Parent")!.Attribute("id") == "IDM_VS_MENU_TOOLS") == 1, "도구 메뉴 직접 그룹은 하나");
@@ -42,7 +42,7 @@ internal static class PaletteAndMenuTests
             Assert((string?)group.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu", "모든 명령은 하위 메뉴 안에 배치");
             Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
         }
-        var expected = new[] { "OpenDocumentMembersCommand|GUID_TextEditorFactory|ALT|M", "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
+        var expected = new[] { "GenerateFunctionCommand|GUID_TextEditorFactory|Shift Alt|Q", "OpenDocumentMembersCommand|GUID_TextEditorFactory|ALT|M", "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
             "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S", "FindSymbolUsagesCommand|GUID_TextEditorFactory|Shift Alt|F",
             "NavigateToDefinitionCommand|GUID_TextEditorFactory|ALT|G" };
         var actual = xml.Root.Element(ns + "KeyBindings")!.Elements(ns + "KeyBinding").Select(k =>
@@ -63,7 +63,11 @@ internal static class PaletteAndMenuTests
         Assert(view.Descendants(wpf + "TextBlock").Any(block => (string?)block.Attribute("Text") == "심볼:"), "코드 검색 상단 심볼 라벨");
         var pane = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesToolWindow.cs"));
         Assert(pane.Contains("Caption = \"VisualBoost 코드 검색\""), "코드 검색 도킹 창 제목");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count() == 8, "문서 함수 탐색을 포함한 여덟 명령");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count() == 9, "코드 생성을 포함한 아홉 명령");
+        var placement = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement").Single();
+        Assert((string?)placement.Attribute("id") == "GenerateFunctionCommand" && (string?)placement.Element(ns + "Parent")!.Attribute("id") == "VisualBoostGenerationContextGroup", "코드 편집기 메뉴가 같은 생성 명령을 재사용");
+        var generationCommand = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "GenerateFunctionCommand.cs"));
+        Assert(!generationCommand.Contains("ShowModal") && !generationCommand.Contains("ShowMessageBox") && generationCommand.Contains("paths[0]") && generationCommand.Contains("SystemSounds.Beep.Play"), "파일 선택·미리보기·이동 질문 제거, 1순위 자동 대상과 알림음");
         var package = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs"));
         Assert(package.Contains("ProvideToolWindow") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"), "이름 검색 창만 등록하고 정밀 옵션·인덱스는 제외");
         var project = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoost.Package.csproj"));

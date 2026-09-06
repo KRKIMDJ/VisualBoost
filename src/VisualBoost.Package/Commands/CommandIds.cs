@@ -10,4 +10,5 @@ internal static class CommandIds
     public const int NavigateToDefinition = 0x0105;
     public const int FindSymbolUsages = 0x0106;
     public const int OpenDocumentMembers = 0x0107;
+    public const int GenerateFunction = 0x0108;
 }

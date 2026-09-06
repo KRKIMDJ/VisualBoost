@@ -16,7 +16,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.20.1")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.21.2")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(typeof(UI.SymbolUsagesToolWindow), Style = VsDockStyle.Tabbed,
@@ -33,6 +33,8 @@ namespace VisualBoost;
 [ProvideProfile(typeof(CompletionOptionsPage), "VisualBoost", "자동완성", 0, 0, true)]
 [ProvideOptionPage(typeof(DocumentNavigationOptionsPage), "VisualBoost", "문서 함수 탐색", 0, 0, true)]
 [ProvideProfile(typeof(DocumentNavigationOptionsPage), "VisualBoost", "문서 함수 탐색", 0, 0, true)]
+[ProvideOptionPage(typeof(CodeGenerationOptionsPage), "VisualBoost", "코드 생성", 0, 0, true)]
+[ProvideProfile(typeof(CodeGenerationOptionsPage), "VisualBoost", "코드 생성", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
@@ -76,6 +78,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await NavigateToDefinitionCommand.InitializeAsync(this, cancellationToken);
         await FindSymbolUsagesCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
+        await GenerateFunctionCommand.InitializeAsync(this, fileIndex, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)
@@ -187,6 +190,12 @@ public sealed class VisualBoostPackage : AsyncPackage
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         return (GeneralOptionsPage)GetDialogPage(typeof(GeneralOptionsPage));
+    }
+
+    internal bool IsCodeGenerationEnabled()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        return ((CodeGenerationOptionsPage)GetDialogPage(typeof(CodeGenerationOptionsPage))).Enabled;
     }
 
     internal FileSearchOptionsPage GetFileSearchOptions()

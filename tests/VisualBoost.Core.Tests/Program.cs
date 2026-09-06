@@ -17,6 +17,7 @@ internal static class Program
 
     private static int Main()
     {
+        Run("일반 C++ 선언·정의 생성", CodeGenerationTests.Run);
         Run("현재 문서 함수 범위·검색·취소·성능", DocumentNavigationTests.Run);
         Run("심볼 상세 정보 및 입력 보조", SymbolAssistanceTests.Run);
         Run("같은 디렉터리의 구현 파일을 가장 먼저 선택한다", SameDirectoryWins);

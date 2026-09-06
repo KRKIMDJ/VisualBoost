@@ -52,6 +52,16 @@ namespace Microsoft.VisualStudio.Text
         public int Length => text.Length;
         public string Text => text;
         public string GetText(Span span) => text.Substring(span.Start, span.Length);
+        public string GetText(int start, int length) => text.Substring(start, length);
+        public SnapshotLine GetLineFromLineNumber(int number)
+        {
+            var start = 0;
+            for (var i = 0; i < number; i++) { var next = text.IndexOf('\n', start); if (next < 0) throw new ArgumentOutOfRangeException(nameof(number)); start = next + 1; }
+            if (number < 0) throw new ArgumentOutOfRangeException(nameof(number));
+            var end = text.IndexOf('\n', start); if (end < 0) end = text.Length;
+            if (end > start && text[end - 1] == '\r') end--;
+            return new SnapshotLine(this, start, end - start);
+        }
     }
     internal sealed class SnapshotVersion(int number) { public int VersionNumber => number; }
     internal interface ITextBuffer
@@ -67,8 +77,8 @@ namespace Microsoft.VisualStudio.Text
         public int Position => position;
         public SnapshotLine GetContainingLine() => new(snapshot);
     }
-    internal sealed class SnapshotLine(ITextSnapshot snapshot)
-    { public SnapshotPoint Start => new(snapshot, 0); public string GetText() => snapshot.Text; }
+    internal sealed class SnapshotLine(ITextSnapshot snapshot, int start = 0, int length = -1)
+    { public SnapshotPoint Start => new(snapshot, start); public int Length => length < 0 ? snapshot.Length : length; public string GetText() => snapshot.Text.Substring(start, Length); }
     internal sealed class TextChange(string newText, int oldLength, int position)
     { public string NewText => newText; public int OldLength => oldLength; public int NewPosition => position; }
     internal sealed class TextContentChangedEventArgs(ITextSnapshot after, TextChange change) : EventArgs
@@ -180,17 +190,36 @@ namespace Microsoft.VisualStudio.Text.Operations
     internal sealed class ITextUndoHistoryRegistry
     {
         public TestHistory History { get; } = new();
-        public bool TryGetHistory(TestBuffer buffer, out TestHistory history) { history = History; return true; }
+        public bool Available = true;
+        public bool TryGetHistory(TestBuffer buffer, out TestHistory history) { history = History; history.Buffer = buffer; return Available; }
     }
     internal sealed class TestHistory
     {
         public int Completed;
+        public int Canceled;
+        public TestBuffer? Buffer;
+        public string Before = "", After = "";
+        public void Undo() => Buffer!.Set(Before);
+        public void Redo() => Buffer!.Set(After);
         public TestTransaction CreateTransaction(string text) => new(this);
     }
     internal sealed class TestTransaction(TestHistory history) : IDisposable
-    { public void Complete() => history.Completed++; public void Dispose() { } }
+    {
+        private readonly string before = history.Buffer!.Snapshot.Text;
+        public void Complete() { history.Before = before; history.After = history.Buffer!.Snapshot.Text; history.Completed++; }
+        public void Cancel() { history.Buffer!.Set(before); history.Canceled++; }
+        public void Dispose() { }
+    }
     internal sealed class IEditorOperations
-    { public void AddBeforeTextBufferChangePrimitive() { } public void AddAfterTextBufferChangePrimitive() { } }
+    {
+        public bool FailAfter;
+        public void AddBeforeTextBufferChangePrimitive() { }
+        public void AddAfterTextBufferChangePrimitive() { if (FailAfter) throw new InvalidOperationException("Simulated failure after edit"); }
+    }
     internal sealed class IEditorOperationsFactoryService
     { public IEditorOperations GetEditorOperations(IWpfTextView view) => new(); }
+}
+namespace Microsoft.VisualStudio.PlatformUI
+{
+    internal class DialogWindow : Window { public bool? ShowModal() => ShowDialog(); }
 }

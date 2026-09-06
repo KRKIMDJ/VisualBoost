@@ -6,6 +6,10 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
+    <Page Include="../../src/VisualBoost.Package/CodeGeneration/DocumentCodeActionMenuStyles.xaml" Link="CodeGeneration/DocumentCodeActionMenuStyles.xaml" />
+    <Compile Include="../../src/VisualBoost.Package/CodeGeneration/GenerationModelReader.cs" Link="GenerationModelReader.cs" />
+    <Compile Include="../../src/VisualBoost.Package/CodeGeneration/GenerationEditApplier.cs" Link="GenerationEditApplier.cs" />
+    <Compile Include="../../src/VisualBoost.Package/CodeGeneration/DocumentCodeActionMenu.cs" Link="DocumentCodeActionMenu.cs" />
     <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationControl.xaml.cs" Link="DocumentNavigationControl.xaml.cs" />
     <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentMemberBuffer.cs" Link="DocumentMemberBuffer.cs" />
     <Compile Include="../../src/VisualBoost.Package/Completion/CompletionRuntime.cs" Link="CompletionRuntime.cs" />
