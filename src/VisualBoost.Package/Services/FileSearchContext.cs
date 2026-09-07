@@ -41,7 +41,7 @@ internal sealed class FileSearchContext
             SolutionProjectCatalog.Collect(dte, preferredRoot));
     }
 
-    private static string? GetActiveProjectDirectory(DTE2 dte)
+    internal static string? GetActiveProjectDirectory(DTE2 dte)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         try

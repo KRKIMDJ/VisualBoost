@@ -16,7 +16,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.21.2")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.23.3")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideToolWindow(typeof(UI.SymbolUsagesToolWindow), Style = VsDockStyle.Tabbed,
@@ -35,6 +35,8 @@ namespace VisualBoost;
 [ProvideProfile(typeof(DocumentNavigationOptionsPage), "VisualBoost", "문서 함수 탐색", 0, 0, true)]
 [ProvideOptionPage(typeof(CodeGenerationOptionsPage), "VisualBoost", "코드 생성", 0, 0, true)]
 [ProvideProfile(typeof(CodeGenerationOptionsPage), "VisualBoost", "코드 생성", 0, 0, true)]
+[ProvideOptionPage(typeof(EditorToolsOptionsPage), "VisualBoost", "편집 도구", 0, 0, true)]
+[ProvideProfile(typeof(EditorToolsOptionsPage), "VisualBoost", "편집 도구", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
@@ -70,6 +72,8 @@ public sealed class VisualBoostPackage : AsyncPackage
         Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
         Coloring.ColoringSettings.Publish(((ColoringOptionsPage)GetDialogPage(typeof(ColoringOptionsPage))).CreateSettings());
         StartFileIndex(dte);
+        CommentLinks.CommentLinkRuntime.Enabled = ((EditorToolsOptionsPage)GetDialogPage(typeof(EditorToolsOptionsPage))).CommentLinksEnabled;
+        CommentLinks.CommentLinkRuntime.Index = fileIndex;
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
         await ShowIndexStatusCommand.InitializeAsync(this, fileIndex, cancellationToken);
@@ -90,6 +94,7 @@ public sealed class VisualBoostPackage : AsyncPackage
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 UnsubscribeSolutionEvents();
                 Completion.CompletionRuntime.GetSnapshot = null;
+                CommentLinks.CommentLinkRuntime.Index = null;
                 ResetUsageSearch();
                 Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
                 Coloring.SharedColorPalette.Detach();
@@ -120,6 +125,8 @@ public sealed class VisualBoostPackage : AsyncPackage
             documentEvents.DocumentOpened -= OnDocumentOpened;
         }
     }
+
+    internal bool IsQuickIncludeEnabled() => ((EditorToolsOptionsPage)GetDialogPage(typeof(EditorToolsOptionsPage))).QuickIncludeEnabled;
 
     private void OnDocumentOpened(Document document)
     {

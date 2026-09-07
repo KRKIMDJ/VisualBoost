@@ -40,6 +40,15 @@ internal static class GenerationInteractionTests
         Check(target.TextSnapshot.Text == snapshot.Text && undo.History.Canceled == 1, "삽입 후 실패 시 전체 복원");
 
         var untouched = target.TextSnapshot;
+        var includeView = new IWpfTextView(); includeView.TextBuffer.Set("#pragma once\nclass Foo {};\n");
+        var includeSnapshot = includeView.TextSnapshot;
+        includeView.Caret.MoveTo(new Microsoft.VisualStudio.Text.SnapshotPoint(includeSnapshot, 20));
+        var includePlan = QuickInclude.Create(includeSnapshot.Text, @"C:\Test\Foo.h", @"C:\Test\Bar.h");
+        var includeUndo = new ITextUndoHistoryRegistry();
+        GenerationEditApplier.Apply(includeView, includeSnapshot, includeView, includeSnapshot, includePlan, includeUndo, new IEditorOperations(), "VisualBoost 빠른 인클루드", true);
+        Check(includeView.Caret.Position.BufferPosition.Position == 20 + includePlan.Text.Length, "include 삽입 후 기존 심볼의 캐럿 유지");
+        includeUndo.History.Undo(); Check(includeView.TextSnapshot.Text == includeSnapshot.Text, "include 한 번의 Undo");
+        includeUndo.History.Redo(); Check(includeView.TextSnapshot.Text == includeSnapshot.Text.Insert(includePlan.Offset, includePlan.Text), "include Redo");
         DocumentCodeActionMenuTests.Run(output);
         Check(target.TextSnapshot == untouched, "도구 메뉴 열기·취소 시 무편집");
         Console.WriteLine("PASS: 실제 편집 적용 코드의 Undo/Redo·버전·읽기 전용·실패 복원 및 문맥 도구 메뉴 (편집기 경계 대체)");

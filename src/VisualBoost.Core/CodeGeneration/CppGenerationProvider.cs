@@ -10,7 +10,7 @@ namespace VisualBoost.Core.CodeGeneration;
 
 // 탐색용 인덱스가 아니라 언어 모델이 확인한 원문 범위만 변환합니다.
 // 지원하지 않는 구문은 추측해서 편집하지 않고 명시적으로 거부합니다.
-public sealed class CppGenerationProvider
+public sealed partial class CppGenerationProvider
 {
     public void ValidateSource(string source, GenerationFunction function, CancellationToken token = default)
     {
@@ -51,7 +51,9 @@ public sealed class CppGenerationProvider
                 body += newline + unit + "static_assert(false, \"VisualBoost: implement return value\");";
                 warning = "반환값을 임의로 만들지 않기 위해 static_assert(false)를 넣습니다. 본문을 구현하고 제거하기 전까지 컴파일되지 않습니다. " + warning;
             }
-            return new GenerationPlan(target.Length, (target.Length == 0 ? "" : newline + newline) + signature + newline + "{" + newline + body + newline + "}" + newline,
+            var neighbor = FindNeighbor(source, sourceCode, function, target, targetCode, 0, target.Length, null, token);
+            var offset = neighbor?.Offset ?? target.Length;
+            return new GenerationPlan(offset, (offset == 0 ? "" : newline + newline) + signature + newline + "{" + newline + body + newline + "}" + newline,
                 signature, warning);
         }
 
@@ -74,6 +76,14 @@ public sealed class CppGenerationProvider
         var ownLine = string.IsNullOrWhiteSpace(prefix);
         var baseIndent = ownLine ? prefix : Regex.Match(target.Substring(target.LastIndexOf('\n', cls.Start) + 1), @"^[ \t]*").Value;
         var declaration = (header.ReturnType.Length == 0 ? "" : header.ReturnType + " ") + function.Name + header.Parameters + header.Qualifiers + ";";
+        var nearby = FindNeighbor(source, sourceCode, function, target, targetCode, open + 1, close,
+            position => AccessAt(targetCode, open, position, classPrefix.TrimStart().StartsWith("struct", StringComparison.Ordinal) ? "public" : "private") == access, token);
+        if (nearby is not null)
+        {
+            var insertion = nearby.Value;
+            return new GenerationPlan(insertion.Offset, (insertion.Offset > 0 && target[insertion.Offset - 1] != '\n' ? newline : "") + insertion.Indent + declaration + newline,
+                declaration, "선택한 접근 수준에서 주변 함수 순서에 맞춰 선언을 추가합니다. virtual/static/기본 인수는 구현만으로 복원하지 않습니다. " + warning);
+        }
         var text = newline + baseIndent + access + ":" + newline + baseIndent + unit + declaration + newline + (ownLine ? "" : baseIndent);
         return new GenerationPlan(ownLine ? closingLine : close, text, declaration,
             "virtual/static/기본 인수는 구현만으로 복원하지 않습니다. 선택한 접근 수준의 새 구역에 선언을 추가합니다. " + warning);

@@ -38,6 +38,20 @@ internal static class CodeGenerationCompileTests
         File.WriteAllText(Path.Combine(folder, "Widget.h"), header.Insert(declaration.Offset, declaration.Text));
         File.WriteAllText(Path.Combine(folder, "Widget.cpp"), definitions + reverse);
         Compile(true);
+        const string orderedHeader = "#pragma once\nnamespace Game { class Widget { public:\n    void First(int value);\n    void Missing();\n    void Last();\n}; }\n";
+        var orderedSource = "#include \"Widget.h\"\nnamespace Game {\nvoid Widget::First(int value) {}\nvoid Widget::Last() {}\n}\n";
+        var orderedPlan = provider.Create(orderedHeader, CodeGenerationTests.Function(orderedHeader, "void Missing();", "Missing", false, "Game::Widget"), orderedSource, GenerationDirection.Definition, "Widget.h");
+        orderedSource = orderedSource.Insert(orderedPlan.Offset, orderedPlan.Text);
+        File.WriteAllText(Path.Combine(folder, "Widget.h"), orderedHeader);
+        File.WriteAllText(Path.Combine(folder, "Widget.cpp"), orderedSource);
+        Compile(true);
+        var missingHeader = orderedHeader.Replace("    void Missing();\n", "");
+        var orderedClass = new GenerationClass("Game::Widget", missingHeader.IndexOf("class", StringComparison.Ordinal), missingHeader.IndexOf("Widget", StringComparison.Ordinal), missingHeader.IndexOf("};", StringComparison.Ordinal) + 2);
+        // 역방향 배치까지 컴파일해 접근 수준과 namespace 내부 생성 위치를 확인합니다.
+        var reverseOrdered = "void Game::Widget::First(int value) {}\nvoid Game::Widget::Missing() {}\nvoid Game::Widget::Last() {}\n";
+        var reverseOrderedPlan = provider.Create(reverseOrdered, CodeGenerationTests.Function(reverseOrdered, "void Game::Widget::Missing() {}", "Missing", true, "Game::Widget"), missingHeader, GenerationDirection.Declaration, "Widget.h", orderedClass, "public");
+        File.WriteAllText(Path.Combine(folder, "Widget.h"), missingHeader.Insert(reverseOrderedPlan.Offset, reverseOrderedPlan.Text));
+        Compile(true);
         Console.WriteLine("PASS: MSVC C++17 정·역방향 생성 결과 컴파일 및 미완성 반환 본문의 의도된 실패");
         Console.WriteLine("C++ test artifacts: " + folder);
 

@@ -39,6 +39,7 @@ internal static class PaletteAndMenuTests
         foreach (var button in commands.Element(ns + "Buttons")!.Elements(ns + "Button"))
         {
             var group = groups[(string)button.Element(ns + "Parent")!.Attribute("id")!];
+            if ((string?)group.Attribute("id") is "VisualBoostActionPopupGroup" or "VisualBoostDeclarationPopupGroup") continue;
             Assert((string?)group.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu", "모든 명령은 하위 메뉴 안에 배치");
             Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
         }
@@ -63,7 +64,7 @@ internal static class PaletteAndMenuTests
         Assert(view.Descendants(wpf + "TextBlock").Any(block => (string?)block.Attribute("Text") == "심볼:"), "코드 검색 상단 심볼 라벨");
         var pane = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesToolWindow.cs"));
         Assert(pane.Contains("Caption = \"VisualBoost 코드 검색\""), "코드 검색 도킹 창 제목");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count() == 9, "코드 생성을 포함한 아홉 명령");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 9, "내부 메뉴 항목과 별개로 사용자 명령 아홉 개 유지");
         var placement = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement").Single();
         Assert((string?)placement.Attribute("id") == "GenerateFunctionCommand" && (string?)placement.Element(ns + "Parent")!.Attribute("id") == "VisualBoostGenerationContextGroup", "코드 편집기 메뉴가 같은 생성 명령을 재사용");
         var generationCommand = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "GenerateFunctionCommand.cs"));

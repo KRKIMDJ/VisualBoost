@@ -45,17 +45,41 @@ internal static class DocumentNavigationTests
         Check(snapshot.FindContaining(source.IndexOf("auto lambda")) is null, "함수 외부");
         Check(snapshot.Search("Upd ate", false).Count == 3, "이름 AND 검색");
         Check(snapshot.Search("WIDGET_API", false).Count == 0, "경로·소속·인자 제외");
+        var tree = DocumentMemberTree.Build(snapshot.Members);
+        Check(tree.Count == 1 && tree[0].Name == "N" && tree[0].Kind == "namespace", "namespace 상위 구조");
+        Check(tree[0].Children.Count == 1 && tree[0].Children[0].Name == "Widget" && tree[0].Children[0].Children.Count == 8, "class 멤버와 클래스 밖 정의를 같은 그룹으로 연결");
+        var nested = provider.Analyze("namespace Outer { class Host { void Start(); struct Child { void Move(); }; void End(); }; }");
+        var nestedTree = DocumentMemberTree.Build(nested.Members);
+        Check(nestedTree[0].Children[0].Children[1].Name == "Child" && nestedTree[0].Children[0].Children[1].Children[0].Name == "Move", "중첩 struct 깊이와 함수 문서 순서");
+        var filteredTree = DocumentMemberTree.Build(nested.Search("Move", false));
+        Check(filteredTree[0].Name == "Outer" && filteredTree[0].Children[0].Children.Count == 1, "검색 결과의 상위 구조만 유지");
+        var external = DocumentMemberTree.Build(provider.Analyze("void Widget::Tick() {} void Widget::Reset() {}").Members);
+        Check(external.Count == 1 && external[0].Kind == "scope" && external[0].Children.Count == 2, "소속 종류를 추측하지 않는 클래스 밖 한정 함수 그룹");
+        Check(DocumentMemberTree.Build(nested.Members, nameOrder: true)[0].Children[0].Children[0].Name == "Child", "형제 이름순 정렬");
+        var compound = DocumentMemberTree.Build(provider.Analyze("namespace A::B { class C { void Tick(); }; } void A::B::C::Tick() {}").Members);
+        Check(compound.Count == 1 && compound[0].Children[0].Name == "B" && compound[0].Children[0].Children[0].Children.Count == 2, "복합 namespace 깊이 및 완전 한정 정의 연결");
         Check(provider.Analyze("void Pending() { int x;").FindContaining(20)?.Name == "Pending", "미완성 본문");
         Check(provider.Analyze("void Old();").Members[0].Name != provider.Analyze("void New();").Members[0].Name, "미저장 변경");
         using var cancelled = new CancellationTokenSource();
         cancelled.Cancel();
         try { provider.Analyze(source, cancelled.Token); throw new Exception("취소 누락"); }
         catch (OperationCanceledException) { }
+        try { DocumentMemberTree.Build(snapshot.Members, cancelled.Token); throw new Exception("트리 취소 누락"); }
+        catch (OperationCanceledException) { }
         var large = string.Join("\n", Enumerable.Range(0, 5000).Select(i => $"void UpdateMovement{i}() {{ if(true) {{ Call(); }} }}"));
         var watch = Stopwatch.StartNew();
         var largeSnapshot = provider.Analyze(large);
         Console.WriteLine($"문서 함수 5,000개 분석: {watch.Elapsed.TotalMilliseconds:F1}ms");
         Check(largeSnapshot.Members.Count == 5000, "대규모 목록 누락");
+        watch.Restart(); Check(DocumentMemberTree.Build(largeSnapshot.Members).Count == 5000, "대규모 트리 누락 없음");
+        Check(watch.ElapsedMilliseconds < 1000, "트리 구성 성능 회귀");
+        Console.WriteLine($"문서 함수 5,000개 트리: {watch.Elapsed.TotalMilliseconds:F1}ms");
+        var qualifiedSource = string.Join("\n", Enumerable.Range(0, 5000).Select(i => $"void Engine::Character::UpdateMovement{i}() {{ Call(); }}"));
+        watch.Restart(); var qualifiedSnapshot = provider.Analyze(qualifiedSource);
+        var qualifiedTree = DocumentMemberTree.Build(qualifiedSnapshot.Members);
+        Check(qualifiedTree.Count == 1 && qualifiedTree[0].Children[0].Children.Count == 5000, "대규모 한정 함수 그룹과 누락 없음");
+        Check(watch.ElapsedMilliseconds < 1000, "한정 함수 분석·계층화 성능 회귀");
+        Console.WriteLine($"한정 함수 5,000개 분석·트리: {watch.Elapsed.TotalMilliseconds:F1}ms");
         var times = Enumerable.Range(0, 30).Select(i => { watch.Restart(); largeSnapshot.Search("Upd Move 49", false); return watch.Elapsed.TotalMilliseconds; }).OrderBy(x => x).ToArray();
         Console.WriteLine($"문서 함수 검색 p95: {times[28]:F1}ms");
         Check(times[28] < 100, "문서 검색 성능 회귀");

@@ -146,6 +146,8 @@
             <GridViewColumn Header="심볼" Width="390">
               <GridViewColumn.CellTemplate>
                 <DataTemplate>
+                  <DockPanel Margin="6,0">
+                  <ui:ProductIcon SymbolKind="{Binding Kind}" Margin="0,0,6,0" DockPanel.Dock="Left" />
                   <TextBlock Margin="6,0" VerticalAlignment="Center" FontWeight="Normal"
                              ui:SearchTextHighlight.Text="{Binding Name}"
                              ui:SearchTextHighlight.Query="{Binding SearchQuery}" TextTrimming="CharacterEllipsis"
@@ -160,6 +162,7 @@
                       </MultiBinding>
                     </TextBlock.Foreground>
                   </TextBlock>
+                  </DockPanel>
                 </DataTemplate>
               </GridViewColumn.CellTemplate>
             </GridViewColumn>

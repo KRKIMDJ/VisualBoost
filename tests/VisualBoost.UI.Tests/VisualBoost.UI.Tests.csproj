@@ -6,7 +6,9 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
-    <Page Include="../../src/VisualBoost.Package/CodeGeneration/DocumentCodeActionMenuStyles.xaml" Link="CodeGeneration/DocumentCodeActionMenuStyles.xaml" />
+    <Compile Include="../../src/VisualBoost.Package/CommentLinks/CommentLinkTooltip.cs" Link="CommentLinkTooltip.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/ProductIcons.cs" Link="ProductIcons.cs" />
+    <Compile Include="../../src/VisualBoost.Package/CodeGeneration/NativeCodeActionMenuTarget.cs" Link="NativeCodeActionMenuTarget.cs" />
     <Compile Include="../../src/VisualBoost.Package/CodeGeneration/GenerationModelReader.cs" Link="GenerationModelReader.cs" />
     <Compile Include="../../src/VisualBoost.Package/CodeGeneration/GenerationEditApplier.cs" Link="GenerationEditApplier.cs" />
     <Compile Include="../../src/VisualBoost.Package/CodeGeneration/DocumentCodeActionMenu.cs" Link="DocumentCodeActionMenu.cs" />

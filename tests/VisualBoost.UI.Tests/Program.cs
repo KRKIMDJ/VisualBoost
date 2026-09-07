@@ -25,6 +25,8 @@ internal static class Program
             var output = Path.Combine(root, "artifacts", "ui-validation");
             Directory.CreateDirectory(output);
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
+            ProductIconTests.Run(root);
+            CommentLinkTooltipTests.Run();
             if (args.Skip(1).Contains("--code-generation"))
             { GenerationInteractionTests.Run(output); return 0; }
             if (args.Skip(1).Contains("--document-navigation"))

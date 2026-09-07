@@ -89,7 +89,8 @@ public static class CppSourceAnalyzer
             var macro = MacroPattern.Match(code);
             if (macro.Success) { AddMatch(symbols, macro, path, lineNumber, SourceSymbolKind.Macro); continue; }
             AddMatch(symbols, NamespacePattern.Match(code), path, lineNumber, SourceSymbolKind.Namespace);
-            foreach (Match typeMatch in TypePattern.Matches(code))
+            var typeMatches = TypePattern.Matches(code);
+            foreach (Match typeMatch in typeMatches)
             {
                 if (IsForwardDeclaration(code, typeMatch))
                 {
@@ -134,7 +135,20 @@ public static class CppSourceAnalyzer
                 }
             }
 
-            AddMatch(symbols, VariablePattern.Match(code), path, lineNumber, SourceSymbolKind.Variable);
+            var variableMatch = VariablePattern.Match(code);
+            // 전방 선언의 타입 이름을 변수로 다시 등록하면 선언 헤더 후보가 오염됩니다.
+            if (variableMatch.Success)
+            {
+                foreach (Match typeMatch in typeMatches)
+                {
+                    if (typeMatch.Groups["name"].Index == variableMatch.Groups["name"].Index)
+                    {
+                        variableMatch = Match.Empty;
+                        break;
+                    }
+                }
+            }
+            AddMatch(symbols, variableMatch, path, lineNumber, SourceSymbolKind.Variable);
         }
 
         return new SourceFileAnalysis(path, includes, CppSymbolDetails.Enrich(source, symbols, maskedSource, cancellationToken));

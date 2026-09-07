@@ -1,14 +1,13 @@
 using System;
 using System.IO;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
-using System.Windows.Threading;
+using System.Xml.Linq;
+using Microsoft.VisualStudio.OLE.Interop;
 using VisualBoost.CodeGeneration;
 using VisualBoost.Core.CodeGeneration;
 
@@ -18,81 +17,120 @@ internal static class DocumentCodeActionMenuTests
     {
         var context = new GenerationModelContext { Function = new("Reset", "Widget", 0, 0, 10, false) };
         var actions = GenerationCodeActions.Create(context, "Widget.cpp");
-        Check(actions.Count == 1 && actions[0].Title == "정의 생성", "선언에서는 정의 생성만 노출");
+        Check(actions.Count == 1 && actions[0].Title == "정의 생성", "정의 생성 노출");
         context.ExistingPath = "Widget.cpp";
         var empty = GenerationCodeActions.Create(context, "Widget.cpp");
-        Check(empty.Count == 0, "대응 코드 존재 시 노출할 도구 없음");
+        Check(empty.Count == 0, "대응 코드가 있으면 빈 도구");
         context.ExistingPath = ""; context.Function = new("Reset", "Widget", 0, 0, 10, true);
         var declaration = GenerationCodeActions.Create(context, "Widget.h");
-        Check(declaration.Count == 1 && declaration[0].Title == "선언 생성" && declaration[0].Children.Select(c => c.Id).SequenceEqual(new[] { "public", "protected", "private" }), "정의에서는 선언 생성과 접근 수준 하위 선택");
-        var anchor = new Border { Width = 700, Height = 300, Focusable = true };
-        var host = new Window { Content = anchor, Width = 720, Height = 340, Left = -20000, ShowInTaskbar = false };
-        host.Show(); host.UpdateLayout();
+        Check(declaration[0].Children.Select(c => c.Id).SequenceEqual(new[] { "public", "protected", "private" }), "접근 수준 유지");
+        var anchor = new Border { Width = 700, Height = 300 };
+        var window = new Window { Content = anchor, Width = 720, Height = 340, Left = -20000, ShowInTaskbar = false };
+        window.Show(); window.UpdateLayout();
         try
         {
-            var none = new DocumentCodeActionMenu();
-            Check(none.ShowAsync(anchor, new(70, 30), empty, CancellationToken.None).GetAwaiter().GetResult() is null && !none.Menu.IsOpen, "빈 메뉴는 표시하지 않음");
-            for (var i = 0; i < 15; i++)
+            for (var i = 0; i < 30; i++)
             {
-                var menu = new DocumentCodeActionMenu();
-                menu.Menu.Resources[SystemColors.WindowBrushKey] = new SolidColorBrush(Color.FromRgb(37, 37, 41));
-                menu.Menu.Resources[SystemColors.WindowTextBrushKey] = Brushes.WhiteSmoke;
-                var task = menu.ShowAsync(anchor, new(70, 30), actions, CancellationToken.None);
-                Pump();
-                Check(menu.Menu.IsOpen && menu.Menu.HorizontalOffset == 70 && menu.Menu.VerticalOffset == 30, "마우스가 아닌 전달된 커서 좌표 사용");
-                var firstItem = (MenuItem)menu.Menu.Items[0];
-                var header = (FrameworkElement)firstItem.Template.FindName("Header", firstItem);
-                Check(header.TranslatePoint(new Point(), menu.Menu).X < 20 && firstItem.Template.FindName("Icon", firstItem) is null, "아이콘·체크 표시 열 없이 텍스트 시작");
-                if (i == 0)
+                var select = i % 2 == 0;
+                NativeCodeActionMenuTarget? captured = null;
+                var host = new TestHost((screen, target, token) =>
                 {
-                    menu.Menu.UpdateLayout();
-                    var bitmap = new RenderTargetBitmap(Math.Max(1, (int)menu.Menu.ActualWidth), Math.Max(1, (int)menu.Menu.ActualHeight), 96, 96, PixelFormats.Pbgra32);
-                    bitmap.Render(menu.Menu);
-                    var encoder = new PngBitmapEncoder(); encoder.Frames.Add(BitmapFrame.Create(bitmap));
-                    using var file = File.Create(Path.Combine(output, "DocumentCodeActionMenu.png")); encoder.Save(file);
-                }
-                if (i % 2 == 0)
-                {
-                    ((MenuItem)menu.Menu.Items[0]).RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-                    WaitFor(task);
-                    Check(task.GetAwaiter().GetResult()?.Id == "definition", "선택한 도구 반환");
-                }
-                else { menu.Menu.IsOpen = false; WaitFor(task); Check(task.GetAwaiter().GetResult() is null, "닫기는 실행 없이 취소"); }
-                Check(menu.Menu.PlacementTarget is null && menu.Menu.Items.Count == 0, "닫을 때 참조 해제 및 다음 명령 허용");
+                    captured = target;
+                    Check(screen == anchor.PointToScreen(new Point(70, 30)), "캐럿 화면 좌표·음수 모니터 좌표");
+                    Check(Status(target, NativeCodeActionMenuTarget.ItemStart) == 3, "실행 항목 활성화");
+                    Check(Status(target, NativeCodeActionMenuTarget.DeclarationMenuId) == 17, "없는 하위 메뉴 숨김");
+                    var group = NativeCodeActionMenuTarget.CommandSet;
+                    var last = new[] { new OLECMD { cmdID = NativeCodeActionMenuTarget.ItemStart + 1 } };
+                    Check(target.QueryStatus(ref group, 1, last, IntPtr.Zero) < 0 && last[0].cmdf == 0, "동적 열거 종료");
+                    if (select) { Check(Execute(target, NativeCodeActionMenuTarget.ItemStart) == 0, "선택 전달"); Check(Execute(target, NativeCodeActionMenuTarget.ItemStart) < 0, "중복 차단"); }
+                });
+                var result = new DocumentCodeActionMenu(host).ShowAsync(anchor, new(70, 30), actions, CancellationToken.None).GetAwaiter().GetResult();
+                Check(result == (select ? actions[0] : null), "선택/취소 반환");
+                Check(captured!.Selected is null && Execute(captured, NativeCodeActionMenuTarget.ItemStart) < 0, "종료 후 참조 해제·늦은 실행 차단");
             }
-            var sub = new DocumentCodeActionMenu();
-            var selection = sub.ShowAsync(anchor, new(70, 30), declaration, CancellationToken.None); Pump();
-            var parentItem = (MenuItem)sub.Menu.Items[0];
-            parentItem.Focus();
-            parentItem.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(parentItem), Environment.TickCount, Key.Right) { RoutedEvent = Keyboard.KeyDownEvent });
-            Pump(); Check(parentItem.IsSubmenuOpen, "텍스트 전용 템플릿에서 오른쪽 키로 하위 메뉴 열기");
-            var childItem = (MenuItem)parentItem.Items[1];
-            childItem.ApplyTemplate();
-            Check(childItem.Template.FindName("Header", childItem) is FrameworkElement && childItem.Template.FindName("Icon", childItem) is null, "하위 도구에도 아이콘 슬롯 없음");
-            childItem.RaiseEvent(new RoutedEventArgs(MenuItem.ClickEvent));
-            WaitFor(selection);
-            Check(selection.GetAwaiter().GetResult()?.Id == "protected", "파일 선택 창 없이 선언 접근 수준 반환");
-            var escapeMenu = new DocumentCodeActionMenu();
-            var escaped = escapeMenu.ShowAsync(anchor, new(70, 30), actions, CancellationToken.None); Pump();
-            escapeMenu.Menu.RaiseEvent(new KeyEventArgs(Keyboard.PrimaryDevice, PresentationSource.FromVisual(escapeMenu.Menu), Environment.TickCount, Key.Escape) { RoutedEvent = Keyboard.KeyDownEvent });
-            WaitFor(escaped); Check(escaped.Result is null, "Esc 키로 메뉴만 닫고 작업 미실행");
-            using var cancellation = new CancellationTokenSource();
-            var cancelMenu = new DocumentCodeActionMenu(); var canceled = cancelMenu.ShowAsync(anchor, new(), actions, cancellation.Token);
-            cancellation.Cancel(); WaitFor(canceled);
-            Check(canceled.IsCompleted && canceled.Result is null && !cancelMenu.Menu.IsOpen, "문서 변경·종료 취소 신호로 메뉴 닫기");
+            var childHost = new TestHost((_, target, _) =>
+            {
+                Check(Status(target, NativeCodeActionMenuTarget.ItemStart) == 17, "빈 루트 숨김");
+                Check(Status(target, NativeCodeActionMenuTarget.DeclarationMenuId) == 3, "선언 하위 메뉴");
+                Check(Execute(target, NativeCodeActionMenuTarget.DeclarationMenuId) < 0, "메뉴 자체는 편집하지 않음");
+                Execute(target, NativeCodeActionMenuTarget.ChildStart + 1);
+            });
+            Check(new DocumentCodeActionMenu(childHost).ShowAsync(anchor, new(), declaration, CancellationToken.None).Result?.Id == "protected", "접근 수준 반환");
+            var include = QuickIncludeCodeActions.Create("Widget", @"C:\Test\Widget.h", "Widget.h");
+            Check(include.Children.Count == 0, "빠른 include 1순위 직접 실행");
+            using var cancel = new CancellationTokenSource();
+            var cancelHost = new TestHost((_, target, _) => { cancel.Cancel(); Check(Execute(target, NativeCodeActionMenuTarget.ItemStart) < 0, "취소 후 실행 차단"); });
+            Check(new DocumentCodeActionMenu(cancelHost).ShowAsync(anchor, new(), new[] { include }, cancel.Token).Result is null, "문서 변경/종료 취소");
+            var noShow = new TestHost((_, _, _) => throw new Exception("메뉴를 열면 안 됩니다."));
+            Check(new DocumentCodeActionMenu(noShow).ShowAsync(anchor, new(), empty, CancellationToken.None).Result is null, "빈 메뉴 억제");
+            Check(new DocumentCodeActionMenu(noShow).ShowAsync(anchor, new(), actions, cancel.Token).Result is null, "사전 취소 억제");
+            var failed = new TestHost((_, _, _) => throw new InvalidOperationException("Shell failure"));
+            try { new DocumentCodeActionMenu(failed).ShowAsync(anchor, new(), actions, CancellationToken.None).GetAwaiter().GetResult(); throw new Exception("실패 누락"); }
+            catch (InvalidOperationException e) when (e.Message == "Shell failure") { }
+            using var target = new NativeCodeActionMenuTarget(new[] { new DocumentCodeAction("include", "A&B_한글.h", "전체 경로 안내") }, CancellationToken.None);
+            Check(Text(target, 1, 100) == "A&&B_한글.h", "밑줄·한글 유지 및 & 이스케이프");
+            Check(Text(target, 2, 100) == "전체 경로 안내", "상태 설명 공급");
+            Check(Text(target, 1, 4) == "A&&" && Text(target, 1, 1) == "", "문자 버퍼 상한");
+            var foreign = Guid.NewGuid();
+            Check(target.Exec(ref foreign, NativeCodeActionMenuTarget.ItemStart, 0, IntPtr.Zero, IntPtr.Zero) < 0, "다른 명령 그룹 무간섭");
         }
-        finally { host.Close(); }
-        Console.WriteLine("PASS: 문맥별 도구·빈 메뉴 억제·커서 위치·15회 선택/취소·접근 수준·취소 수명 실제 WPF 검증");
+        finally { window.Close(); }
+        ValidateRegistration();
+        Console.WriteLine("PASS: VS 기본 메뉴 명령 대상·동적 열거·접근 수준·문자 버퍼·30회 선택/취소·수명·VSCT 등록 (Shell 표시는 대역)");
     }
-    private static void Pump()
-    { var frame = new DispatcherFrame(); Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.ApplicationIdle, new Action(() => frame.Continue = false)); Dispatcher.PushFrame(frame); }
-    private static void WaitFor(Task task)
+    private static void ValidateRegistration()
     {
-        var frame = new DispatcherFrame(); var start = DateTime.UtcNow;
-        var timer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(10) };
-        timer.Tick += (_, _) => { if (task.IsCompleted || DateTime.UtcNow - start > TimeSpan.FromSeconds(3)) frame.Continue = false; };
-        timer.Start(); Dispatcher.PushFrame(frame); timer.Stop();
-        Check(task.IsCompleted, "메뉴 종료 후 명령 수명 해제 시간 제한");
+        var root = new DirectoryInfo(AppContext.BaseDirectory);
+        while (root is not null && !File.Exists(Path.Combine(root.FullName, "src/VisualBoost.Package/Commands.vsct"))) root = root.Parent;
+        Check(root is not null, "실제 VSCT 확인");
+        var doc = XDocument.Load(Path.Combine(root!.FullName, "src/VisualBoost.Package/Commands.vsct"));
+        XNamespace ns = "http://schemas.microsoft.com/VisualStudio/2005-10-18/CommandTable";
+        Check(doc.Descendants(ns + "Menu").Any(e => (string?)e.Attribute("id") == "VisualBoostActionPopup" && (string?)e.Attribute("type") == "Context"), "Shell 메뉴 등록");
+        foreach (var item in new[] { ("VisualBoostActionPopup", NativeCodeActionMenuTarget.MenuId), ("VisualBoostDeclarationPopup", NativeCodeActionMenuTarget.DeclarationMenuId), ("VisualBoostActionItemStart", (int)NativeCodeActionMenuTarget.ItemStart), ("VisualBoostDeclarationItemStart", (int)NativeCodeActionMenuTarget.ChildStart) })
+            Check(Convert.ToInt32((string)doc.Descendants(ns + "IDSymbol").Single(e => (string?)e.Attribute("name") == item.Item1).Attribute("value")!, 16) == item.Item2, "VSCT와 런타임 ID 일치");
+        foreach (var id in new[] { "VisualBoostActionItemStart", "VisualBoostDeclarationItemStart" })
+            Check(doc.Descendants(ns + "Button").Single(e => (string?)e.Attribute("id") == id).Elements(ns + "CommandFlag").Select(e => e.Value).Contains("DynamicItemStart"), "동적 시작 등록");
+        Check(!File.Exists(Path.Combine(root.FullName, "src/VisualBoost.Package/CodeGeneration/DocumentCodeActionMenuStyles.xaml")), "자체 템플릿 제거");
+    }
+    private static uint Status(NativeCodeActionMenuTarget target, uint id) { var group = NativeCodeActionMenuTarget.CommandSet; var commands = new[] { new OLECMD { cmdID = id } }; target.QueryStatus(ref group, 1, commands, IntPtr.Zero); return commands[0].cmdf; }
+    private static int Execute(NativeCodeActionMenuTarget target, uint id) { var group = NativeCodeActionMenuTarget.CommandSet; return target.Exec(ref group, id, 0, IntPtr.Zero, IntPtr.Zero); }
+    private static string Text(NativeCodeActionMenuTarget target, int flags, int capacity)
+    {
+        var memory = Marshal.AllocCoTaskMem(12 + capacity * 2 + 4);
+        try
+        {
+            Marshal.WriteInt32(memory, 0, flags); Marshal.WriteInt32(memory, 4, 0); Marshal.WriteInt32(memory, 8, capacity);
+            Marshal.WriteInt32(memory, 12 + capacity * 2, 0x12345678);
+            var group = NativeCodeActionMenuTarget.CommandSet;
+            target.QueryStatus(ref group, 1, new[] { new OLECMD { cmdID = NativeCodeActionMenuTarget.ItemStart } }, memory);
+            Check(Marshal.ReadInt32(memory, 12 + capacity * 2) == 0x12345678, "버퍼 경계 보존");
+            return Marshal.PtrToStringUni(IntPtr.Add(memory, 12))!;
+        }
+        finally { Marshal.FreeCoTaskMem(memory); }
+    }
+    private sealed class TestHost : INativeCodeMenuHost
+    {
+        private readonly Action<Point, NativeCodeActionMenuTarget, CancellationToken> show;
+        public TestHost(Action<Point, NativeCodeActionMenuTarget, CancellationToken> show) { this.show = show; }
+        public Task ShowAsync(Point screen, NativeCodeActionMenuTarget target, CancellationToken token) { show(screen, target, token); return Task.CompletedTask; }
     }
     private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+}
+
+// 공개 COM 계약의 경계만 대역으로 두고 실제 명령 라우팅·텍스트 마샬링 코드를 실행합니다.
+namespace Microsoft.VisualStudio.OLE.Interop
+{
+    internal struct OLECMD { public uint cmdID; public uint cmdf; }
+    internal interface IOleCommandTarget
+    {
+        int QueryStatus(ref Guid group, uint count, OLECMD[] commands, IntPtr text);
+        int Exec(ref Guid group, uint command, uint options, IntPtr input, IntPtr output);
+    }
+}
+namespace VisualBoost.CodeGeneration
+{
+    internal sealed class VisualStudioCodeMenuHost : INativeCodeMenuHost
+    {
+        public Task ShowAsync(Point screen, NativeCodeActionMenuTarget target, CancellationToken token) => throw new NotSupportedException("명시적 Shell 대역을 사용합니다.");
+    }
 }

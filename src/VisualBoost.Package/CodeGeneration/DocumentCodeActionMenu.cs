@@ -1,11 +1,8 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics.CodeAnalysis;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Controls.Primitives;
 using Microsoft.VisualStudio.Shell;
 using VisualBoost.Core.CodeGeneration;
 
@@ -37,64 +34,40 @@ internal static class GenerationCodeActions
     }
 }
 
+internal static class QuickIncludeCodeActions
+{
+    public static DocumentCodeAction Create(string symbol, string headerPath, string includePath) =>
+        new("include", "빠른 인클루드 · " + includePath, symbol + " · " + headerPath);
+}
+
+internal interface INativeCodeMenuHost
+{
+    Task ShowAsync(Point screen, NativeCodeActionMenuTarget target, CancellationToken token);
+}
+
 internal sealed class DocumentCodeActionMenu
 {
-    internal ContextMenu Menu { get; } = new() { StaysOpen = false, MinWidth = 210 };
-    private readonly ResourceDictionary styles = new()
-    {
-        Source = new Uri("/" + typeof(DocumentCodeActionMenu).Assembly.GetName().Name + ";component/CodeGeneration/DocumentCodeActionMenuStyles.xaml", UriKind.Relative)
-    };
+    private readonly INativeCodeMenuHost host;
+    public DocumentCodeActionMenu() : this(new VisualStudioCodeMenuHost()) { }
+    internal DocumentCodeActionMenu(INativeCodeMenuHost host) { this.host = host; }
 
-    [SuppressMessage("Usage", "VSTHRD001", Justification = "취소 콜백은 WPF 메뉴의 Dispatcher에 닫기만 비동기로 게시하고 동기 대기를 하지 않습니다.")]
-    public Task<DocumentCodeAction?> ShowAsync(FrameworkElement anchor, Point caret, IReadOnlyList<DocumentCodeAction> actions, CancellationToken token)
+    public async Task<DocumentCodeAction?> ShowAsync(FrameworkElement anchor, Point caret, IReadOnlyList<DocumentCodeAction> actions, CancellationToken token)
     {
-        if (actions.Count == 0 || token.IsCancellationRequested) return Task.FromResult<DocumentCodeAction?>(null);
-        var completion = new TaskCompletionSource<DocumentCodeAction?>(TaskCreationOptions.RunContinuationsAsynchronously);
-        DocumentCodeAction? selected = null;
-        Menu.Style = (Style)styles["TextOnlyContextMenu"];
-        Menu.PlacementTarget = anchor;
-        Menu.Placement = PlacementMode.RelativePoint;
-        Menu.HorizontalOffset = Math.Max(0, Math.Min(caret.X, anchor.ActualWidth));
-        Menu.VerticalOffset = Math.Max(0, Math.Min(caret.Y, anchor.ActualHeight));
-        Menu.SetResourceReference(Control.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
-        Menu.SetResourceReference(Control.ForegroundProperty, VsBrushes.ToolWindowTextKey);
-        foreach (var action in actions)
-            Menu.Items.Add(CreateItem(action));
-        MenuItem CreateItem(DocumentCodeAction action)
-        {
-            var item = new MenuItem { Header = action.Title, ToolTip = action.Description, Padding = new Thickness(8, 5, 12, 5) };
-            item.Style = (Style)styles["TextOnlyMenuItem"];
-            item.SetResourceReference(Control.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
-            item.SetResourceReference(Control.ForegroundProperty, VsBrushes.ToolWindowTextKey);
-            if (action.Children.Count > 0)
-                foreach (var child in action.Children) item.Items.Add(CreateItem(child));
-            else item.Click += (_, e) => { e.Handled = true; selected = action; Menu.IsOpen = false; };
-            return item;
-        }
-        CancellationTokenRegistration registration = default;
-        RoutedEventHandler unloaded = (_, _) => Menu.IsOpen = false;
+        if (actions.Count == 0 || token.IsCancellationRequested || !anchor.IsLoaded) return null;
+        using var lifetime = CancellationTokenSource.CreateLinkedTokenSource(token);
+        using var target = new NativeCodeActionMenuTarget(actions, lifetime.Token);
+        // WPF DIP를 화면 좌표로 변환하며 음수 좌표의 모니터도 유지합니다.
+        var screen = anchor.PointToScreen(new Point(Math.Max(0, Math.Min(caret.X, anchor.ActualWidth)),
+            Math.Max(0, Math.Min(caret.Y, anchor.ActualHeight))));
+        RoutedEventHandler unloaded = (_, _) => lifetime.Cancel();
         anchor.Unloaded += unloaded;
-        Menu.Closed += (_, _) =>
+        try
         {
-            anchor.Unloaded -= unloaded;
-            registration.Dispose();
-            Menu.Items.Clear();
-            Menu.PlacementTarget = null;
-            // 메뉴의 입력 표면이 닫힌 후에만 후속 편집을 실행해 포커스·명령 수명이 겹치지 않게 합니다.
-            completion.TrySetResult(selected);
-        };
-        registration = token.Register(() =>
-        {
-            // 취소는 어느 스레드에서 오더라도 UI를 기다리지 않아 교착을 피합니다.
-            if (!Menu.Dispatcher.HasShutdownStarted)
-                _ = Menu.Dispatcher.BeginInvoke(new Action(() => Menu.IsOpen = false));
-        });
-        try { Menu.IsOpen = true; }
-        catch
-        {
-            anchor.Unloaded -= unloaded; registration.Dispose(); Menu.Items.Clear(); Menu.PlacementTarget = null;
-            throw;
+            await host.ShowAsync(screen, target, lifetime.Token);
+            // Shell 메뉴가 닫힌 뒤에만 편집을 재개하며, 선택 직후의 취소도 우선합니다.
+            return lifetime.IsCancellationRequested ? null : target.Selected;
         }
-        return completion.Task;
+        catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { return null; }
+        finally { anchor.Unloaded -= unloaded; }
     }
 }

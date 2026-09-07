@@ -9,7 +9,8 @@ namespace VisualBoost.CodeGeneration;
 internal static class GenerationEditApplier
 {
     public static void Apply(IWpfTextView sourceView, ITextSnapshot sourceSnapshot, IWpfTextView targetView,
-        ITextSnapshot targetSnapshot, GenerationPlan plan, ITextUndoHistoryRegistry undo, IEditorOperations operations)
+        ITextSnapshot targetSnapshot, GenerationPlan plan, ITextUndoHistoryRegistry undo, IEditorOperations operations,
+        string transactionName = "VisualBoost 선언/정의 생성", bool preserveCaret = false)
     {
         if (sourceView.IsClosed || targetView.IsClosed || sourceView.TextSnapshot != sourceSnapshot || targetView.TextSnapshot != targetSnapshot)
             throw new GenerationNotSupportedException("도구 선택 이후 문서가 바뀌었거나 닫혔습니다. 다시 생성하세요.");
@@ -20,7 +21,8 @@ internal static class GenerationEditApplier
             throw new GenerationNotSupportedException("대상 위치가 변경되었거나 읽기 전용입니다. 체크아웃은 강제하지 않습니다.");
         if (!undo.TryGetHistory(targetView.TextBuffer, out var history))
             throw new GenerationNotSupportedException("이 편집기의 Undo 기록을 사용할 수 없어 생성하지 않습니다.");
-        using var transaction = history.CreateTransaction("VisualBoost 선언/정의 생성");
+        var caretOffset = targetView.Caret.Position.BufferPosition.Position;
+        using var transaction = history.CreateTransaction(transactionName);
         try
         {
             operations.AddBeforeTextBufferChangePrimitive();
@@ -28,7 +30,7 @@ internal static class GenerationEditApplier
             if (!edit.Replace(span, plan.Text)) throw new GenerationNotSupportedException("대상에 코드를 삽입할 수 없습니다.");
             edit.Apply();
             if (edit.Canceled) throw new GenerationNotSupportedException("편집이 취소되었습니다.");
-            targetView.Caret.MoveTo(new SnapshotPoint(targetView.TextSnapshot, plan.Offset));
+            targetView.Caret.MoveTo(new SnapshotPoint(targetView.TextSnapshot, preserveCaret ? caretOffset + (plan.Offset <= caretOffset ? plan.Text.Length : 0) : plan.Offset));
             operations.AddAfterTextBufferChangePrimitive();
             transaction.Complete();
         }

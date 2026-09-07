@@ -85,7 +85,7 @@ public sealed class CppDocumentMemberProvider : IDocumentMemberProvider
         }
         public IReadOnlyList<DocumentMember> Run() { Walk(0, tokens.Count, string.Empty, 0); return result; }
 
-        private void Walk(int begin, int end, string owner, int depth)
+        private void Walk(int begin, int end, string owner, int depth, DocumentScope? scope = null)
         {
             if (depth > 128) return;
             var statement = begin;
@@ -106,7 +106,11 @@ public sealed class CppDocumentMemberProvider : IDocumentMemberProvider
                             var body = At(terminal) == "{";
                             var finish = body ? pairs[terminal] : terminal;
                             var endOffset = finish >= 0 ? tokens[finish].Start + At(finish).Length : length;
-                            result.Add(new DocumentMember(name, kind, tokens[nameStart].Start, tokens[statement].Start, endOffset, tokens[nameStart].Line));
+                            var qualifiedStart = nameStart;
+                            while (qualifiedStart >= statement + 2 && At(qualifiedStart - 1) == "::" && Identifier(At(qualifiedStart - 2))) qualifiedStart -= 2;
+                            // .NET Framework의 Skip은 앞부분을 재순회하므로 필요한 짧은 구간만 복사합니다.
+                            var qualifiedOwner = qualifiedStart < nameStart ? string.Concat(tokens.GetRange(qualifiedStart, nameStart - qualifiedStart - 1).Select(t => t.Text)) : string.Empty;
+                            result.Add(new DocumentMember(name, kind, tokens[nameStart].Start, tokens[statement].Start, endOffset, tokens[nameStart].Line, scope, qualifiedOwner));
                             i = finish >= 0 ? finish : end;
                             statement = i + 1; continue;
                         }
@@ -120,19 +124,39 @@ public sealed class CppDocumentMemberProvider : IDocumentMemberProvider
                 {
                     var close = pairs[i] < 0 ? end : pairs[i];
                     var type = string.Empty; var isScope = false;
+                    var scopeName = string.Empty; var scopeKind = string.Empty; var scopeIndex = statement;
                     for (var j = statement; j < i; j++)
                     {
                         if ((j & 1023) == 0) token.ThrowIfCancellationRequested();
-                        if (At(j) == "namespace" || At(j) == "extern") { isScope = true; type = string.Empty; }
+                        if (At(j) == "extern") { isScope = true; type = string.Empty; }
+                        if (At(j) == "namespace")
+                        {
+                            isScope = true; type = string.Empty; scopeKind = "namespace"; scopeIndex = j;
+                            scopeName = string.Concat(tokens.GetRange(j + 1, i - j - 1).Select(t => t.Text));
+                            if (scopeName.Length == 0) scopeName = "(anonymous)";
+                        }
                         if (At(j) is "class" or "struct" or "union")
                         {
                             if (At(j - 1) is "enum" or "<" or ",") continue;
                             var candidate = j + 1;
                             if (At(candidate).EndsWith("_API", StringComparison.Ordinal)) candidate++;
-                            if (Identifier(At(candidate))) { type = At(candidate); isScope = true; }
+                            if (Identifier(At(candidate))) { type = At(candidate); isScope = true; scopeName = type; scopeKind = At(j); scopeIndex = candidate; }
                         }
                     }
-                    if (isScope) Walk(i + 1, close, type, depth + 1);
+                    if (isScope)
+                    {
+                        var childScope = scope;
+                        if (scopeName.Length > 0)
+                        {
+                            // namespace A::B도 두 단계로 표시해 바깥에서 쓴 A::B::함수와 같은 경로로 연결합니다.
+                            var names = scopeKind == "namespace" ? scopeName.Split(new[] { "::" }, StringSplitOptions.RemoveEmptyEntries) : new[] { scopeName };
+                            var remainingDepth = 128;
+                            for (var ancestor = scope; ancestor is not null; ancestor = ancestor.Parent) remainingDepth--;
+                            foreach (var part in names.Take(remainingDepth))
+                                childScope = new DocumentScope(part, scopeKind, tokens[scopeIndex].Start, tokens[scopeIndex].Line, childScope);
+                        }
+                        Walk(i + 1, close, type, depth + 1, childScope);
+                    }
                     i = close; statement = i + 1;
                 }
             }

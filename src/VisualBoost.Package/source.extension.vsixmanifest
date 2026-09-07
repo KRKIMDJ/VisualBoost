@@ -4,12 +4,14 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="VisualBoost.2cf41e59-72ae-41ad-825d-38cc38607d71"
-              Version="0.21.2"
+              Version="0.23.3"
               Language="ko-KR"
               Publisher="VisualBoost" />
     <DisplayName>VisualBoost</DisplayName>
     <Description xml:space="preserve">빠른 파일·심볼 탐색, C++ 헤더·구현 전환과 편집기 색상 설정을 지원하는 Visual Studio 확장입니다.</Description>
     <License>LICENSE</License>
+    <Icon>Resources\Branding\visualboost-icon-32.png</Icon>
+    <PreviewImage>Resources\Branding\visualboost-icon-200.png</PreviewImage>
   </Metadata>
   <Installation>
     <InstallationTarget Id="Microsoft.VisualStudio.Community" Version="[17.14,)">

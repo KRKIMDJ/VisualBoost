@@ -12,8 +12,6 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using System.Windows.Threading;
-using Microsoft.VisualStudio.Imaging;
-using Microsoft.VisualStudio.Imaging.Interop;
 using Microsoft.VisualStudio.PlatformUI;
 using VisualBoost.Core.Searching;
 using VisualBoost.Options;
@@ -641,18 +639,6 @@ internal sealed class FileSearchResultItem
         FullPath = fullPath;
         var fileName = Path.GetFileName(fullPath);
         var displayPath = CreateDisplayPath(fullPath, preferredRoot, solutionRoot);
-        if (TryCreateIconMoniker(fullPath, out var iconMoniker))
-        {
-            IconMoniker = iconMoniker;
-            IconVisibility = Visibility.Visible;
-            FallbackIconVisibility = Visibility.Collapsed;
-        }
-        else
-        {
-            IconText = CreateIconText(fullPath);
-            IconVisibility = Visibility.Collapsed;
-            FallbackIconVisibility = Visibility.Visible;
-        }
 
         ProjectName = ResolveProjectName(fullPath, projects);
         FileNameSegments = FileSearchTextSegment.Create(fileName, query);
@@ -660,14 +646,6 @@ internal sealed class FileSearchResultItem
     }
 
     public string FullPath { get; }
-
-    public string IconText { get; } = string.Empty;
-
-    public ImageMoniker IconMoniker { get; }
-
-    public Visibility IconVisibility { get; }
-
-    public Visibility FallbackIconVisibility { get; }
 
     public string ProjectName { get; }
 
@@ -748,104 +726,6 @@ internal sealed class FileSearchResultItem
         string.Equals(value, "Programs", StringComparison.OrdinalIgnoreCase) ||
         string.Equals(value, "ThirdParty", StringComparison.OrdinalIgnoreCase);
 
-    private static bool TryCreateIconMoniker(string path, out ImageMoniker moniker)
-    {
-        switch (Path.GetExtension(path).ToLowerInvariant())
-        {
-            case ".h":
-            case ".hh":
-            case ".hpp":
-            case ".hxx":
-            case ".inl":
-                moniker = KnownMonikers.CPPHeaderFile;
-                return true;
-            case ".c":
-                moniker = KnownMonikers.CFile;
-                return true;
-            case ".cc":
-            case ".cpp":
-            case ".cxx":
-                moniker = KnownMonikers.CPPSourceFile;
-                return true;
-            case ".cs":
-                moniker = KnownMonikers.CSSourceFile;
-                return true;
-            case ".fs":
-            case ".fsx":
-                moniker = KnownMonikers.FSCodeFile;
-                return true;
-            case ".py":
-                moniker = KnownMonikers.PYSourceFile;
-                return true;
-            case ".js":
-                moniker = KnownMonikers.JSScript;
-                return true;
-            case ".jsx":
-                moniker = KnownMonikers.JSXScript;
-                return true;
-            case ".ts":
-            case ".tsx":
-                moniker = KnownMonikers.TSSourceFile;
-                return true;
-            case ".java":
-            case ".kt":
-                moniker = KnownMonikers.JavaSource;
-                return true;
-            case ".md":
-            case ".markdown":
-                moniker = KnownMonikers.MarkdownFile;
-                return true;
-            case ".json":
-                moniker = KnownMonikers.JSONScript;
-                return true;
-            case ".xml":
-            case ".xaml":
-                moniker = KnownMonikers.XMLFile;
-                return true;
-            case ".yml":
-            case ".yaml":
-                moniker = KnownMonikers.YamlFile;
-                return true;
-            case ".html":
-            case ".htm":
-                moniker = KnownMonikers.HTMLFile;
-                return true;
-            case ".ps1":
-            case ".psm1":
-                moniker = KnownMonikers.PowershellFile;
-                return true;
-            case ".config":
-            case ".props":
-            case ".targets":
-                moniker = KnownMonikers.ConfigurationFile;
-                return true;
-            case ".txt":
-                moniker = KnownMonikers.TextFile;
-                return true;
-            default:
-                moniker = default;
-                return false;
-        }
-    }
-
-    private static string CreateIconText(string path)
-    {
-        var extension = Path.GetExtension(path).ToLowerInvariant();
-        return extension switch
-        {
-            ".h" or ".hh" or ".hpp" or ".hxx" or ".inl" => "H",
-            ".c" or ".cc" or ".cpp" or ".cxx" => "C++",
-            ".cs" => "C#",
-            ".fs" or ".fsx" => "F#",
-            ".py" => "PY",
-            ".js" or ".jsx" => "JS",
-            ".ts" or ".tsx" => "TS",
-            ".rs" => "RS",
-            ".go" => "GO",
-            ".java" or ".kt" => "JVM",
-            _ => extension.Length > 1 ? extension.Substring(1).ToUpperInvariant() : "FILE",
-        };
-    }
 
     private static string MakeRelativePath(string root, string directory)
     {

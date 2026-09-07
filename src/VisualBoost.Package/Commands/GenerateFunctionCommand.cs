@@ -39,7 +39,10 @@ internal sealed class GenerateFunctionCommand
     }
     private async Task RunAsync()
     {
-        try { await GenerateAsync(); }
+        try
+        {
+            if (!await QuickIncludeTool.TryRunAsync(package, index)) await GenerateAsync();
+        }
         catch (GenerationNotSupportedException exception)
         {
             await NotifyUnavailableAsync(exception.Message);
@@ -138,7 +141,7 @@ internal sealed class GenerateFunctionCommand
         var status = await package.GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
         status?.SetText("VisualBoost: " + message);
     }
-    private static IWpfTextView ActiveView(IVsTextManager manager, IVsEditorAdaptersFactoryService adapters)
+    internal static IWpfTextView ActiveView(IVsTextManager manager, IVsEditorAdaptersFactoryService adapters)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         if (manager.GetActiveView(1, null, out var native) == 0)
@@ -157,7 +160,7 @@ internal sealed class GenerateFunctionCommand
     }
     private static bool IsAllowedFile(string root, string path)
     { try { ValidateFile(root, path); return true; } catch (GenerationNotSupportedException) { return false; } }
-    private static void ValidateFile(string root, string path)
+    internal static void ValidateFile(string root, string path)
     {
         GenerationPathPolicy.Validate(root, path);
         if (!File.Exists(path) || (File.GetAttributes(path) & FileAttributes.ReadOnly) != 0)

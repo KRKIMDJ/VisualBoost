@@ -70,6 +70,7 @@ internal static class CodeGenerationTests
             Reject(() => GenerationPathPolicy.Validate(root, path), "외부·생성 파일 보호");
         Console.WriteLine("PASS: 생성 방향·기본 인수·한정자·클래스 삽입·오버로드·중복·미지원·경로 보호");
         CodeGenerationCompileTests.Run();
+        CodeGenerationPlacementTests.Run();
     }
     public static GenerationFunction Function(string source, string fragment, string name, bool definition, string owner = "Widget")
     {

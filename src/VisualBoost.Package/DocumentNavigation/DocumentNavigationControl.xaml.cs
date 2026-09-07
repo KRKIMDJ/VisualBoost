@@ -1,4 +1,6 @@
 using System;
+using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Threading;
@@ -7,6 +9,7 @@ using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using VisualBoost.Core.Analysis;
 using VisualBoost.Core.DocumentNavigation;
@@ -23,6 +26,7 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     private bool disposed;
     private string state = "분석 중…";
     private CancellationTokenSource? searchCancellation;
+    private IReadOnlyList<DocumentMemberRow> roots = Array.Empty<DocumentMemberRow>();
     public event Action<DocumentMember, long>? Navigate;
     public event Action? ReturnFocus;
     public FrameworkElement? EditorAnchor { get; set; }
@@ -61,6 +65,7 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     {
         CancelSearch();
         Results.ItemsSource = null;
+        roots = Array.Empty<DocumentMemberRow>();
         Status.Text = state;
         if (!Menu.IsOpen || document is null || disposed) return;
         var request = searchCancellation = new CancellationTokenSource();
@@ -70,14 +75,17 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     {
         try
         {
-            var found = await Task.Run(() => source.Search(query, sort, request.Token));
+            var found = await Task.Run(() =>
+            {
+                var members = source.Search(query, sort, request.Token);
+                return (count: members.Count, tree: DocumentMemberTree.Build(members, request.Token, sort && string.IsNullOrWhiteSpace(query)));
+            });
             if (disposed || request.IsCancellationRequested || searchCancellation != request || source != document || !Menu.IsOpen) return;
-            var rows = found.Select(m => new DocumentMemberRow(m, DescribeMember?.Invoke(m))).ToArray();
-            Results.ItemsSource = rows;
+            roots = found.tree.Select(n => MakeRow(n, null)).ToArray();
+            var rows = VisibleRows().ToArray();
             var current = string.IsNullOrWhiteSpace(query) ? source.FindContaining(caret) : null;
-            Results.SelectedItem = rows.FirstOrDefault(r => r.Member == current) ?? rows.FirstOrDefault();
-            if (Results.SelectedItem is not null) Results.ScrollIntoView(Results.SelectedItem);
-            Status.Text = rows.Length == 0 ? "일치하는 함수 없음" : $"{rows.Length:N0}개 표시 / {source.Members.Count:N0}개 함수";
+            Display(current is null ? rows.FirstOrDefault(r => r.Member is not null) : rows.FirstOrDefault(r => r.Member == current));
+            Status.Text = found.count == 0 ? "일치하는 함수 없음" : $"{found.count:N0}개 표시 / {source.Members.Count:N0}개 함수";
         }
         catch (OperationCanceledException) when (request.IsCancellationRequested) { }
         catch (Exception exception)
@@ -88,10 +96,49 @@ public partial class DocumentNavigationControl : Popup, IDisposable
         }
         finally { if (searchCancellation == request) searchCancellation = null; request.Dispose(); }
     }
+    private DocumentMemberRow MakeRow(DocumentTreeNode node, DocumentMemberRow? parent)
+    {
+        var row = new DocumentMemberRow(node, parent, node.Member is null ? null : DescribeMember?.Invoke(node.Member));
+        row.Children = node.Children.Select(n => MakeRow(n, row)).ToArray();
+        return row;
+    }
+    private IEnumerable<DocumentMemberRow> VisibleRows()
+    {
+        var pending = new Stack<DocumentMemberRow>(roots.Reverse());
+        while (pending.Count > 0)
+        {
+            var row = pending.Pop(); yield return row;
+            if (row.IsExpanded) foreach (var child in row.Children.Reverse()) pending.Push(child);
+        }
+    }
+    private void Display(DocumentMemberRow? selected)
+    {
+        var visible = VisibleRows().ToArray(); Results.ItemsSource = visible;
+        Results.SelectedItem = selected is not null && visible.Contains(selected) ? selected : visible.FirstOrDefault();
+        if (Results.SelectedItem is not null) Results.ScrollIntoView(Results.SelectedItem);
+    }
+    internal void ToggleBranch(DocumentMemberRow row)
+    {
+        if (row.Children.Count == 0) return;
+        row.IsExpanded = !row.IsExpanded; Display(row);
+    }
+    private void OnExpanderClick(object sender, RoutedEventArgs e)
+    {
+        if ((sender as Button ?? e.OriginalSource as Button)?.DataContext is DocumentMemberRow row) ToggleBranch(row);
+        e.Handled = true;
+    }
     private void OnPopupKeyDown(object sender, KeyEventArgs e)
     {
         if (e.Key == Key.Escape) { Menu.IsOpen = false; ReturnFocus?.Invoke(); e.Handled = true; }
         else if (e.Key == Key.Enter) { Accept(); e.Handled = true; }
+        else if (e.Key is Key.Left or Key.Right && !Search.IsKeyboardFocusWithin && Results.SelectedItem is DocumentMemberRow row)
+        {
+            if (e.Key == Key.Left)
+            { if (row.Children.Count > 0 && row.IsExpanded) ToggleBranch(row); else if (row.Parent is not null) Display(row.Parent); }
+            else if (row.Children.Count > 0)
+            { if (!row.IsExpanded) ToggleBranch(row); else Display(row.Children[0]); }
+            e.Handled = true;
+        }
         else if ((e.Key == Key.Down || e.Key == Key.Up) && Search.IsKeyboardFocusWithin)
         {
             if (Results.Items.Count > 0)
@@ -104,11 +151,16 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     }
     private void OnDoubleClick(object sender, MouseButtonEventArgs e)
     {
+        // 펼침 버튼의 두 번째 클릭을 행 열기로 다시 처리하지 않습니다.
+        for (var origin = e.OriginalSource as DependencyObject; origin is not null;
+             origin = origin is Visual ? VisualTreeHelper.GetParent(origin) : (origin as FrameworkContentElement)?.Parent)
+            if (origin is ButtonBase) return;
         if (ItemsControl.ContainerFromElement(Results, e.OriginalSource as DependencyObject) is ListViewItem) Accept();
     }
     private void Accept()
     {
         if (document is null || Results.SelectedItem is not DocumentMemberRow row) return;
+        if (row.Member is null) { ToggleBranch(row); return; }
         Menu.IsOpen = false;
         Navigate?.Invoke(row.Member, version);
     }
@@ -116,17 +168,28 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     {
         disposed = true; Menu.IsOpen = false; CancelSearch();
         Navigate = null; ReturnFocus = null; DescribeMember = null; EditorAnchor = null;
-        Results.ItemsSource = null; document = null;
+        Results.ItemsSource = null; roots = Array.Empty<DocumentMemberRow>(); document = null;
     }
 }
 
-public sealed class DocumentMemberRow
+public sealed class DocumentMemberRow : INotifyPropertyChanged
 {
-    public DocumentMemberRow(DocumentMember member, string? tooltip) { Member = member; Tooltip = tooltip ?? $"{member.Name} · {member.Line}"; }
-    public DocumentMember Member { get; }
-    public string Name => Member.Name;
-    public string Kind => Member.Kind;
-    public int Line => Member.Line;
-    public SourceSymbolKind ColorKind => SourceSymbolKind.Function;
+    public DocumentMemberRow(DocumentTreeNode node, DocumentMemberRow? parent, string? tooltip)
+    { Node = node; Parent = parent; Depth = parent is null ? 0 : parent.Depth + 1; Tooltip = tooltip ?? node.Name; }
+    public DocumentTreeNode Node { get; }
+    public DocumentMember? Member => Node.Member;
+    public DocumentMemberRow? Parent { get; }
+    public IReadOnlyList<DocumentMemberRow> Children { get; internal set; } = Array.Empty<DocumentMemberRow>();
+    public int Depth { get; }
+    public Thickness Indent => new(Depth * 14, 0, 0, 0);
+    public Visibility ExpanderVisibility => Children.Count > 0 ? Visibility.Visible : Visibility.Hidden;
+    private bool expanded = true;
+    public bool IsExpanded { get => expanded; set { expanded = value; PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ExpanderText))); } }
+    public string ExpanderText => IsExpanded ? "▾" : "▸";
+    public string Name => Node.Name;
+    public string Kind => Node.Kind;
+    public string Line => Member?.Line.ToString() ?? "";
+    public SourceSymbolKind ColorKind => Member is not null ? SourceSymbolKind.Function : Enum.TryParse<SourceSymbolKind>(Kind, true, out var kind) ? kind : SourceSymbolKind.Namespace;
     public string Tooltip { get; }
+    public event PropertyChangedEventHandler? PropertyChanged;
 }

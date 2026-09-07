@@ -51,6 +51,7 @@ namespace VisualBoost.DocumentNavigation
             StaysOpen = false; AllowsTransparency = true;
             Menu.Opened += OnOpened; Menu.Closed += OnClosed;
             PopupSurface.PreviewKeyDown += OnPopupKeyDown; Search.TextChanged += OnSearchChanged; Results.MouseDoubleClick += OnDoubleClick;
+            Results.AddHandler(Button.ClickEvent, new RoutedEventHandler(OnExpanderClick));
         }
     }
 }
@@ -101,6 +102,31 @@ internal static class DocumentNavigationInteractionTests
             control.SetDocument(next, 11, "1개 함수");
             Until(() => control.Results.Items.Count == 1);
             Check(((DocumentMemberRow)control.Results.Items[0]).Name == "NewlyAdded", "미저장 변경 결과 적용");
+            var nested = provider.Analyze("namespace Gameplay { class Character { void Update(); struct Movement { void Walk(); void Jump(); }; void Stop(); }; }");
+            control.SetDocument(nested, 12, "4개 함수"); control.SetCaret(nested.Members.First(m => m.Name == "Walk").NameOffset);
+            Until(() => control.Results.Items.Count == 7);
+            Check(((DocumentMemberRow)control.Results.SelectedItem).Name == "Walk", "트리에서 현재 함수 선택과 상위 펼침");
+            var movement = control.Results.Items.Cast<DocumentMemberRow>().First(r => r.Name == "Movement");
+            Check(movement.Depth == 2 && movement.Children[0].Depth == 3 && movement.Children[0].Indent.Left == 42, "실제 깊이별 들여쓰기");
+            control.Results.UpdateLayout();
+            var expander = Descendants(control.Results).OfType<Button>().First(b => b.DataContext == movement);
+            expander.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Check(control.Results.Items.Count == 5 && control.Results.SelectedItem == movement, "버튼으로 그룹 접기와 선택 유지");
+            control.Results.Focus(); SendKey(control.PopupSurface, Key.Right);
+            Check(control.Results.Items.Count == 7, "오른쪽 키로 다시 펼치기");
+            SendKey(control.PopupSurface, Key.Right);
+            Check(control.Results.SelectedItem == movement.Children[0], "오른쪽 키로 첫 자식 선택");
+            SendKey(control.PopupSurface, Key.Left);
+            Check(control.Results.SelectedItem == movement, "왼쪽 키로 부모 선택");
+            Render(control.PopupSurface, Path.Combine(root, "artifacts", "ui-validation", "DocumentMemberTree.png"));
+            control.Search.Text = "Jump"; Until(() => control.Results.Items.Count == 4);
+            Check(control.Results.Items.Cast<DocumentMemberRow>().Select(r => r.Name).SequenceEqual(new[] { "Gameplay", "Character", "Movement", "Jump" }), "검색 중 함수와 상위 경로만 표시");
+            Check(((DocumentMemberRow)control.Results.SelectedItem).Name == "Jump", "그룹 대신 검색 함수 자동 선택");
+            SendKey(control.PopupSurface, Key.Enter);
+            Check(navigated?.Name == "Jump" && receivedVersion == 12 && !control.Menu.IsOpen, "트리 검색 후 Enter 한 번으로 함수 이동");
+            control.Open(); Until(() => control.Results.Items.Count == 7);
+            control.SetDocument(next, 13, "1개 함수"); control.Search.Text = "";
+            Until(() => control.Results.Items.Count == 1);
             var returned = false; control.ReturnFocus += () => returned = true;
             SendKey(control.PopupSurface, Key.Escape);
             Check(returned && !control.Menu.IsOpen, "Escape 편집기 포커스 복귀 요청");

@@ -26,7 +26,7 @@
        Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
        Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"/>
      <DockPanel Grid.Row="1" Margin="9,0,9,6">
-      <TextBlock Text="현재 문서의 함수 · Alt+M" Opacity="0.7"/>
+      <TextBlock Text="현재 문서의 함수 트리 · Alt+M" Opacity="0.7"/>
       <TextBlock x:Name="OrderLabel" Text="문서 순서" HorizontalAlignment="Right" Opacity="0.65"/>
      </DockPanel>
      <ui:FittedResultsList x:Name="Results" Grid.Row="2" Height="288" BorderThickness="0"
@@ -56,6 +56,14 @@
       </Style></ListView.ItemContainerStyle>
       <ListView.View><GridView AllowsColumnReorder="False">
        <GridViewColumn Header="함수" Width="510"><GridViewColumn.CellTemplate><DataTemplate>
+        <DockPanel Margin="{Binding Indent}">
+         <Button DockPanel.Dock="Left" Width="18" Height="20" Padding="0" BorderThickness="0" Background="Transparent"
+                 Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListViewItem}}" FontSize="11"
+                 Content="{Binding ExpanderText}" Visibility="{Binding ExpanderVisibility}" Click="OnExpanderClick"
+                 Focusable="False" ToolTip="접기/펼치기" AutomationProperties.Name="{Binding Name}">
+          <Button.Template><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" /></Border></ControlTemplate></Button.Template>
+         </Button>
+         <ui:ProductIcon DockPanel.Dock="Left" SymbolKind="{Binding Kind}" Width="18" Height="18" Margin="0,0,6,0" />
         <TextBlock VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ui:SearchTextHighlight.Text="{Binding Name}" ui:SearchTextHighlight.Query="{Binding Text, ElementName=Search}">
          <TextBlock.Foreground><MultiBinding Converter="{StaticResource SymbolColor}">
           <Binding Path="ColorKind"/><Binding Path="IsSelected" RelativeSource="{RelativeSource AncestorType=ListViewItem}"/>
@@ -64,13 +72,14 @@
           <Binding Path="(ui:SearchPalette.Revision)" RelativeSource="{RelativeSource AncestorType=ListView}"/>
          </MultiBinding></TextBlock.Foreground>
         </TextBlock>
+        </DockPanel>
        </DataTemplate></GridViewColumn.CellTemplate></GridViewColumn>
        <GridViewColumn Header="종류" Width="120" DisplayMemberBinding="{Binding Kind}"/>
        <GridViewColumn Header="라인" Width="65" DisplayMemberBinding="{Binding Line}"/>
       </GridView></ListView.View>
      </ui:FittedResultsList>
      <Border Grid.Row="3" BorderThickness="0,1,0,0" BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}" Padding="9,6">
-      <DockPanel><TextBlock x:Name="Status" Text="분석 중…"/><TextBlock Text="↑↓ 선택   Enter 이동   Esc 닫기" HorizontalAlignment="Right" Opacity="0.65"/></DockPanel>
+      <DockPanel><TextBlock x:Name="Status" Text="분석 중…"/><TextBlock Text="↑↓ 선택  ←→ 트리  Enter 이동  Esc 닫기" HorizontalAlignment="Right" Opacity="0.65"/></DockPanel>
      </Border>
     </Grid>
    </Border>

@@ -9,14 +9,27 @@ namespace VisualBoost.Core.DocumentNavigation;
 
 public sealed class DocumentMember
 {
-    public DocumentMember(string name, string kind, int nameOffset, int start, int end, int line)
-    { Name = name; Kind = kind; NameOffset = nameOffset; Start = start; End = end; Line = line; }
+    public DocumentMember(string name, string kind, int nameOffset, int start, int end, int line, DocumentScope? scope = null, string qualifiedOwner = "")
+    { Name = name; Kind = kind; NameOffset = nameOffset; Start = start; End = end; Line = line; Scope = scope; QualifiedOwner = qualifiedOwner; }
     public string Name { get; }
     public string Kind { get; }
     public int NameOffset { get; }
     public int Start { get; }
     public int End { get; }
     public int Line { get; }
+    public DocumentScope? Scope { get; }
+    public string QualifiedOwner { get; }
+}
+
+public sealed class DocumentScope
+{
+    public DocumentScope(string name, string kind, int offset, int line, DocumentScope? parent)
+    { Name = name; Kind = kind; Offset = offset; Line = line; Parent = parent; }
+    public string Name { get; }
+    public string Kind { get; }
+    public int Offset { get; }
+    public int Line { get; }
+    public DocumentScope? Parent { get; }
 }
 
 public interface IDocumentMemberProvider

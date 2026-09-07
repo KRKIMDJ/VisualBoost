@@ -4,7 +4,7 @@
     <UseWPF>true</UseWPF>
     <RootNamespace>VisualBoost</RootNamespace>
     <AssemblyName>VisualBoost</AssemblyName>
-    <Version>0.21.2</Version>
+    <Version>0.23.3</Version>
     <VSSDKBuildToolsAutoSetup>true</VSSDKBuildToolsAutoSetup>
     <GeneratePkgDefFile>true</GeneratePkgDefFile>
     <IncludeBuildOutput>true</IncludeBuildOutput>
@@ -58,6 +58,14 @@
     </Content>
     <Content Include="..\..\LICENSE">
       <Link>LICENSE</Link>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+    <Content Include="..\..\assets\branding\visualboost-icon-32.png">
+      <Link>Resources\Branding\visualboost-icon-32.png</Link>
+      <IncludeInVSIX>true</IncludeInVSIX>
+    </Content>
+    <Content Include="..\..\assets\branding\visualboost-icon-200.png">
+      <Link>Resources\Branding\visualboost-icon-200.png</Link>
       <IncludeInVSIX>true</IncludeInVSIX>
     </Content>
   </ItemGroup>

@@ -5,6 +5,15 @@
 
   <Commands package="guidVisualBoostPackage">
     <Menus>
+      <Menu guid="guidVisualBoostCommandSet" id="VisualBoostActionPopup" priority="0x0100" type="Context">
+        <Strings><ButtonText>VisualBoost 코드 도구</ButtonText></Strings>
+      </Menu>
+      <Menu guid="guidVisualBoostCommandSet" id="VisualBoostDeclarationPopup" priority="0x0200" type="Menu">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostActionPopupGroup" />
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings><ButtonText>선언 생성</ButtonText></Strings>
+      </Menu>
       <Menu guid="guidVisualBoostCommandSet" id="VisualBoostCodeMenu" priority="0x0100" type="Menu">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCodeContextGroup" />
         <Strings><ButtonText>Visual Boost</ButtonText></Strings>
@@ -17,6 +26,12 @@
       </Menu>
     </Menus>
     <Groups>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostActionPopupGroup" priority="0x0100">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostActionPopup" />
+      </Group>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostDeclarationPopupGroup" priority="0x0100">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostDeclarationPopup" />
+      </Group>
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostCodeContextGroup" priority="0x0800">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
       </Group>
@@ -35,6 +50,20 @@
     </Groups>
 
     <Buttons>
+      <Button guid="guidVisualBoostCommandSet" id="VisualBoostActionItemStart" priority="0x0100" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostActionPopupGroup" />
+        <CommandFlag>DynamicItemStart</CommandFlag>
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings><ButtonText>코드 도구</ButtonText></Strings>
+      </Button>
+      <Button guid="guidVisualBoostCommandSet" id="VisualBoostDeclarationItemStart" priority="0x0100" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostDeclarationPopupGroup" />
+        <CommandFlag>DynamicItemStart</CommandFlag>
+        <CommandFlag>DynamicVisibility</CommandFlag>
+        <CommandFlag>TextChanges</CommandFlag>
+        <Strings><ButtonText>선언 접근 수준</ButtonText></Strings>
+      </Button>
       <Button guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x01C0" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings><ButtonText>현재 코드 도구...</ButtonText><CanonicalName>VisualBoost.GenerateFunction</CanonicalName></Strings>
@@ -116,6 +145,12 @@
   <Symbols>
     <GuidSymbol name="guidVisualBoostPackage" value="{d54a4377-4869-4f58-a583-5318b38d77f2}" />
     <GuidSymbol name="guidVisualBoostCommandSet" value="{4cce3464-a08f-4e0d-a5fd-a297c7fcd41e}">
+      <IDSymbol name="VisualBoostActionPopup" value="0x1030" />
+      <IDSymbol name="VisualBoostActionPopupGroup" value="0x1031" />
+      <IDSymbol name="VisualBoostDeclarationPopup" value="0x1032" />
+      <IDSymbol name="VisualBoostDeclarationPopupGroup" value="0x1033" />
+      <IDSymbol name="VisualBoostActionItemStart" value="0x3000" />
+      <IDSymbol name="VisualBoostDeclarationItemStart" value="0x4000" />
       <IDSymbol name="VisualBoostCommandGroup" value="0x1020" />
       <IDSymbol name="VisualBoostToolsGroup" value="0x1021" />
       <IDSymbol name="VisualBoostSubmenu" value="0x1022" />
