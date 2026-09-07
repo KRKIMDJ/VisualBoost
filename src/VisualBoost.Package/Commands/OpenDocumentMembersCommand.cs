@@ -9,6 +9,7 @@ using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.TextManager.Interop;
 using Microsoft.VisualStudio.Text.Outlining;
+using Microsoft.VisualStudio.Text;
 using VisualBoost.DocumentNavigation;
 
 namespace VisualBoost.Commands;
@@ -34,7 +35,8 @@ internal static class OpenDocumentMembersCommand
             if (view is not null && !view.IsClosed && view.TextBuffer.ContentType.IsOfType("C/C++"))
             {
                 var session = view.Properties.GetOrCreateSingletonProperty(() =>
-                    new DocumentNavigationSession(view, components.GetService<IOutliningManagerService>()));
+                    new DocumentNavigationSession(view, components.GetService<IOutliningManagerService>(),
+                        components.GetService<IVsEditorAdaptersFactoryService>(), components.GetService<ITextDocumentFactoryService>()));
                 session.Open();
                 return;
             }

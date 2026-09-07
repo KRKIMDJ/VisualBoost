@@ -18,34 +18,6 @@
   <platform:DialogWindow.Resources>
     <ui:SymbolColorConverter x:Key="SymbolColorConverter" />
 
-    <Style TargetType="Button">
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="Padding" Value="9,3" />
-      <Setter Property="Cursor" Value="Hand" />
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Surface" CornerRadius="3" Padding="{TemplateBinding Padding}"
-                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                    Background="{TemplateBinding Background}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}" />
-              </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.HighlightKey}}" />
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
 
     <Style x:Key="ResultItemStyle" TargetType="ListBoxItem">
       <Setter Property="MinHeight" Value="24" />
@@ -122,7 +94,7 @@
             <TextBlock x:Name="SearchPlaceholder" VerticalAlignment="Center" Opacity="0.62"
                        Text="심볼명 검색" IsHitTestVisible="False" />
           </Grid>
-          <Button x:Name="ClearSearchButton" Grid.Column="2" Margin="4" Padding="0"
+          <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="ClearSearchButton" Grid.Column="2" Margin="4" Padding="0"
                   FontSize="15" Content="×" Visibility="Hidden" ToolTip="검색어 지우기"
                   Click="OnClearSearchClick" />
         </Grid>

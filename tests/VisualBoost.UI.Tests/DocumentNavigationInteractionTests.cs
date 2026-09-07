@@ -11,6 +11,9 @@ using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Windows.Threading;
 using System.Xml.Linq;
+using System.Runtime.InteropServices;
+using Microsoft.VisualStudio;
+using Microsoft.VisualStudio.OLE.Interop;
 using VisualBoost.Core.DocumentNavigation;
 using VisualBoost.DocumentNavigation;
 using VisualBoost.UI;
@@ -34,6 +37,7 @@ namespace VisualBoost.DocumentNavigation
             foreach (var attr in node.Attributes().ToArray())
             {
                 if (attr.Name == x + "Class" || handlers.Contains(attr.Name.LocalName)) attr.Remove();
+                else if (attr.Value.Contains("DynamicResource {x:Static vs:VsResourceKeys.")) attr.Value = "{x:Null}";
                 else if (attr.Value.Contains("DynamicResource {x:Static vs:VsBrushes."))
                     attr.Value = attr.Value.Contains("HighlightTextKey") ? "#FFFFFF" : attr.Value.Contains("HighlightKey") ? "#6154CB"
                         : attr.Value.Contains("TextKey") ? "#E5E5E5" : attr.Value.Contains("BorderKey") ? "#45454B"
@@ -63,14 +67,20 @@ internal static class DocumentNavigationInteractionTests
         System.Threading.SynchronizationContext.SetSynchronizationContext(new DispatcherSynchronizationContext(Dispatcher.CurrentDispatcher));
         SharedBufferLifetime();
         DocumentNavigationControl.TestRoot = root;
+        DocumentNavigationSessionTests.Run();
         using var control = new DocumentNavigationControl();
         var provider = new CppDocumentMemberProvider();
         var source = string.Join("\n", Enumerable.Range(0, 30).Select(i => $"void UpdateMovementMode{i}(int count) {{ if (count) {{ Call(); }} }}"));
         var snapshot = provider.Analyze(source);
         var editor = new Border { Background = Brushes.DimGray, Height = 380, Focusable = true };
         control.EditorAnchor = editor;
-        // 편집기 표면에 탐색 UI를 붙이지 않아도 명령의 Popup만 열려야 합니다.
-        var window = new Window { Content = editor, Width = 1020, Height = 500, Left = -16000, Top = 30, ShowActivated = false };
+        var bar = new DocumentNavigationBar();
+        bar.SetCurrent("UpdateMovementMode12", "Movement.cpp", "function");
+        control.BarAnchor = bar;
+        bar.OpenRequested += control.Open;
+        var layout = new DockPanel(); DockPanel.SetDock(bar, Dock.Top);
+        layout.Children.Add(bar); layout.Children.Add(editor);
+        var window = new Window { Content = layout, Width = 1020, Height = 500, Left = -16000, Top = 30, ShowActivated = false };
         window.Show(); window.UpdateLayout();
         try
         {
@@ -78,11 +88,14 @@ internal static class DocumentNavigationInteractionTests
             control.SetCaret(snapshot.Members[12].NameOffset);
             control.Open();
             Until(() => control.Results.Items.Count == 30);
-            Check(PresentationSource.FromVisual(control) is null && control.Menu.PlacementTarget == editor, "상단 바 없이 독립 Popup 열기");
+            Check(control.Menu.PlacementTarget == bar && bar.ActualHeight == 27, "27 DIP 상단 줄 위치에서 검색 열기");
+            Render(bar, Path.Combine(root, "artifacts", "ui-validation", "DocumentNavigationBar.png"));
             Check(((DocumentMemberRow)control.Results.SelectedItem).Name == "UpdateMovementMode12", "현재 함수 초기 선택");
             long receivedVersion = -1; DocumentMember? navigated = null;
             control.Navigate += (member, version) => { navigated = member; receivedVersion = version; };
             control.Search.Text = "Upd Move 2";
+            control.SetCaret(snapshot.Members[25].NameOffset);
+            Check(control.Search.Text == "Upd Move 2", "검색 중 캐럿 변경은 검색어를 덮어쓰지 않음");
             Until(() => control.Results.Items.Count > 0 && control.Results.Items.Count < 30);
             Check(navigated is null, "검색·선택만으로 편집 위치 변경 금지");
             control.PopupSurface.UpdateLayout();
@@ -132,13 +145,69 @@ internal static class DocumentNavigationInteractionTests
             Check(returned && !control.Menu.IsOpen, "Escape 편집기 포커스 복귀 요청");
             control.Configure(true); window.UpdateLayout();
             control.Open(); Until(() => control.Results.Items.Count == 1);
-            Check(control.OrderLabel.Text == "이름 순서" && control.Menu.PlacementTarget == editor, "이름 정렬 옵션 및 재개방");
+            Check(control.OrderLabel.Text == "이름 순서" && control.Menu.PlacementTarget == bar, "이름 정렬 옵션 및 재개방");
+            control.Cancel();
+            bar.Visibility = Visibility.Collapsed; window.UpdateLayout();
+            control.Open(); Until(() => control.Results.Items.Count == 1);
+            Check(control.Menu.PlacementTarget == editor, "상단 줄을 숨겨도 편집기 위치에서 검색");
+            CommandIsolation(control, next);
             control.Search.Text = "NotFound";
             control.Dispose(); Pump();
             Check(!control.Menu.IsOpen && control.Results.Items.Count == 0, "종료 중 검색 결과 공개 방지");
-            Console.WriteLine("PASS: 상단 바 없는 문서 함수 검색·현재 함수 선택·강조·버전·키보드·종료 실제 WPF 검증");
+            Console.WriteLine("PASS: 상단 줄·트리 검색·현재 함수 선택·강조·버전·VS 편집 명령 격리·종료 WPF 검증");
         }
         finally { window.Close(); }
+    }
+    private static void CommandIsolation(DocumentNavigationControl control, DocumentMemberSnapshot snapshot)
+    {
+        var editorBuffer = new TextBox { Text = "void Original() {}" };
+        var next = new EditorTarget(editorBuffer);
+        var filter = new DocumentNavigationCommandFilter(control) { Next = next };
+        var group = VSConstants.VSStd2K;
+        void Run(VSConstants.VSStd2KCmdID command) => filter.Exec(ref group, (uint)command, 0, IntPtr.Zero, IntPtr.Zero);
+        for (var i = 0; i < 20; i++)
+        {
+            control.SetDocument(snapshot, 13, "1개 함수"); control.Open();
+            Until(() => control.Results.Items.Count == 1);
+            control.Search.Text = "NewlyAddedX"; control.Search.Select(control.Search.Text.Length, 0);
+            Run(VSConstants.VSStd2KCmdID.BACKSPACE);
+            Check(control.Search.Text == "NewlyAdded", "VS Backspace는 검색어만 삭제");
+            var variant = Marshal.AllocCoTaskMem(24);
+            try
+            {
+                Marshal.GetNativeVariantForObject((ushort)'X', variant);
+                filter.Exec(ref group, (uint)VSConstants.VSStd2KCmdID.TYPECHAR, 0, variant, IntPtr.Zero);
+                Check(control.Search.Text == "NewlyAddedX", "VS 문자 입력은 검색어에만 삽입");
+            }
+            finally { Marshal.FreeCoTaskMem(variant); }
+            control.Search.Select(10, 0);
+            Run(VSConstants.VSStd2KCmdID.DELETE);
+            Check(control.Search.Text == "NewlyAdded", "VS Delete는 검색어만 삭제");
+            Until(() => control.Results.Items.Count == 1);
+            var commands = new[] { new OLECMD { cmdID = (uint)VSConstants.VSStd2KCmdID.RETURN } };
+            Check(filter.QueryStatus(ref group, 1, commands, IntPtr.Zero) == 0 && commands[0].cmdf == 3, "활성 검색 편집 명령 상태");
+            filter.Exec(ref group, 99999, 0, IntPtr.Zero, IntPtr.Zero);
+            Check(next.Executed == 0, "검색 중 문서 전용 명령 차단");
+            var standard = VSConstants.GUID_VSStandardCommandSet97;
+            foreach (var id in new[] { VSConstants.VSStd97CmdID.Undo, VSConstants.VSStd97CmdID.Redo,
+                VSConstants.VSStd97CmdID.MultiLevelUndo, VSConstants.VSStd97CmdID.MultiLevelRedo })
+                filter.Exec(ref standard, (uint)id, 0, IntPtr.Zero, IntPtr.Zero);
+            Check(next.Executed == 0, "단일·다중 Undo/Redo 모두 원본 대신 검색란에서 처리");
+            control.Search.Text = "NewlyAdded";
+            Until(() => control.Results.Items.Count == 1);
+            Run(i % 2 == 0 ? VSConstants.VSStd2KCmdID.RETURN : VSConstants.VSStd2KCmdID.CANCEL);
+            Check(!control.IsOpen && next.Executed == 0 && editorBuffer.Text == "void Original() {}", "Enter/Esc 반복 후 원본 버퍼 불변");
+        }
+        Run(VSConstants.VSStd2KCmdID.BACKSPACE);
+        Check(next.Executed == 1 && editorBuffer.Text != "void Original() {}", "닫힌 뒤에는 VS 편집 명령 정상 전달");
+        control.Open(); Until(() => control.Results.Items.Count == 1);
+    }
+    private sealed class EditorTarget(TextBox editor) : IOleCommandTarget
+    {
+        public int Executed;
+        public int QueryStatus(ref Guid group, uint count, OLECMD[] commands, IntPtr text) => 0;
+        public int Exec(ref Guid group, uint command, uint options, IntPtr input, IntPtr output)
+        { Executed++; editor.AppendText("Unexpected editor command"); return 0; }
     }
     private static System.Collections.Generic.IEnumerable<DependencyObject> Descendants(DependencyObject value)
     {

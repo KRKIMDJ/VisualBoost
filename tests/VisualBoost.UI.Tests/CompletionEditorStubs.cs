@@ -39,6 +39,10 @@ namespace Microsoft.VisualStudio.Shell
         public static object ToolWindowTextKey => SystemColors.WindowTextBrushKey;
         public static object ToolWindowBorderKey => SystemColors.ActiveBorderBrushKey;
     }
+    internal static class VsResourceKeys
+    {
+        public static object ButtonStyleKey => "VS.ButtonStyle";
+    }
 }
 namespace Microsoft.VisualStudio.Text
 {
@@ -70,7 +74,11 @@ namespace Microsoft.VisualStudio.Text
         Microsoft.VisualStudio.Utilities.PropertyCollection Properties { get; }
         event EventHandler<TextContentChangedEventArgs>? Changed;
     }
-    internal readonly struct SnapshotSpan(ITextSnapshot snapshot, Span span) { public ITextSnapshot Snapshot => snapshot; public Span Span => span; }
+    internal readonly struct SnapshotSpan(ITextSnapshot snapshot, Span span)
+    {
+        public SnapshotSpan(SnapshotPoint point, int length) : this(point.Snapshot, new Span(point.Position, length)) { }
+        public ITextSnapshot Snapshot => snapshot; public Span Span => span;
+    }
     internal readonly struct SnapshotPoint(ITextSnapshot snapshot, int position)
     {
         public ITextSnapshot Snapshot => snapshot;
@@ -119,6 +127,13 @@ namespace Microsoft.VisualStudio.Text
 namespace Microsoft.VisualStudio.Text.Editor
 {
     using Microsoft.VisualStudio.Utilities;
+    internal enum EnsureSpanVisibleOptions { AlwaysCenter = 4 }
+    internal sealed class TestViewScroller
+    {
+        public SnapshotSpan? LastSpan;
+        public EnsureSpanVisibleOptions LastOptions;
+        public void EnsureSpanVisible(SnapshotSpan span, EnsureSpanVisibleOptions options) { LastSpan = span; LastOptions = options; }
+    }
     internal interface IWpfTextViewCreationListener { void TextViewCreated(IWpfTextView view); }
     internal static class PredefinedTextViewRoles { public const string Editable = "Editable", Document = "Document"; }
     internal sealed class CaretPositionChangedEventArgs : EventArgs { }
@@ -132,10 +147,12 @@ namespace Microsoft.VisualStudio.Text.Editor
         public double Bottom => 25;
         public event EventHandler<CaretPositionChangedEventArgs>? PositionChanged;
         public void MoveTo(SnapshotPoint point) { Position.BufferPosition = point; PositionChanged?.Invoke(this, new()); }
+        public void EnsureVisible() { }
     }
-    internal sealed class TestSelection { public bool IsEmpty = true; }
+    internal sealed class TestSelection { public bool IsEmpty = true; public void Clear() => IsEmpty = true; }
     internal sealed class IWpfTextView
     {
+        public TestViewScroller ViewScroller { get; } = new();
         public PropertyCollection Properties { get; } = new();
         public TestBuffer TextBuffer { get; } = new();
         public ITextSnapshot TextSnapshot => TextBuffer.Snapshot;

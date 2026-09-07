@@ -26,6 +26,7 @@ internal static class Program
             Directory.CreateDirectory(output);
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
             ProductIconTests.Run(root);
+            HostControlStyleTests.Run(root);
             CommentLinkTooltipTests.Run();
             if (args.Skip(1).Contains("--code-generation"))
             { GenerationInteractionTests.Run(output); return 0; }
@@ -82,6 +83,8 @@ internal static class Program
                 }
                 if (attribute.Name == x + "Class" || events.Contains(attribute.Name.LocalName)) attribute.Remove();
                 else if (attribute.IsNamespaceDeclaration && attribute.Name.LocalName == "ui") attribute.Value = ui.NamespaceName;
+                else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsResourceKeys."))
+                    attribute.Value = "{x:Null}";
                 else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsBrushes."))
                     attribute.Value = attribute.Value.Contains("HighlightText") ? "#FFFFFF"
                         : attribute.Value.Contains("Highlight") ? "#6154CB"

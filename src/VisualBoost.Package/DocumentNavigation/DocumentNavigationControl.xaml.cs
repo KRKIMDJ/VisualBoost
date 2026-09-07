@@ -30,6 +30,8 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     public event Action<DocumentMember, long>? Navigate;
     public event Action? ReturnFocus;
     public FrameworkElement? EditorAnchor { get; set; }
+    public FrameworkElement? BarAnchor { get; set; }
+    internal TextBox SearchInput => Search;
     public Func<DocumentMember, string>? DescribeMember { get; set; }
     public DocumentNavigationControl() { InitializeComponent(); }
     public void Configure(bool sortByName)
@@ -47,10 +49,10 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     public void Open()
     {
         if (disposed || EditorAnchor is null) return;
-        var anchor = EditorAnchor;
+        var anchor = BarAnchor is { IsVisible: true } ? BarAnchor : EditorAnchor;
         Menu.PlacementTarget = anchor;
         Menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Relative;
-        PopupSurface.Width = Math.Max(360, Math.Min(760, anchor.ActualWidth));
+        PopupSurface.Width = Math.Max(360, Math.Min(960, anchor.ActualWidth));
         Search.Text = string.Empty;
         Menu.IsOpen = true;
         RefreshSearch();
@@ -129,8 +131,9 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     }
     private void OnPopupKeyDown(object sender, KeyEventArgs e)
     {
-        if (e.Key == Key.Escape) { Menu.IsOpen = false; ReturnFocus?.Invoke(); e.Handled = true; }
-        else if (e.Key == Key.Enter) { Accept(); e.Handled = true; }
+        if (e.Key == Key.Escape) { e.Handled = true; Cancel(); }
+        else if (e.Key == Key.Enter) { e.Handled = true; Accept(); }
+        else if (e.Key == Key.Tab) { e.Handled = true; ToggleFocus(); }
         else if (e.Key is Key.Left or Key.Right && !Search.IsKeyboardFocusWithin && Results.SelectedItem is DocumentMemberRow row)
         {
             if (e.Key == Key.Left)
@@ -157,7 +160,24 @@ public partial class DocumentNavigationControl : Popup, IDisposable
             if (origin is ButtonBase) return;
         if (ItemsControl.ContainerFromElement(Results, e.OriginalSource as DependencyObject) is ListViewItem) Accept();
     }
-    private void Accept()
+    internal void MoveSelection(int delta)
+    {
+        if (Results.Items.Count == 0) return;
+        Results.SelectedIndex = Math.Max(0, Math.Min(Results.Items.Count - 1, Results.SelectedIndex + delta));
+        Results.ScrollIntoView(Results.SelectedItem);
+    }
+    internal void ToggleFocus() { if (Search.IsKeyboardFocusWithin) Results.Focus(); else Search.Focus(); }
+    internal bool MoveTree(bool right)
+    {
+        if (Search.IsKeyboardFocusWithin || Results.SelectedItem is not DocumentMemberRow row) return false;
+        if (!right)
+        { if (row.Children.Count > 0 && row.IsExpanded) ToggleBranch(row); else if (row.Parent is not null) Display(row.Parent); }
+        else if (row.Children.Count > 0)
+        { if (!row.IsExpanded) ToggleBranch(row); else Display(row.Children[0]); }
+        return true;
+    }
+    internal void Cancel() { Menu.IsOpen = false; ReturnFocus?.Invoke(); }
+    internal void Accept()
     {
         if (document is null || Results.SelectedItem is not DocumentMemberRow row) return;
         if (row.Member is null) { ToggleBranch(row); return; }
@@ -167,7 +187,7 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     public void Dispose()
     {
         disposed = true; Menu.IsOpen = false; CancelSearch();
-        Navigate = null; ReturnFocus = null; DescribeMember = null; EditorAnchor = null;
+        Navigate = null; ReturnFocus = null; DescribeMember = null; EditorAnchor = null; BarAnchor = null;
         Results.ItemsSource = null; roots = Array.Empty<DocumentMemberRow>(); document = null;
     }
 }

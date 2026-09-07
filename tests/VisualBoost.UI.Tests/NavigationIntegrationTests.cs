@@ -182,9 +182,21 @@ namespace Microsoft.VisualStudio
     internal static class VSConstants
     {
         public static readonly Guid GUID_VSStandardCommandSet97 = new("5efc7975-14bc-11cf-9b2b-00aa00573819");
-        internal enum VSStd97CmdID { GotoDefn = 935, GotoDecl = 936 }
+        public static readonly Guid VSStd2K = new("1496a755-94de-11d0-8c3f-00c04fc2aae2");
+        internal enum VSStd97CmdID { Cut = 16, Copy = 15, Paste = 26, Undo = 43, Redo = 29, MultiLevelUndo = 44, MultiLevelRedo = 30, SelectAll = 31, GotoDefn = 935, GotoDecl = 936 }
+        // 경계 대역에서는 이름으로 매핑합니다. 실제 SDK의 명령 번호는 패키지 빌드가 결정합니다.
+        internal enum VSStd2KCmdID
+        {
+            TYPECHAR, BACKSPACE, DELETE, DELETEWORDLEFT, DELETEWORDRIGHT, RETURN, CANCEL, TAB, BACKTAB,
+            UP, DOWN, PAGEUP, PAGEDN, LEFT, RIGHT, LEFT_EXT, RIGHT_EXT, WORDPREV, WORDNEXT,
+            WORDPREV_EXT, WORDNEXT_EXT, HOME, BOL, END, EOL, HOME_EXT, BOL_EXT, END_EXT, EOL_EXT
+        }
     }
-    internal static class ErrorHandler { public static bool Succeeded(int result) => result >= 0; }
+    internal static class ErrorHandler
+    {
+        public static bool Succeeded(int result) => result >= 0;
+        public static void ThrowOnFailure(int result) { if (result < 0) Marshal.ThrowExceptionForHR(result); }
+    }
 }
 namespace Microsoft.VisualStudio.Shell
 {

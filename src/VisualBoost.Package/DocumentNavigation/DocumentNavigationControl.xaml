@@ -21,7 +21,7 @@
            BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}"
            TextElement.Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}" PreviewKeyDown="OnPopupKeyDown">
     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-     <TextBox x:Name="Search" Margin="8" Padding="7,4" TextChanged="OnSearchChanged"
+     <TextBox x:Name="Search" Margin="0,0,0,7" Height="26" Padding="7,2" TextChanged="OnSearchChanged"
        ToolTip="함수 이름 검색 · 공백으로 AND 검색" AutomationProperties.Name="문서 함수 이름 검색"
        Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
        Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"/>
@@ -57,11 +57,10 @@
       <ListView.View><GridView AllowsColumnReorder="False">
        <GridViewColumn Header="함수" Width="510"><GridViewColumn.CellTemplate><DataTemplate>
         <DockPanel Margin="{Binding Indent}">
-         <Button DockPanel.Dock="Left" Width="18" Height="20" Padding="0" BorderThickness="0" Background="Transparent"
+         <Button Style="{DynamicResource {x:Static vs:VsResourceKeys.ButtonStyleKey}}" DockPanel.Dock="Left" Width="18" Height="20" Padding="0" BorderThickness="0" Background="Transparent"
                  Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListViewItem}}" FontSize="11"
                  Content="{Binding ExpanderText}" Visibility="{Binding ExpanderVisibility}" Click="OnExpanderClick"
                  Focusable="False" ToolTip="접기/펼치기" AutomationProperties.Name="{Binding Name}">
-          <Button.Template><ControlTemplate TargetType="Button"><Border Background="{TemplateBinding Background}"><ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" /></Border></ControlTemplate></Button.Template>
          </Button>
          <ui:ProductIcon DockPanel.Dock="Left" SymbolKind="{Binding Kind}" Width="18" Height="18" Margin="0,0,6,0" />
         <TextBlock VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ui:SearchTextHighlight.Text="{Binding Name}" ui:SearchTextHighlight.Query="{Binding Text, ElementName=Search}">

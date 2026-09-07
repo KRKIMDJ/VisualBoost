@@ -16,34 +16,6 @@
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
 
-    <Style TargetType="Button">
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="Padding" Value="9,3" />
-      <Setter Property="Cursor" Value="Hand" />
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Surface" CornerRadius="3" Padding="{TemplateBinding Padding}"
-                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                    Background="{TemplateBinding Background}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}" />
-              </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.HighlightKey}}" />
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
 
     <Style x:Key="ScopeButtonStyle" TargetType="RadioButton">
       <Setter Property="Margin" Value="0,0,5,0" />
@@ -201,7 +173,7 @@
                        IsHitTestVisible="False" />
           </Grid>
 
-          <Button x:Name="ClearSearchButton"
+          <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="ClearSearchButton"
                   Grid.Column="2"
                   Margin="4"
                   Padding="0"
@@ -337,7 +309,7 @@
             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
             BorderThickness="0,1,0,0">
       <DockPanel LastChildFill="True">
-        <Button x:Name="CancelSearchButton"
+        <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="CancelSearchButton"
                 DockPanel.Dock="Right"
                 Margin="12,-3,0,-3"
                 Padding="9,2"

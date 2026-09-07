@@ -10,34 +10,6 @@
   <UserControl.Resources>
     <ui:SymbolColorConverter x:Key="SymbolColorConverter" />
 
-    <Style TargetType="Button">
-      <Setter Property="Foreground" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}" />
-      <Setter Property="Background" Value="Transparent" />
-      <Setter Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" />
-      <Setter Property="BorderThickness" Value="1" />
-      <Setter Property="Padding" Value="9,3" />
-      <Setter Property="Cursor" Value="Hand" />
-      <Setter Property="Template">
-        <Setter.Value>
-          <ControlTemplate TargetType="Button">
-            <Border x:Name="Surface" CornerRadius="3" Padding="{TemplateBinding Padding}"
-                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}"
-                    Background="{TemplateBinding Background}">
-              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
-            </Border>
-            <ControlTemplate.Triggers>
-              <Trigger Property="IsMouseOver" Value="True">
-                <Setter TargetName="Surface" Property="Background" Value="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}" />
-              </Trigger>
-              <Trigger Property="IsKeyboardFocused" Value="True">
-                <Setter TargetName="Surface" Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.HighlightKey}}" />
-              </Trigger>
-              <Trigger Property="IsEnabled" Value="False"><Setter Property="Opacity" Value="0.45" /></Trigger>
-            </ControlTemplate.Triggers>
-          </ControlTemplate>
-        </Setter.Value>
-      </Setter>
-    </Style>
 
     <DataTemplate x:Key="CodeSegmentTemplate">
       <TextBlock Text="{Binding Text}">
@@ -135,12 +107,14 @@
         <StackPanel Grid.Column="2" Orientation="Horizontal">
           <TextBlock Margin="0,0,6,0" VerticalAlignment="Center" Text="검색 범위" Opacity="0.72" />
           <ComboBox x:Name="ScopeSelector" Width="140" Height="24"
+                    Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
+                    ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
                     SelectedValuePath="Tag" SelectionChanged="OnScopeChanged">
             <ComboBoxItem x:Name="CurrentProjectScopeItem" Tag="CurrentProject" Content="현재 프로젝트" />
             <ComboBoxItem Tag="EntireSolution" Content="전체 솔루션" />
           </ComboBox>
         </StackPanel>
-        <Button x:Name="CancelSearchButton" Grid.Column="3" MinWidth="76" Padding="8,2"
+        <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="CancelSearchButton" Grid.Column="3" MinWidth="76" Padding="8,2"
                 Content="검색 취소" Visibility="Collapsed" Click="OnCancelSearchClick" />
       </Grid>
     </Border>

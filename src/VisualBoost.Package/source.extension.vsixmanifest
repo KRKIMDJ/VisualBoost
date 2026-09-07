@@ -4,7 +4,7 @@
                  xmlns:d="http://schemas.microsoft.com/developer/vsx-schema-design/2011">
   <Metadata>
     <Identity Id="VisualBoost.2cf41e59-72ae-41ad-825d-38cc38607d71"
-              Version="0.23.3"
+              Version="0.24.2"
               Language="ko-KR"
               Publisher="VisualBoost" />
     <DisplayName>VisualBoost</DisplayName>

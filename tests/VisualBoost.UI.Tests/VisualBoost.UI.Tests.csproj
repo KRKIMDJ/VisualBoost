@@ -6,6 +6,10 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationSession.cs" Link="DocumentNavigationSession.cs" />
+    <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationSettings.cs" Link="DocumentNavigationSettings.cs" />
+    <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationBar.cs" Link="DocumentNavigationBar.cs" />
+    <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationCommandFilter.cs" Link="DocumentNavigationCommandFilter.cs" />
     <Compile Include="../../src/VisualBoost.Package/CommentLinks/CommentLinkTooltip.cs" Link="CommentLinkTooltip.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/ProductIcons.cs" Link="ProductIcons.cs" />
     <Compile Include="../../src/VisualBoost.Package/CodeGeneration/NativeCodeActionMenuTarget.cs" Link="NativeCodeActionMenuTarget.cs" />
