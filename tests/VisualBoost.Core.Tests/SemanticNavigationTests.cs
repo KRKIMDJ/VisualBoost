@@ -434,6 +434,12 @@ internal static class SemanticNavigationTests
                 "저장한 파일의 새 참조 반영");
             Check(SpinUntil(() => !navigator.IsOpen(other), 10000), "저장 반영 뒤 문서 닫기");
 
+            // 편집기 밖에서 바뀐 파일: 디스크 내용으로 다시 분석합니다.
+            File.WriteAllText(other, otherText + "int Third() { return FMod::Compute(6); }\n", new UTF8Encoding(false));
+            navigator.Reload(other);
+            Check(SpinUntil(() => navigator.ReferencesAsync(query, timeout.Token).Result.Locations.Count(l => l.Path == other) == 3, 30000),
+                "편집기 밖 변경의 새 참조 반영");
+
             // 미저장 편집: 맨 위에 빈 줄을 넣으면 같은 호출이 한 줄 아래에서 찾아져야 합니다.
             var edited = "\n" + useText;
             var moved = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(use, edited, 2), 2, position), null, timeout.Token).Result;
@@ -442,6 +448,52 @@ internal static class SemanticNavigationTests
             Check(!Directory.EnumerateFiles(project, "compile_commands.json", SearchOption.AllDirectories).Any(), "프로젝트 폴더에 database를 쓰지 않음");
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             Check(navigator.HasExited, "정상 종료");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    public static void RunSourceChangeMonitor()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.Watch." + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(root);
+        try
+        {
+            Check(SourceChangeMonitor.IsSourcePath(@"C:\p\Source\A.cpp") && SourceChangeMonitor.IsSourcePath(@"C:\p\Source\A.INL") &&
+                  !SourceChangeMonitor.IsSourcePath(@"C:\p\Intermediate\Build\A.cpp") && !SourceChangeMonitor.IsSourcePath(@"C:\p\.git\A.h") &&
+                  !SourceChangeMonitor.IsSourcePath(@"C:\p\Source\A.cs"), "C++ 소스와 무시 폴더 판별");
+
+            var batches = new System.Collections.Concurrent.BlockingCollection<SourceChangeBatch>();
+            using var monitor = new SourceChangeMonitor(root, TimeSpan.FromMilliseconds(300), batches.Add);
+            SourceChangeBatch Next() => batches.TryTake(out var batch, 10000) ? batch : new SourceChangeBatch(Array.Empty<string>(), false);
+
+            var a = Path.Combine(root, "Source", "A.cpp");
+            Write(a, "int a;");
+            Write(Path.Combine(root, "Intermediate", "B.cpp"), "int b;");
+            Write(Path.Combine(root, "Source", "Notes.txt"), "x");
+            var first = Next();
+            Check(first.Paths.SequenceEqual(new[] { a }, StringComparer.OrdinalIgnoreCase) && !first.RequiresRestart,
+                "소스 변경만 묶어 알림: " + string.Join(",", first.Paths));
+
+            // 임시 파일에 쓰고 바꿔치기하는 저장은 삭제가 아니라 변경입니다.
+            var backup = a + "~RF1.TMP";
+            File.Move(a, backup);
+            Write(a, "int a2;");
+            File.Delete(backup);
+            var replaced = Next();
+            Check(replaced.Paths.Contains(a, StringComparer.OrdinalIgnoreCase) && !replaced.RequiresRestart, "교체 저장은 변경으로 처리");
+
+            File.Delete(a);
+            Check(Next().RequiresRestart, "소스 삭제는 재시작 요구");
+
+            var nested = Path.Combine(root, "Source", "Sub", "C.h");
+            Write(nested, "int c;");
+            Check(Next().Paths.Contains(nested, StringComparer.OrdinalIgnoreCase), "하위 폴더 소스");
+            Directory.Delete(Path.GetDirectoryName(nested)!, true);
+            Check(Next().RequiresRestart, "폴더 삭제는 재시작 요구");
+            Check(!batches.TryTake(out _, 1000), "남은 알림 없음");
         }
         finally
         {

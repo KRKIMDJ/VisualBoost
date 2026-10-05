@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel.Composition;
 using System.Linq;
@@ -43,6 +44,8 @@ internal sealed class SemanticDocumentListener : IWpfTextViewCreationListener
 internal static class SemanticDocumentTracker
 {
     private static readonly Dictionary<ITextBuffer, Tracked> Buffers = new();
+    // 파일 변경 감시가 작업 스레드에서 확인하므로 경로 집합만 동시성 사전으로 따로 둡니다.
+    private static readonly ConcurrentDictionary<string, int> EditorPaths = new(StringComparer.OrdinalIgnoreCase);
     private static long nextSerial;
     private static DispatcherTimer? idleTimer;
     private static DispatcherTimer? warmTimer;
@@ -58,6 +61,7 @@ internal static class SemanticDocumentTracker
             document.FileActionOccurred += item.OnFileAction;
             buffer.Changed += item.OnChanged;
             Buffers[buffer] = item;
+            AddPath(item.Path);
         }
 
         item.Views++;
@@ -73,6 +77,9 @@ internal static class SemanticDocumentTracker
         view.Closed += closed;
         if (view.HasAggregateFocus) ScheduleWarm(item);
     }
+
+    /// <summary>편집기에 열린 C++ 문서인지 확인합니다. 어느 스레드에서나 호출할 수 있습니다.</summary>
+    public static bool IsOpenInEditor(string path) => EditorPaths.ContainsKey(path);
 
     /// <summary>요청 문서의 리비전입니다. 추적하지 않는 문서는 0입니다.</summary>
     public static long RevisionOf(ITextSnapshot snapshot)
@@ -142,8 +149,19 @@ internal static class SemanticDocumentTracker
         item.Document.FileActionOccurred -= item.OnFileAction;
         item.Document.TextBuffer.Changed -= item.OnChanged;
         Buffers.Remove(item.Document.TextBuffer);
+        RemovePath(item.Path);
         if (ReferenceEquals(pendingWarm, item)) pendingWarm = null;
         SemanticNavigationRuntime.Service?.Closed(item.Path);
+    }
+
+    private static void AddPath(string path) => EditorPaths.AddOrUpdate(path, 1, (_, count) => count + 1);
+
+    private static void RemovePath(string path)
+    {
+        if (EditorPaths.AddOrUpdate(path, 0, (_, count) => count - 1) <= 0)
+        {
+            EditorPaths.TryRemove(path, out _);
+        }
     }
 
     private sealed class Tracked
@@ -179,10 +197,13 @@ internal static class SemanticDocumentTracker
             if ((args.FileActionType & FileActionTypes.DocumentRenamed) != 0)
             {
                 service?.Closed(Path);
+                RemovePath(Path);
                 Path = args.FilePath;
+                AddPath(Path);
             }
 
-            if ((args.FileActionType & FileActionTypes.ContentSavedToDisk) != 0)
+            // 편집기 밖 변경을 다시 불러온 경우도 저장과 같이 반영합니다. 파일 변경 감시는 편집기에 열린 문서를 건너뜁니다.
+            if ((args.FileActionType & (FileActionTypes.ContentSavedToDisk | FileActionTypes.ContentLoadedFromDisk)) != 0)
             {
                 Dirty = false;
                 var snapshot = Document.TextBuffer.CurrentSnapshot;

@@ -99,6 +99,7 @@ public sealed class NavigationResult
 /// background index에 남아 다음 요청부터 바로 찾습니다.
 /// 최신성: 편집기에서 저장한 문서는 clangd에 열려 있으면 내용과 저장을 알리고, 아니면 저장된 내용으로 열었다가
 /// 분석이 끝나면 닫습니다. clangd는 파일 감시 통지만으로는 닫힌 파일을 다시 색인하지 않기 때문입니다.
+/// 편집기 밖에서 바뀐 파일(<see cref="Reload"/>)도 디스크 내용으로 같은 방식을 씁니다.
 /// </remarks>
 public sealed class ClangdNavigator : IDisposable
 {
@@ -305,6 +306,28 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         _ = Task.Run(RunTouchesAsync);
+    }
+
+    /// <summary>
+    /// 편집기 밖에서 바뀐 파일을 디스크 내용으로 다시 분석해 색인에 반영합니다.
+    /// 편집기에 열린 파일은 편집기 내용이 우선이므로 호출자가 걸러야 합니다.
+    /// </summary>
+    public void Reload(string path)
+    {
+        if (HasExited) return;
+        var text = SourceLinePreview.ReadText(path);
+        if (text is null) return;
+        try
+        {
+            // 엔진 후보처럼 편집기 없이 열어 둔 문서도 디스크가 기준이므로 닫고 새 내용으로 다시 엽니다.
+            documents.TryClose(path);
+        }
+        catch (LspConnectionClosedException)
+        {
+            return;
+        }
+
+        Saved(new DocumentText(path, text, 0));
     }
 
     /// <summary>편집기에서 마지막 창을 닫은 문서를 clangd에서도 닫습니다(진행 중인 요청이 없을 때).</summary>

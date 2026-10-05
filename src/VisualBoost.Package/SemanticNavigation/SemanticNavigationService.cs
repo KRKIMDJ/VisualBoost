@@ -44,10 +44,17 @@ internal sealed class SemanticNavigationSettings
 /// 같은 Solution에서 빌드 완료·옵션 변경 전까지 기억해 매 요청마다 다시 탐색하지 않습니다.
 /// clangd가 비정상 종료하면 다음 요청에서 다시 시작하되, 반복되면 중지합니다.
 /// 문서 알림은 직렬 큐 하나로 보내 같은 문서의 내용이 뒤바뀌어 도착하지 않게 합니다.
+/// 실행 중에는 Solution 폴더의 C++ 소스를 감시해 편집기 밖 변경을 반영합니다. 바뀐 파일이 적으면 하나씩 다시 분석하고,
+/// 많거나(브랜치 전환 등) 삭제가 있으면 다시 시작합니다. 재시작한 clangd는 바뀐 파일만 다시 색인합니다.
 /// </remarks>
 internal sealed class SemanticNavigationService : IDisposable
 {
     private const int MaxUnexpectedExits = 3;
+
+    // 하나씩 다시 분석하면 TU마다 작업 스레드 하나로 전체 분석을 하므로, 이보다 많으면 병렬 재색인하는 재시작이 빠릅니다.
+    private const int MaxReloadsPerBatch = 16;
+
+    private static readonly TimeSpan SourceChangeQuiet = TimeSpan.FromSeconds(2);
 
     private readonly object gate = new();
     private readonly SolutionFileIndexService fileIndex;
@@ -57,6 +64,7 @@ internal sealed class SemanticNavigationService : IDisposable
     private string? solutionPath;
     private int generation;
     private ClangdNavigator? navigator;
+    private SourceChangeMonitor? monitor;
     private Task<ClangdNavigator?>? starting;
     private CancellationTokenSource? startCancellation;
     private string? unavailableReason;
@@ -270,6 +278,7 @@ internal sealed class SemanticNavigationService : IDisposable
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
         ClangdNavigator? current;
+        SourceChangeMonitor? watcher;
         lock (gate)
         {
             generation++;
@@ -277,8 +286,11 @@ internal sealed class SemanticNavigationService : IDisposable
             current = navigator;
             navigator = null;
             starting = null;
+            watcher = monitor;
+            monitor = null;
         }
 
+        watcher?.Dispose();
         // VS 종료 중에는 기다리지 않습니다. 색인 조각은 원자적으로 기록되므로 강제 종료해도 캐시가 깨지지 않습니다.
         current?.Dispose();
     }
@@ -341,15 +353,18 @@ internal sealed class SemanticNavigationService : IDisposable
                 FindByStem = stem => fileIndex.FindByStem(stem)
             }, cancellationToken).ConfigureAwait(false);
 
+            var watcher = CreateMonitor(solution, observed);
             lock (gate)
             {
                 if (observed != generation || cancellationToken.IsCancellationRequested)
                 {
+                    watcher?.Dispose();
                     created.Dispose();
                     return null;
                 }
 
                 navigator = created;
+                monitor = watcher;
                 starting = null;
                 unavailableReason = null;
             }
@@ -399,11 +414,14 @@ internal sealed class SemanticNavigationService : IDisposable
         if (source.HasExited)
         {
             var unexpected = false;
+            SourceChangeMonitor? watcher = null;
             lock (gate)
             {
                 if (ReferenceEquals(navigator, source))
                 {
                     navigator = null;
+                    watcher = monitor;
+                    monitor = null;
                     unexpected = true;
                     unexpectedExits++;
                     if (unexpectedExits >= MaxUnexpectedExits)
@@ -413,6 +431,7 @@ internal sealed class SemanticNavigationService : IDisposable
                 }
             }
 
+            watcher?.Dispose();
             if (unexpected)
             {
                 ActivityLog.LogWarning("VisualBoost/SemanticNavigation", "clangd가 예기치 않게 종료되었습니다. 로그: " + source.LogPath);
@@ -450,6 +469,7 @@ internal sealed class SemanticNavigationService : IDisposable
     private void Stop(string? reason)
     {
         ClangdNavigator? current;
+        SourceChangeMonitor? watcher;
         lock (gate)
         {
             generation++;
@@ -457,8 +477,12 @@ internal sealed class SemanticNavigationService : IDisposable
             starting = null;
             current = navigator;
             navigator = null;
+            watcher = monitor;
+            monitor = null;
             unavailableReason = reason;
         }
+
+        watcher?.Dispose();
 
         if (current is not null)
         {
@@ -479,6 +503,48 @@ internal sealed class SemanticNavigationService : IDisposable
     }
 
     private void RaiseStateChanged() => StateChanged?.Invoke();
+
+    private SourceChangeMonitor? CreateMonitor(string solution, int observed)
+    {
+        var root = Path.GetDirectoryName(solution);
+        if (root is null || !Directory.Exists(root)) return null;
+        try
+        {
+            return new SourceChangeMonitor(root, SourceChangeQuiet, batch => OnSourcesChanged(observed, batch));
+        }
+        catch (Exception exception) when (exception is ArgumentException || exception is IOException || exception is UnauthorizedAccessException)
+        {
+            // 감시를 못 해도 편집기 저장·재시작 경로로는 최신성을 유지합니다.
+            ActivityLog.LogWarning("VisualBoost/SemanticNavigation", "소스 변경 감시를 시작하지 못했습니다: " + exception.Message);
+            return null;
+        }
+    }
+
+    private void OnSourcesChanged(int observed, SourceChangeBatch batch)
+    {
+        ClangdNavigator? current;
+        lock (gate)
+        {
+            if (observed != generation) return;
+            current = navigator;
+        }
+
+        if (current is not { HasExited: false }) return;
+        // 편집기에 열린 문서는 편집기 내용이 기준이며, 다시 불러오면 문서 추적기가 알립니다.
+        var paths = batch.Paths.Where(path => !SemanticDocumentTracker.IsOpenInEditor(path)).ToArray();
+        if (batch.RequiresRestart || paths.Length > MaxReloadsPerBatch)
+        {
+            ActivityLog.LogInformation("VisualBoost/SemanticNavigation",
+                $"편집기 밖 소스 변경으로 clangd를 다시 시작합니다(바뀐 파일 {paths.Length}개, 삭제·감시 누락 {batch.RequiresRestart}).");
+            Restart();
+            return;
+        }
+
+        foreach (var path in paths)
+        {
+            Post(navigator => navigator.Reload(path));
+        }
+    }
 
     private static string? FindEngineRoot(string solution)
     {
