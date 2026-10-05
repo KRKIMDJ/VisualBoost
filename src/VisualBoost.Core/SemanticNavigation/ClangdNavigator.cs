@@ -111,6 +111,9 @@ public sealed class NavigationResult
 /// </remarks>
 public sealed class ClangdNavigator : IDisposable
 {
+    /// <summary>색칠용 종류 조회의 자체 상한입니다. 이미 받은 결과를 보이는 시간을 이 이상 늦추지 않습니다.</summary>
+    private static readonly TimeSpan SymbolKindTimeout = TimeSpan.FromSeconds(1);
+
     private readonly ClangdNavigatorOptions options;
     private readonly ClangdSession session;
     private readonly ClangdDocumentSet documents;
@@ -269,15 +272,24 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
-    /// <summary>결과 색칠용 종류입니다. 표시 보조일 뿐이므로 clangd가 이 요청만 거절하면 종류 없이 결과를 돌려줍니다.</summary>
+    /// <summary>
+    /// 결과 색칠용 종류입니다. 표시 보조일 뿐이므로 자체 상한 초과·요청 거절·연결 끊김은 종류 없음으로 두고 이미 받은 결과를 그대로 돌려줍니다.
+    /// 호출자의 취소만 전파합니다.
+    /// </summary>
     private async Task<SourceSymbolKind?> SymbolKindAsync(SemanticSymbol? symbol, IReadOnlyList<NavigationLocation> locations, CancellationToken cancellationToken)
     {
         if (symbol is null) return null;
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        limit.CancelAfter(SymbolKindTimeout);
         try
         {
-            return await session.SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
+            return await session.SymbolKindAsync(symbol, locations, limit.Token).ConfigureAwait(false);
         }
-        catch (LspRequestException)
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
+        {
+            return null;
+        }
+        catch (Exception exception) when (exception is LspRequestException || exception is LspConnectionClosedException)
         {
             return null;
         }
