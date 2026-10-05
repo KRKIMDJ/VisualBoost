@@ -43,6 +43,7 @@ internal sealed class SolutionFileIndexService : IDisposable
     private SolutionFileIndexConfiguration configuration = SolutionFileIndexConfiguration.Default;
     private bool disposed;
     private IReadOnlyList<SymbolSearchScope> symbolScopes = new[] { SymbolSearchScope.All };
+    private SourceAnalysisPriority analysisPriority = SourceAnalysisPriority.None;
     public IReadOnlyList<SymbolSearchScope> SymbolScopes { get { lock (gate) return symbolScopes; } }
 
     internal SolutionFileIndexService(SolutionSourceAnalyzer? sourceAnalyzer = null, FileIndexCache? cache = null)
@@ -72,6 +73,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             explicitFiles = Array.Empty<string>();
             solutionPath = path;
             symbolScopes = new[] { SymbolSearchScope.All };
+            analysisPriority = SourceAnalysisPriority.None;
             index.Clear();
             sourceAnalyzer.Clear();
             state = SolutionFileIndexState.Building;
@@ -173,6 +175,7 @@ internal sealed class SolutionFileIndexService : IDisposable
                 state == SolutionFileIndexState.Ready)
             {
                 if (discovery.SymbolScopes is not null) symbolScopes = discovery.SymbolScopes;
+                if (discovery.AnalysisPriority is not null) analysisPriority = discovery.AnalysisPriority;
                 return;
             }
 
@@ -184,8 +187,10 @@ internal sealed class SolutionFileIndexService : IDisposable
                 index.Clear();
                 sourceAnalyzer.Clear();
                 symbolScopes = new[] { SymbolSearchScope.All };
+                analysisPriority = SourceAnalysisPriority.None;
             }
             if (discovery.SymbolScopes is not null) symbolScopes = discovery.SymbolScopes;
+            if (discovery.AnalysisPriority is not null) analysisPriority = discovery.AnalysisPriority;
             solutionPath = discovery.SolutionPath;
             analysisProgress = null;
             CancelBuildNoLock();
@@ -463,6 +468,9 @@ internal sealed class SolutionFileIndexService : IDisposable
                 recentFileSet.Remove(last);
             }
         }
+
+        // 분석 중이면 방금 연 파일과 그 프로젝트를 먼저 분석합니다. 분석기 대기열 잠금은 이 서비스 잠금과 겹치지 않게 밖에서 잡습니다.
+        sourceAnalyzer.Focus(normalizedPath);
     }
 
     public async Task WaitUntilReadyAsync(CancellationToken cancellationToken = default)
@@ -690,6 +698,9 @@ internal sealed class SolutionFileIndexService : IDisposable
                     lastError = null;
                     isAnalyzing = currentConfiguration.EnableSourceAnalysis;
                     analysisError = null;
+                    var priority = analysisPriority;
+                    // 최근에 연 순서(열린 문서 포함)입니다. 분석 도중 연 파일은 RecordRecentFile이 대기열에 직접 알립니다.
+                    var focus = recentFiles.ToArray();
                     activeAnalysis = currentConfiguration.EnableSourceAnalysis
                         ? Task.Run(
                             () => AnalyzeSourcesAsync(
@@ -697,6 +708,8 @@ internal sealed class SolutionFileIndexService : IDisposable
                                     files,
                                     effectiveRoots,
                                     currentConfiguration.SourceAnalysisDelay,
+                                    priority,
+                                    focus,
                                     cancellationToken),
                             cancellationToken)
                         : Task.CompletedTask;
@@ -734,6 +747,8 @@ internal sealed class SolutionFileIndexService : IDisposable
         IReadOnlyList<string> files,
         IReadOnlyList<string> includeRoots,
         TimeSpan delay,
+        SourceAnalysisPriority priority,
+        IReadOnlyList<string> focus,
         CancellationToken cancellationToken)
     {
         var entered = false;
@@ -750,7 +765,9 @@ internal sealed class SolutionFileIndexService : IDisposable
                 files,
                 includeRoots,
                 cancellationToken,
-                ReportProgress);
+                ReportProgress,
+                priority,
+                focus);
 
             lock (gate)
             {

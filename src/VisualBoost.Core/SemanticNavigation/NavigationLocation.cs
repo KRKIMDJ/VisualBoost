@@ -12,13 +12,14 @@ namespace VisualBoost.Core.SemanticNavigation;
 /// </summary>
 public sealed class NavigationLocation : IEquatable<NavigationLocation>
 {
-    public NavigationLocation(string path, int line, int character, int endLine, int endCharacter)
+    public NavigationLocation(string path, int line, int character, int endLine, int endCharacter, string? container = null)
     {
         Path = path ?? throw new ArgumentNullException(nameof(path));
         Line = line;
         Character = character;
         EndLine = endLine;
         EndCharacter = endCharacter;
+        Container = string.IsNullOrWhiteSpace(container) ? null : container;
     }
 
     public string Path { get; }
@@ -30,6 +31,9 @@ public sealed class NavigationLocation : IEquatable<NavigationLocation>
     public int EndLine { get; }
 
     public int EndCharacter { get; }
+
+    /// <summary>참조가 들어 있는 함수·클래스 이름입니다(clangd 확장). 모르면 null이며 위치 동일성에는 쓰지 않습니다.</summary>
+    public string? Container { get; }
 
     public bool Equals(NavigationLocation? other) =>
         other is not null &&
@@ -63,7 +67,8 @@ public sealed class NavigationLocation : IEquatable<NavigationLocation>
 
             locations.Add(new NavigationLocation(path,
                 range["start"]["line"].AsInt32() ?? 0, range["start"]["character"].AsInt32() ?? 0,
-                range["end"]["line"].AsInt32() ?? 0, range["end"]["character"].AsInt32() ?? 0));
+                range["end"]["line"].AsInt32() ?? 0, range["end"]["character"].AsInt32() ?? 0,
+                item["containerName"].AsString()));
         }
 
         return locations;

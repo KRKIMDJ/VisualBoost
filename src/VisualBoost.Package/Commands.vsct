@@ -85,8 +85,15 @@
       <Button guid="guidVisualBoostCommandSet" id="FindReferencesCommand" priority="0x0120" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
-          <ButtonText>참조 찾기...</ButtonText>
+          <ButtonText>참조 찾기</ButtonText>
           <CanonicalName>VisualBoost.FindReferences</CanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidVisualBoostCommandSet" id="ShowReferencesWindowCommand" priority="0x0125" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>참조 결과 창</ButtonText>
+          <CanonicalName>VisualBoost.ShowReferencesWindow</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0100" type="Button">
@@ -131,6 +138,10 @@
     <CommandPlacement guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x0100">
       <Parent guid="guidVisualBoostCommandSet" id="VisualBoostGenerationContextGroup" />
     </CommandPlacement>
+    <!-- 보기 > 다른 창에서도 참조 결과 창을 다시 열 수 있게 합니다. -->
+    <CommandPlacement guid="guidVisualBoostCommandSet" id="ShowReferencesWindowCommand" priority="0x0100">
+      <Parent guid="guidSHLMainMenu" id="IDG_VS_WNDO_OTRWNDWS1" />
+    </CommandPlacement>
   </CommandPlacements>
   <KeyBindings>
     <KeyBinding guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="Q" />
@@ -167,6 +178,7 @@
       <IDSymbol name="GenerateFunctionCommand" value="0x0108" />
       <IDSymbol name="GoToDefinitionCommand" value="0x0109" />
       <IDSymbol name="FindReferencesCommand" value="0x010A" />
+      <IDSymbol name="ShowReferencesWindowCommand" value="0x010B" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

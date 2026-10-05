@@ -29,6 +29,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     private IReadOnlyDictionary<string, CachedSourceAnalysis>? loadedCache;
     private string? discoverySolution;
     private readonly HashSet<string> discoveredCacheFiles = new(StringComparer.OrdinalIgnoreCase);
+    // 진행 중인 분석 패스의 대기열입니다. 사용자가 연 파일을 앞으로 옮길 때만 다른 스레드에서 읽습니다.
+    private volatile SourceAnalysisQueue? activeQueue;
 
     internal void PrepareCachedDiscovery(string solutionPath, CancellationToken token)
     {
@@ -75,12 +77,19 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         }
     }
 
+    /// <summary>진행 중인 분석에서 이 파일과 같은 프로젝트의 파일을 먼저 분석하게 합니다. 분석 중이 아니면 아무것도 하지 않습니다.</summary>
+    public void Focus(string path) => activeQueue?.Focus(path);
+
+    /// <param name="priority">프로젝트 소속·엔진 위치로 정하는 기본 분석 순서입니다.</param>
+    /// <param name="focus">먼저 분석할 파일(열린 문서, 최근에 연 순서)입니다.</param>
     public IReadOnlyList<string> Analyze(
         string solutionPath,
         IReadOnlyList<string> files,
         IReadOnlyList<string> includeRoots,
         CancellationToken cancellationToken,
-        Action<SourceAnalysisProgress>? reportProgress = null)
+        Action<SourceAnalysisProgress>? reportProgress = null,
+        SourceAnalysisPriority? priority = null,
+        IReadOnlyList<string>? focus = null)
     {
         LastWarning = null;
         cancellationToken.ThrowIfCancellationRequested();
@@ -114,27 +123,40 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         var pendingSymbols = new List<SourceSymbolLocation>();
         var pendingFiles = 0;
         // 최초 분석은 고정 크기 묶음으로 공개하고 검색 인덱스가 묶음을 계층적으로 병합합니다.
-        void PublishProgress(CachedSourceAnalysis entry)
+        // 사용자가 연 파일과 그 프로젝트는 작은 묶음으로 공개해 검색에 빨리 나타나게 합니다.
+        void PublishProgress(CachedSourceAnalysis entry, SourceAnalysisRank rank)
         {
             // 재방문 시 이미 공개한 전체 캐시를 더 작은 부분 결과로 퇴행시키지 않습니다.
             if (previous.Count > 0) return;
             lock (publicationGate)
             {
                 pendingSymbols.AddRange(entry.Analysis.Symbols);
-                if (++pendingFiles < 128) return;
+                if (++pendingFiles < (rank <= SourceAnalysisRank.Related ? 8 : 128)) return;
                 symbols.AppendBatch(pendingSymbols, cancellationToken);
                 pendingSymbols.Clear();
                 pendingFiles = 0;
                 SymbolsPublished?.Invoke(current.Count);
             }
         }
-        var parallelOptions = new ParallelOptions
+        // 편집기 응답성을 우선하고 남는 처리량만 초기 분석에 사용합니다.
+        var workers = Math.Min(2, Math.Max(1, Environment.ProcessorCount - 1));
+        var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = workers };
+        // 열린 파일 → 같은 프로젝트 → 다른 프로젝트 → 보충 파일 → 엔진 순서로 분석하고, 도중에 연 파일은 앞으로 옮깁니다.
+        var queue = new SourceAnalysisQueue(sourceFiles, priority ?? SourceAnalysisPriority.None, focus);
+        activeQueue = queue;
+        try
         {
-            CancellationToken = cancellationToken,
-            // 편집기 응답성을 우선하고 남는 처리량만 초기 분석에 사용합니다.
-            MaxDegreeOfParallelism = Math.Min(2, Math.Max(1, Environment.ProcessorCount - 1)),
-        };
-        Parallel.ForEach(sourceFiles, parallelOptions, file =>
+            Parallel.For(0, workers, parallelOptions, _ =>
+            {
+                while (queue.TryTake(out var file, out var rank)) AnalyzeFile(file, rank);
+            });
+        }
+        finally
+        {
+            if (ReferenceEquals(activeQueue, queue)) activeQueue = null;
+        }
+
+        void AnalyzeFile(string file, SourceAnalysisRank rank)
         {
             cancellationToken.ThrowIfCancellationRequested();
             Report(SourceAnalysisStage.CacheChecking, file);
@@ -149,7 +171,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                     cached.Revision == CachedSourceAnalysis.CurrentRevision)
                 {
                     current[file] = cached;
-                    PublishProgress(cached);
+                    PublishProgress(cached, rank);
                     return;
                 }
 
@@ -158,7 +180,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 var after = TryGetInfo(file);
                 if (after is null || after.Length != info.Length || after.LastWriteTimeUtc != info.LastWriteTimeUtc) return;
                 current[file] = new CachedSourceAnalysis(info.Length, info.LastWriteTimeUtc.Ticks, analysis);
-                PublishProgress(current[file]);
+                PublishProgress(current[file], rank);
             }
             catch (RegexMatchTimeoutException)
             {
@@ -170,7 +192,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 // 잠겼거나 사라진 파일은 다음 증분 분석에서 다시 시도합니다.
             }
             finally { if (!cancellationToken.IsCancellationRequested) Report(SourceAnalysisStage.CacheChecking, file, completed: true); }
-        });
+        }
 
         cancellationToken.ThrowIfCancellationRequested();
         LastWarning = timedOutFiles == 0 ? null : $"복잡한 구문으로 {timedOutFiles:N0}개 파일 분석을 건너뛰었습니다. 일부 심볼이 누락될 수 있습니다.";

@@ -37,6 +37,7 @@ internal sealed class SemanticNavigationCommand
         this.service = service;
         commandService.AddCommand(new OleMenuCommand(ExecuteDefinition, new CommandID(CommandSet, CommandIds.GoToDefinition)));
         commandService.AddCommand(new OleMenuCommand(ExecuteReferences, new CommandID(CommandSet, CommandIds.FindReferences)));
+        commandService.AddCommand(new OleMenuCommand(ExecuteShowReferencesWindow, new CommandID(CommandSet, CommandIds.ShowReferencesWindow)));
     }
 
     private enum Kind
@@ -63,6 +64,13 @@ internal sealed class SemanticNavigationCommand
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         Execute(Kind.References);
+    }
+
+    private void ExecuteShowReferencesWindow(object sender, EventArgs eventArgs)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        SearchCommandRunner.Run(package, "ShowReferencesWindow", async () =>
+            await package.ShowToolWindowAsync(typeof(ReferencesToolWindow), 0, true, package.DisposalToken));
     }
 
     private void Execute(Kind kind)
@@ -167,7 +175,7 @@ internal sealed class SemanticNavigationCommand
         if (kind == Kind.Definition && result.Locations.Count == 1)
         {
             var target = result.Locations[0];
-            OpenLocation(target);
+            NavigationLocationOpener.Open(package, target, activate: true);
             await SetStatusAsync($"{Path.GetFileName(target.Path)}:{target.Line + 1}" +
                                  (result.ResolvedOnDemand ? " · 엔진 소스를 분석해 정의를 찾았습니다" : string.Empty) +
                                  (incomplete.Length > 0 ? " · " + incomplete : string.Empty));
@@ -183,15 +191,21 @@ internal sealed class SemanticNavigationCommand
         var solutionPath = dte.Solution?.FullName;
         var solutionDirectory = string.IsNullOrEmpty(solutionPath) ? null : Path.GetDirectoryName(solutionPath);
         var items = result.Locations.Select((location, index) => new NavigationResultItem(location, lines[index], solutionDirectory)).ToArray();
-        var dialog = new NavigationResultsDialog(
-            kind == Kind.Definition ? "VisualBoost 정의 후보" : "VisualBoost 참조",
-            symbol,
-            items,
-            string.Join(" · ", notes));
         await SetStatusAsync(string.Empty);
+        if (kind == Kind.References)
+        {
+            // 참조는 편집하면서 오가며 보도록 도킹 창에 남기고, 정의 후보는 하나를 고르면 끝나므로 대화상자로 묻습니다.
+            var pane = await package.ShowToolWindowAsync(typeof(ReferencesToolWindow), 0, true, package.DisposalToken);
+            await package.JoinableTaskFactory.SwitchToMainThreadAsync();
+            if (pane is not ReferencesToolWindow window) throw new InvalidOperationException("참조 결과 창을 만들지 못했습니다.");
+            window.Control.Show(new ReferenceResultSet(symbol, items, string.Join(" · ", notes), DateTime.Now));
+            return;
+        }
+
+        var dialog = new NavigationResultsDialog("VisualBoost 정의 후보", symbol, items, string.Join(" · ", notes));
         if (dialog.ShowModal() == true && dialog.SelectedLocation is not null)
         {
-            OpenLocation(dialog.SelectedLocation);
+            NavigationLocationOpener.Open(package, dialog.SelectedLocation, activate: true);
         }
     }
 
@@ -203,28 +217,6 @@ internal sealed class SemanticNavigationCommand
             .ThenBy(l => l.Line)
             .ThenBy(l => l.Character)
             .ToArray();
-
-    private void OpenLocation(NavigationLocation location)
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        VsShellUtilities.OpenDocument(package, location.Path, Guid.Empty, out _, out _, out var frame, out var textView);
-        frame?.Show();
-        if (textView is null) return;
-        var line = location.Line;
-        var column = location.Character;
-        if (textView.GetBuffer(out var buffer) == 0 && buffer is not null)
-        {
-            // 파일이 바뀌어 위치가 범위를 벗어나도 가장 가까운 위치로 이동합니다.
-            buffer.GetLineCount(out var lineCount);
-            line = Math.Max(0, Math.Min(line, lineCount - 1));
-            buffer.GetLengthOfLine(line, out var length);
-            column = Math.Max(0, Math.Min(column, length));
-        }
-
-        textView.SetCaretPos(line, column);
-        textView.CenterLines(line, 1);
-        textView.SendExplicitFocus();
-    }
 
     private async Task RunVisualStudioCommandAsync(Kind kind, string? reason)
     {

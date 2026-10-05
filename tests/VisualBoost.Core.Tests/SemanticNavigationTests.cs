@@ -50,6 +50,9 @@ internal static class SemanticNavigationTests
             "[{\"uri\":\"file:///c:/x/a.cpp\",\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":5}}}," +
             "{\"targetUri\":\"file:///c:/x/b.h\",\"targetSelectionRange\":{\"start\":{\"line\":3,\"character\":4},\"end\":{\"line\":3,\"character\":7}}}]"));
         Check(locations.Count == 2 && locations[0].ToString() == @"C:\x\a.cpp:2:3" && locations[1].Line == 3, "Location·LocationLink 변환");
+        var contained = NavigationLocation.FromLsp(JsonValue.Parse(
+            "[{\"uri\":\"file:///c:/x/a.cpp\",\"range\":{\"start\":{\"line\":1,\"character\":2},\"end\":{\"line\":1,\"character\":5}},\"containerName\":\"Game::Tick\"}]"));
+        Check(contained[0].Container == "Game::Tick" && locations[0].Container is null && contained[0].Equals(locations[0]), "참조 포함 함수 이름(위치 동일성과 무관)");
         Check(NavigationLocation.FromLsp(JsonValue.Parse("{\"uri\":\"file:///c:/x/a.cpp\",\"range\":{\"start\":{\"line\":0,\"character\":0},\"end\":{\"line\":0,\"character\":1}}}")).Count == 1, "단일 Location");
         Check(NavigationLocation.Normalize(locations.Concat(locations)).Count == 2, "중복 위치 병합");
     }
@@ -440,6 +443,8 @@ internal static class SemanticNavigationTests
             var references = navigator.ReferencesAsync(query, timeout.Token).Result;
             Check(references.Symbol is { Name: "Compute", ContainerName: "FMod" } &&
                   references.Locations.Any(l => l.Path == other) && references.Locations.Any(l => l.Path == header), "참조·선언과 심볼 정보");
+            Check(references.Locations.Any(l => l.Path == other && l.Container == "Other") && references.Locations.Any(l => l.Path == use && l.Container == "Use"),
+                "참조마다 포함 함수 이름: " + string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path) + "=" + l.Container)));
 
             // 편집기에서 열지 않은 파일을 저장한 경우: 저장 내용으로 잠시 열어 색인에 반영합니다.
             var otherText = "#include \"Mod.h\"\nint Other() { return FMod::Compute(4); }\nint Again() { return FMod::Compute(5); }\n";

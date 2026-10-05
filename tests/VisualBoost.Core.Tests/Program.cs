@@ -75,6 +75,7 @@ internal static class Program
         Run("최적화된 심볼 검색의 점수와 순서가 기존 검색과 일치한다", SymbolSnapshotMatchesBaseline);
         Run("심볼 스냅샷 교체와 취소를 반영한다", SymbolSnapshotReplacesAndCancels);
         Run("실행 프로젝트의 외부 연결 파일을 포함하고 다른 프로젝트는 제외한다", SourceProjectMembershipIsExact);
+        Run("소스 분석은 연 파일·같은 프로젝트·다른 프로젝트·엔진 순서로 진행한다", SourceAnalysisFollowsUserFocus);
         Run("색상 입력과 테마별 기본 팔레트를 검증한다", SemanticColorsAreValid);
 
         Console.WriteLine(failures == 0
@@ -692,6 +693,69 @@ internal static class Program
     }
 
     private static FilePairResolver Resolver() => new();
+
+    private static void SourceAnalysisFollowsUserFocus()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoostOrder");
+        string At(params string[] parts) => Path.Combine(new[] { root }.Concat(parts).ToArray());
+        var game = new[] { At("Game", "Source", "Game.cpp"), At("Game", "Source", "Game.h"), At("Game", "Plugins", "Feature.cpp") };
+        var tool = new[] { At("Tool", "Tool.cpp"), At("Tool", "Tool.h") };
+        var loose = At("Game", "Loose", "Loose.h");
+        var engineCore = new[] { At("Engine", "Source", "Core", "A.cpp"), At("Engine", "Source", "Core", "A.h") };
+        var engineOther = At("Engine", "Source", "Other", "B.cpp");
+        // 엔진 전체를 담은 생성 프로젝트처럼 상한을 넘는 프로젝트입니다.
+        var generated = engineCore.Concat(new[] { engineOther })
+            .Concat(Enumerable.Range(0, SourceAnalysisPriority.MaxRelatedProjectFiles).Select(i => At("Engine", "Source", "Gen", i + ".h"))).ToArray();
+        var priority = new SourceAnalysisPriority(new[] { game, tool, generated }, new[] { At("Engine") });
+        var files = new[] { engineOther, engineCore[0], loose, tool[0], game[0], engineCore[1], game[1], tool[1], game[2], game[0] };
+
+        List<string> Drain(SourceAnalysisQueue queue, Action<string>? afterFirst = null)
+        {
+            var taken = new List<string>();
+            while (queue.TryTake(out var path, out _))
+            {
+                taken.Add(path);
+                if (taken.Count == 1) afterFirst?.Invoke(path);
+            }
+            return taken;
+        }
+
+        // 기본 순서: 프로젝트 파일(입력 순서) → 프로젝트 밖 파일 → 엔진. 중복 입력은 한 번만 냅니다.
+        var baseline = Drain(new SourceAnalysisQueue(files, priority));
+        Equal(string.Join("|", new[] { tool[0], game[0], game[1], tool[1], game[2], loose, engineOther, engineCore[0], engineCore[1] }), string.Join("|", baseline));
+
+        // 최근에 연 파일이 맨 앞, 그 프로젝트가 다음입니다.
+        var focused = Drain(new SourceAnalysisQueue(files, priority, new[] { game[1] }));
+        Equal(string.Join("|", new[] { game[1], game[0], game[2], tool[0], tool[1] }), string.Join("|", focused.Take(5)));
+
+        // 분석 도중 연 파일과 그 프로젝트를 앞으로 옮깁니다. 이미 분석한 파일은 다시 내지 않습니다.
+        var queue = new SourceAnalysisQueue(files, priority);
+        var dynamic = Drain(queue, _ => { queue.Focus(tool[1]); queue.Focus(tool[0]); queue.Focus(At("Elsewhere.cpp")); });
+        Equal(string.Join("|", new[] { tool[0], tool[1], game[0] }), string.Join("|", dynamic.Take(3)));
+        Equal(9, dynamic.Count);
+        Equal(0, queue.Count);
+
+        // 상한을 넘는 프로젝트에 속한 파일을 열면 같은 폴더 파일만 앞으로 옮깁니다.
+        var engineFocus = Drain(new SourceAnalysisQueue(files, priority, new[] { engineCore[1] }));
+        Equal(string.Join("|", new[] { engineCore[1], engineCore[0], tool[0] }), string.Join("|", engineFocus.Take(3)));
+        Equal(SourceAnalysisRank.Engine, priority.Rank(engineOther));
+        Equal(SourceAnalysisRank.Other, priority.Rank(loose));
+        Equal(true, priority.RelatedProject(engineOther) is null);
+
+        // 여러 작업 스레드가 꺼내는 동안 승격해도 각 파일을 정확히 한 번 냅니다.
+        var many = Enumerable.Range(0, 5000).Select(i => At("Game", "Many", i % 50 + "", i + ".cpp")).ToArray();
+        var manyPriority = new SourceAnalysisPriority(new[] { many.Take(2500), many.Skip(2500) }, Array.Empty<string>());
+        var shared = new SourceAnalysisQueue(many, manyPriority);
+        var seen = new System.Collections.Concurrent.ConcurrentBag<string>();
+        var workers = Enumerable.Range(0, 4).Select(worker => System.Threading.Tasks.Task.Run(() =>
+        {
+            while (shared.TryTake(out var path, out _)) seen.Add(path);
+        })).ToArray();
+        for (var i = 0; i < 200; i++) shared.Focus(many[(i * 37) % many.Length]);
+        System.Threading.Tasks.Task.WaitAll(workers);
+        Equal(many.Length, seen.Count);
+        Equal(many.Length, seen.Distinct(StringComparer.OrdinalIgnoreCase).Count());
+    }
 
     private static string Root() => Path.Combine(Path.GetTempPath(), "VisualBoostTests");
 

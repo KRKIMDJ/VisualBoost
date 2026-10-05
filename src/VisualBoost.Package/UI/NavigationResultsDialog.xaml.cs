@@ -10,7 +10,7 @@ using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.UI;
 
-/// <summary>정의 후보와 참조 위치를 보여 주고 하나를 고르게 합니다.</summary>
+/// <summary>정의 후보를 보여 주고 하나를 고르게 합니다. 참조 결과는 도킹 창(<see cref="ReferencesToolWindow"/>)에 보입니다.</summary>
 public partial class NavigationResultsDialog : DialogWindow
 {
     private readonly IReadOnlyList<NavigationResultItem> items;

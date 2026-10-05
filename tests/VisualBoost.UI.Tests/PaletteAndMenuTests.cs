@@ -56,13 +56,17 @@ internal static class PaletteAndMenuTests
         Assert(navigationView.Descendants().Any(node => (string?)node.Attribute(x + "Name") == "Search"), "상단 줄과 별개로 숨김 모드 검색란 유지");
         var navigationOptions = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Options", "DocumentNavigationOptionsPage.cs"));
         Assert(navigationOptions.Contains("ShowBar") && navigationOptions.Contains("NameOrder"), "상단 줄 표시·정렬 설정 유지");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 9, "정의·참조 탐색을 포함한 사용자 명령 아홉 개 유지");
-        var placement = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement").Single();
-        Assert((string?)placement.Attribute("id") == "GenerateFunctionCommand" && (string?)placement.Element(ns + "Parent")!.Attribute("id") == "VisualBoostGenerationContextGroup", "코드 편집기 메뉴가 같은 생성 명령을 재사용");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 10, "정의·참조 탐색과 참조 결과 창을 포함한 사용자 명령 열 개 유지");
+        var placements = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement")
+            .Select(p => (string?)p.Attribute("id") + "|" + (string?)p.Element(ns + "Parent")!.Attribute("id")).ToArray();
+        Assert(placements.SequenceEqual(new[] { "GenerateFunctionCommand|VisualBoostGenerationContextGroup", "ShowReferencesWindowCommand|IDG_VS_WNDO_OTRWNDWS1" }),
+            "코드 편집기 메뉴가 같은 생성 명령을 재사용하고, 참조 결과 창은 보기 > 다른 창에서도 연다");
         var generationCommand = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "GenerateFunctionCommand.cs"));
         Assert(!generationCommand.Contains("ShowModal") && !generationCommand.Contains("ShowMessageBox") && generationCommand.Contains("paths[0]") && generationCommand.Contains("SystemSounds.Beep.Play"), "파일 선택·미리보기·이동 질문 제거, 1순위 자동 대상과 알림음");
         var package = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs"));
-        Assert(!package.Contains("ProvideToolWindow") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"), "폐기한 검색 창과 정밀 옵션·인덱스 등록 제외");
+        var toolWindows = package.Split('\n').Where(line => line.Contains("[ProvideToolWindow(")).ToArray();
+        Assert(toolWindows.Length == 1 && toolWindows[0].Contains("typeof(UI.ReferencesToolWindow)") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"),
+            "도킹 창은 참조 결과 창 하나만 등록하고, 폐기한 검색 창과 정밀 옵션·인덱스 등록 제외");
         var project = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoost.Package.csproj"));
         Assert(!project.Contains("Clang") && !project.Contains("CodeAnalysis") && !project.Contains("LanguageServices"), "정밀 분석기 직접 의존성 재도입 방지");
         Console.WriteLine("PASS: 색상 선택·취소·기존 설정·견본 및 도구 하위 메뉴·단축키 검증");

@@ -9,6 +9,7 @@ using System.Threading.Tasks;
 using EnvDTE;
 using EnvDTE80;
 using Microsoft.VisualStudio.Shell;
+using VisualBoost.Core.Analysis;
 using VisualBoost.Core.Indexing;
 
 namespace VisualBoost.Services;
@@ -102,8 +103,10 @@ internal static class SolutionSearchRootCollector
                 .Select(project => SymbolSearchScope.Project(project.Path, project.Name, project.Files));
             var engineRoots = UnrealEngineSourceLocator.Find(Path.GetDirectoryName(solution), Array.Empty<string>())
                 .Select(source => Path.GetDirectoryName(source)!).ToArray();
+            // 큰 파일 집합을 다루므로 분석 순서 정보도 UI thread 밖에서 만듭니다.
+            var priority = new SourceAnalysisPriority(projects.Where(p => p.Path.Length > 0).Select(p => p.Files), engineRoots);
             return new SolutionIndexDiscoveryResult(solution, roots, files.ToArray(),
-                SymbolSearchScope.CreateCatalog(scopes, projects.Where(p => p.Path.Length > 0).SelectMany(p => p.Files), engineRoots));
+                SymbolSearchScope.CreateCatalog(scopes, projects.Where(p => p.Path.Length > 0).SelectMany(p => p.Files), engineRoots), priority);
         }, cancellationToken);
     }
 }

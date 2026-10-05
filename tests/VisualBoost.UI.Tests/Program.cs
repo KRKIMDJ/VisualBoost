@@ -56,6 +56,7 @@ internal static class Program
             ProjectCollectionTests.Run();
             SearchHighlightTests.Run();
             NavigationResultTests.Run();
+            ReferenceResultsTests.Run(root, output);
             CompletionInteractionTests.Run(root);
             DocumentNavigationInteractionTests.Run(root);
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
@@ -70,13 +71,21 @@ internal static class Program
 
     private static void Validate(string root, string output, string name)
     {
-        // VS 호스트 없이 테마·아이콘과 이벤트 연결만 치환하고 실제 행·열 템플릿은 그대로 검증합니다.
+        var element = LoadXaml(root, name);
+        var window = element as Window ?? new Window { Content = element, Width = 1100, Height = 400 };
+        ValidateLoaded(output, name, element, window);
+    }
+
+    /// <summary>VS 호스트 없이 테마·아이콘과 이벤트 연결만 치환하고 실제 행·열 템플릿은 그대로 불러옵니다.</summary>
+    internal static FrameworkElement LoadXaml(string root, string name)
+    {
         var xml = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "UI", name + ".xaml"));
         XNamespace wpf = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
         XNamespace x = "http://schemas.microsoft.com/winfx/2006/xaml";
         XNamespace ui = "clr-namespace:VisualBoost.UI;assembly=VisualBoost.UI.Tests";
         var events = new HashSet<string> { "PreviewKeyDown", "TextChanged", "Click", "GotKeyboardFocus",
-            "LostKeyboardFocus", "PreviewMouseRightButtonDown", "ContextMenuOpening", "MouseDoubleClick", "SelectionChanged" };
+            "LostKeyboardFocus", "PreviewMouseRightButtonDown", "ContextMenuOpening", "MouseDoubleClick", "SelectionChanged",
+            "PreviewMouseLeftButtonDown", "Checked", "Unchecked" };
         foreach (var node in xml.Descendants().ToArray())
         {
             if (node.Name.LocalName == "DialogWindow") node.Name = wpf + "Window";
@@ -110,8 +119,11 @@ internal static class Program
                         : attribute.Value.Contains("SearchBox") ? "#38383F" : "#252529";
             }
         }
-        var element = (FrameworkElement)XamlReader.Parse(xml.ToString());
-        var window = element as Window ?? new Window { Content = element, Width = 1100, Height = 400 };
+        return (FrameworkElement)XamlReader.Parse(xml.ToString());
+    }
+
+    private static void ValidateLoaded(string output, string name, FrameworkElement element, Window window)
+    {
         var defaultWidth = window.Width;
         window.Left = -20000;
         window.ShowInTaskbar = false;
@@ -209,7 +221,7 @@ internal static class Program
         Console.WriteLine("PASS: " + name);
     }
 
-    private static void Pump() => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
+    internal static void Pump() => Dispatcher.CurrentDispatcher.Invoke(() => { }, DispatcherPriority.ApplicationIdle);
     private static bool IsSearchSymbol(TextBlock text) => text.Text == "SetMovementMode" ||
         SearchTextHighlight.GetText(text) == "SetMovementMode";
     private static void Assert(bool condition, string message)
@@ -217,7 +229,7 @@ internal static class Program
         if (!condition) throw new InvalidOperationException(message);
     }
 
-    private static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
+    internal static IEnumerable<T> Descendants<T>(DependencyObject parent) where T : DependencyObject
     {
         for (var i = 0; i < VisualTreeHelper.GetChildrenCount(parent); i++)
         {

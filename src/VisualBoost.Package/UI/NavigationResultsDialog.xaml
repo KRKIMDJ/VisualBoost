@@ -4,7 +4,7 @@
                        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
                        xmlns:platform="clr-namespace:Microsoft.VisualStudio.PlatformUI;assembly=Microsoft.VisualStudio.Shell.15.0"
                        xmlns:vsshell="clr-namespace:Microsoft.VisualStudio.Shell;assembly=Microsoft.VisualStudio.Shell.15.0"
-                       Title="VisualBoost 참조"
+                       Title="VisualBoost 정의 후보"
                        ui:SearchPalette.Track="True"
                        Width="1040"
                        Height="560"

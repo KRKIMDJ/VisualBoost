@@ -28,6 +28,7 @@ internal sealed class NavigationResultItem
         Match = lineText.Substring(start, end - start);
         After = after.Length > MaxAfter ? after.Substring(0, MaxAfter) + "…" : after;
         Code = (Before + Match + After).Trim();
+        Container = location.Container ?? string.Empty;
     }
 
     public NavigationLocation Location { get; }
@@ -48,10 +49,14 @@ internal sealed class NavigationResultItem
 
     public string Code { get; }
 
+    /// <summary>참조가 들어 있는 함수·클래스 이름입니다. 모르면 빈 문자열입니다.</summary>
+    public string Container { get; }
+
     public bool Matches(string query) =>
         FileName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Folder.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
-        Code.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+        Code.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        Container.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
 
     private static string RelativeFolder(string path, string? solutionDirectory)
     {

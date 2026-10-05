@@ -206,7 +206,9 @@ public sealed class ClangdSession : IDisposable
                 ("synchronization", JsonValue.Object(("didSave", true))),
                 ("publishDiagnostics", JsonValue.Object(("versionSupport", true))),
                 ("definition", JsonValue.Object(("linkSupport", false))),
-                ("declaration", JsonValue.Object(("linkSupport", false))))));
+                ("declaration", JsonValue.Object(("linkSupport", false))),
+                // clangd 확장: 참조마다 들어 있는 함수·클래스 이름(containerName)을 받습니다.
+                ("references", JsonValue.Object(("container", true))))));
         await connection.RequestAsync("initialize", JsonValue.Object(
             ("processId", CurrentProcessId),
             ("rootUri", JsonValue.Null),

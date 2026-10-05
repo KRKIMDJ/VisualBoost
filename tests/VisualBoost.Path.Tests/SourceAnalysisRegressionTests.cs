@@ -68,6 +68,9 @@ internal static class SourceAnalysisRegressionTests
             watch.Restart();
             analyzer.Analyze(solution, files, Array.Empty<string>(), CancellationToken.None);
             Check(analyzer.FindSymbol("After").Count == files.Length, "재분석 캐시 복원");
+            var priority = new SourceAnalysisPriority(new[] { files.Take(50) }, new[] { Path.Combine(root, "Engine") });
+            analyzer.Analyze(solution, files, Array.Empty<string>(), CancellationToken.None, priority: priority, focus: new[] { files[73], files[5] });
+            Check(analyzer.FindSymbol("After").Count == files.Length, "연 파일 우선 순서로도 전체 파일 분석");
             Console.WriteLine($"INFO: 독립 100개 파일 최초 {cold:F1}ms / 캐시 {watch.Elapsed.TotalMilliseconds:F1}ms");
 
             using var service = new SolutionFileIndexService(new SolutionSourceAnalyzer(cache));
@@ -75,11 +78,11 @@ internal static class SourceAnalysisRegressionTests
             var flag = typeof(SolutionFileIndexService).GetField("isAnalyzing", BindingFlags.Instance | BindingFlags.NonPublic)!;
             // 실제 작업 경계를 호출하되 파일 탐색/엔진 탐지 및 사용자 캐시에는 접근하지 않습니다.
             flag.SetValue(service, true);
-            ((Task)analyze.Invoke(service, new object[] { "\0invalid", files, Array.Empty<string>(), TimeSpan.Zero, CancellationToken.None })!).GetAwaiter().GetResult();
+            ((Task)analyze.Invoke(service, new object[] { "\0invalid", files, Array.Empty<string>(), TimeSpan.Zero, SourceAnalysisPriority.None, Array.Empty<string>(), CancellationToken.None })!).GetAwaiter().GetResult();
             Check(!service.GetSnapshot().IsAnalyzing && service.GetSnapshot().AnalysisError is not null,
                 "캐시 초기화 예외도 분석 중 표시 해제 및 오류 공개");
             flag.SetValue(service, true);
-            ((Task)analyze.Invoke(service, new object[] { solution, files, Array.Empty<string>(), TimeSpan.Zero, CancellationToken.None })!).GetAwaiter().GetResult();
+            ((Task)analyze.Invoke(service, new object[] { solution, files, Array.Empty<string>(), TimeSpan.Zero, SourceAnalysisPriority.None, Array.Empty<string>(), CancellationToken.None })!).GetAwaiter().GetResult();
             Check(!service.GetSnapshot().IsAnalyzing && service.GetSnapshot().AnalysisError is null && service.FindSymbol("After").Count == 100,
                 "오류 후 재실행 성공 및 상태 복구");
         }
