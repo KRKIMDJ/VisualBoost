@@ -99,6 +99,8 @@ public sealed class ReferenceLineRow
     /// <summary>일치 구간이 가리키는 심볼의 종류입니다. 모르면 null입니다.</summary>
     public VisualBoost.Core.Analysis.SourceSymbolKind? SymbolKind => Item.SymbolKind;
 
+    public IReadOnlyList<VisualBoost.Core.Coloring.CodePreviewSpan> PreviewSpans => Item.PreviewSpans;
+
     /// <summary>화면 읽기 프로그램이 읽는 이름입니다.</summary>
     public override string ToString() => $"{FileName} {Line}줄: {Code}";
 }

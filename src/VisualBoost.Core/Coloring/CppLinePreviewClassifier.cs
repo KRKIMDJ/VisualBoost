@@ -101,7 +101,7 @@ public static class CppLinePreviewClassifier
                 while (i < text.Length && IsIdentifierPart(text[i])) i++;
                 var word = text.Substring(start, i - start);
                 if (Keywords.Contains(word)) spans.Add(new CodePreviewSpan(start, i - start, CodePreviewKind.Keyword));
-                else if (hints.TryGetValue(start, out var kind)) spans.Add(new CodePreviewSpan(start, i - start, ToPreviewKind(kind)));
+                else if (hints.TryGetValue(start, out var kind) && ToPreviewKind(kind) is { } preview) spans.Add(new CodePreviewSpan(start, i - start, preview));
                 continue;
             }
 
@@ -127,7 +127,8 @@ public static class CppLinePreviewClassifier
         return spans.AsReadOnly();
     }
 
-    private static CodePreviewKind ToPreviewKind(SemanticColorKind kind) => kind switch
+    /// <summary>색상 그룹에 대응하는 구간 종류입니다. 표시 전용이므로 나중에 늘어난 모르는 그룹은 예외 대신 색 없이 둡니다.</summary>
+    private static CodePreviewKind? ToPreviewKind(SemanticColorKind kind) => kind switch
     {
         SemanticColorKind.Type => CodePreviewKind.Type,
         SemanticColorKind.Variable => CodePreviewKind.Variable,
@@ -135,7 +136,7 @@ public static class CppLinePreviewClassifier
         SemanticColorKind.Macro => CodePreviewKind.Macro,
         SemanticColorKind.EnumMember => CodePreviewKind.EnumMember,
         SemanticColorKind.Namespace => CodePreviewKind.Namespace,
-        _ => throw new ArgumentOutOfRangeException(nameof(kind)),
+        _ => null,
     };
 
     /// <summary>문자·문자열 리터럴(접두어 u8/u/U/L, raw 문자열 포함)이면 끝 위치를 돌려줍니다. 닫히지 않았으면 줄 끝까지입니다.</summary>

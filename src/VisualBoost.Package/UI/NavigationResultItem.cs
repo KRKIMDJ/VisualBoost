@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Text;
 using System.Windows;
@@ -17,6 +18,13 @@ internal sealed class NavigationResultItem
     private const int MaxBefore = 80;
     private const int MaxAfter = 200;
 
+    // 색 구간은 자르기 전 원래 줄로 분류합니다. 잘린 앞부분이 문자열·주석 안에서 시작해도 경계를 바로 알기 위해서입니다.
+    private readonly string lineText;
+    private readonly int visibleStart;
+    private readonly int visibleEnd;
+    private readonly int previewShift;
+    private IReadOnlyList<CodePreviewSpan>? previewSpans;
+
     public NavigationResultItem(NavigationLocation location, string lineText, string? solutionDirectory, SourceSymbolKind? symbolKind = null)
     {
         SymbolKind = symbolKind;
@@ -32,6 +40,11 @@ internal sealed class NavigationResultItem
         Before = before.Length > MaxBefore ? "…" + before.Substring(before.Length - MaxBefore) : before;
         Match = lineText.Substring(start, end - start);
         After = after.Length > MaxAfter ? after.Substring(0, MaxAfter) + "…" : after;
+        // 원래 줄의 [visibleStart, visibleEnd)가 미리보기에 보이고, 앞을 잘랐으면 미리보기는 줄임표 한 글자만큼 밀립니다.
+        this.lineText = lineText;
+        visibleStart = start - Math.Min(before.Length, MaxBefore);
+        visibleEnd = end + Math.Min(after.Length, MaxAfter);
+        previewShift = Before.Length - Math.Min(before.Length, MaxBefore);
         Code = (Before + Match + After).Trim();
         Container = location.Container ?? string.Empty;
     }
@@ -60,11 +73,30 @@ internal sealed class NavigationResultItem
     /// <summary>일치 구간(<see cref="Match"/>)이 가리키는 심볼의 종류입니다. 이름 색칠에 쓰며 clangd가 판정하지 못하면 null입니다.</summary>
     public SourceSymbolKind? SymbolKind { get; }
 
+    /// <summary>
+    /// 미리보기(<see cref="Before"/>+<see cref="Match"/>+<see cref="After"/>) 좌표의 색 구간입니다. 화면에 처음 그릴 때 한 번 만들고,
+    /// 행 재활용·선택 변경으로 다시 그릴 때는 그대로 씁니다. 결과는 수천 개일 수 있어 보이는 행만 분류하도록 미룹니다. UI thread에서만 읽습니다.
+    /// </summary>
+    public IReadOnlyList<CodePreviewSpan> PreviewSpans => previewSpans ??= CreatePreviewSpans();
+
     public bool Matches(string query) =>
         FileName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Folder.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Code.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Container.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+
+    private IReadOnlyList<CodePreviewSpan> CreatePreviewSpans()
+    {
+        var result = new List<CodePreviewSpan>();
+        foreach (var span in CppLinePreviewClassifier.Classify(lineText))
+        {
+            var from = Math.Max(span.Start, visibleStart);
+            var to = Math.Min(span.Start + span.Length, visibleEnd);
+            if (to > from) result.Add(new CodePreviewSpan(previewShift + from - visibleStart, to - from, span.Kind));
+        }
+
+        return result.AsReadOnly();
+    }
 
     private static string RelativeFolder(string path, string? solutionDirectory)
     {
@@ -81,8 +113,8 @@ internal sealed class NavigationResultItem
 }
 
 /// <summary>
-/// 코드 미리보기를 그립니다. 앞·일치·뒤 구간 중 일치 구간만 굵게 하고, 줄을 <see cref="CppLinePreviewClassifier"/>로 나눠
-/// 텍스트 편집기와 같은 계열의 색을 입힙니다. 글꼴은 텍스트 편집기 글꼴 패밀리이며 크기는 목록 글꼴을 따릅니다.
+/// 코드 미리보기를 그립니다. 앞·일치·뒤 구간 중 일치 구간만 굵게 하고, 미리 분류한 색 구간(<see cref="SpansProperty"/>)으로
+/// 텍스트 편집기와 같은 계열의 색을 입힙니다. 여기서는 분류하지 않고 Run만 다시 만듭니다. 글꼴은 텍스트 편집기 글꼴 패밀리이며 크기는 목록 글꼴을 따릅니다.
 /// 선택 행(<see cref="PlainProperty"/>)과 고대비 모드에서는 색을 빼고 행 전경색을 상속합니다.
 /// </summary>
 public static class CodeSegments
@@ -93,6 +125,10 @@ public static class CodeSegments
         "Match", typeof(string), typeof(CodeSegments), new PropertyMetadata(string.Empty, Refresh));
     public static readonly DependencyProperty AfterProperty = DependencyProperty.RegisterAttached(
         "After", typeof(string), typeof(CodeSegments), new PropertyMetadata(string.Empty, Refresh));
+
+    /// <summary>미리보기 좌표의 색 구간입니다(<see cref="NavigationResultItem.PreviewSpans"/>). 없으면 색 없이 그립니다.</summary>
+    public static readonly DependencyProperty SpansProperty = DependencyProperty.RegisterAttached(
+        "Spans", typeof(IReadOnlyList<CodePreviewSpan>), typeof(CodeSegments), new PropertyMetadata(null, Refresh));
 
     /// <summary>일치 구간(탐색 대상 심볼)의 종류입니다. null이면 일치 구간은 행 전경색입니다.</summary>
     public static readonly DependencyProperty MatchKindProperty = DependencyProperty.RegisterAttached(
@@ -116,6 +152,8 @@ public static class CodeSegments
     public static void SetMatch(DependencyObject target, string value) => target.SetValue(MatchProperty, value);
     public static string GetAfter(DependencyObject target) => (string)target.GetValue(AfterProperty);
     public static void SetAfter(DependencyObject target, string value) => target.SetValue(AfterProperty, value);
+    public static IReadOnlyList<CodePreviewSpan>? GetSpans(DependencyObject target) => (IReadOnlyList<CodePreviewSpan>?)target.GetValue(SpansProperty);
+    public static void SetSpans(DependencyObject target, IReadOnlyList<CodePreviewSpan>? value) => target.SetValue(SpansProperty, value);
     public static SourceSymbolKind? GetMatchKind(DependencyObject target) => (SourceSymbolKind?)target.GetValue(MatchKindProperty);
     public static void SetMatchKind(DependencyObject target, SourceSymbolKind? value) => target.SetValue(MatchKindProperty, value);
     public static bool GetPlain(DependencyObject target) => (bool)target.GetValue(PlainProperty);
@@ -138,7 +176,7 @@ public static class CodeSegments
 
         var colored = !GetPlain(target);
         var dark = GetSurface(target) is not SolidColorBrush surface || SemanticColorPalette.IsDark(surface.Color.R, surface.Color.G, surface.Color.B);
-        var spans = colored ? CppLinePreviewClassifier.Classify(code) : Array.Empty<CodePreviewSpan>();
+        var spans = colored ? GetSpans(target) ?? Array.Empty<CodePreviewSpan>() : Array.Empty<CodePreviewSpan>();
         var matchBrush = colored && GetMatchKind(target) is { } kind ? CodePreviewStyle.BrushFor(kind, dark) : null;
 
         // 구간 경계와 일치 구간 경계로 나눈 조각마다 굵기·색을 정하고, 같은 모양의 이웃 조각은 하나의 Run으로 합칩니다.

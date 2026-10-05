@@ -263,6 +263,7 @@ internal static class Program
         public string Match => Name;
         public string After => "();";
         public SourceSymbolKind? SymbolKind => SourceSymbolKind.Function;
+        public IReadOnlyList<VisualBoost.Core.Coloring.CodePreviewSpan> PreviewSpans => VisualBoost.Core.Coloring.CppLinePreviewClassifier.Classify(Code);
         public string Code => Before + Match + After;
         public string Folder => DirectoryPath;
     }

@@ -133,6 +133,7 @@
                            ui:CodeSegments.Before="{Binding Before}"
                            ui:CodeSegments.Match="{Binding Match}"
                            ui:CodeSegments.After="{Binding After}"
+                           ui:CodeSegments.Spans="{Binding PreviewSpans}"
                            ui:CodeSegments.MatchKind="{Binding SymbolKind}"
                            ui:CodeSegments.Plain="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
                            ui:CodeSegments.Surface="{Binding Background, RelativeSource={RelativeSource AncestorType=Window}}"
