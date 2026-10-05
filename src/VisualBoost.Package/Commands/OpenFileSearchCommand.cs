@@ -6,6 +6,9 @@ using EnvDTE80;
 using Microsoft;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using VisualBoost.Core.Searching;
+using VisualBoost.Core.SemanticNavigation;
+using VisualBoost.SemanticNavigation;
 using VisualBoost.Services;
 using VisualBoost.UI;
 
@@ -66,14 +69,24 @@ internal sealed class OpenFileSearchCommand
             context.PreferredRoot,
             context.SolutionRoot,
             context.OpenFiles,
-            context.Projects);
+            context.Projects,
+            initialQuery: SearchQuerySeed.ForFileSearch(FileSearchContext.GetSelectedText(dte)));
         if (dialog.ShowModal() != true || string.IsNullOrWhiteSpace(dialog.SelectedPath))
         {
             return;
         }
 
-        fileIndex.RecordRecentFile(dialog.SelectedPath);
-        dte.ItemOperations.OpenFile(dialog.SelectedPath);
+        var path = dialog.SelectedPath!;
+        fileIndex.RecordRecentFile(path);
+        if (dialog.SelectedLine is { } line)
+        {
+            // 줄 위치가 파일 길이를 넘으면 마지막 줄로 맞추고 화면 가운데에 보입니다.
+            var column = Math.Max(0, (dialog.SelectedColumn ?? 1) - 1);
+            NavigationLocationOpener.Open(package, new NavigationLocation(path, line - 1, column, line - 1, column), activate: true);
+            return;
+        }
+
+        dte.ItemOperations.OpenFile(path);
     }
 
     private async Task ShowStatusAsync(string message)

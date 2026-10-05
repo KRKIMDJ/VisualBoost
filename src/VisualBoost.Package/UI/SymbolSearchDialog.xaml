@@ -91,6 +91,7 @@
             <TextBox x:Name="SearchBox" Padding="0,8" FontSize="15" BorderThickness="0"
                      Background="Transparent"
                      Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
+                     ToolTip="심볼 이름을 입력하세요. 편집기에서 이름을 선택한 채 열면 그 이름으로 검색합니다."
                      TextChanged="OnSearchTextChanged" />
             <TextBlock x:Name="SearchPlaceholder" VerticalAlignment="Center" Opacity="0.62"
                        Text="심볼명 검색" IsHitTestVisible="False" />
@@ -108,7 +109,7 @@
                 Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
                 ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
                 DisplayMemberPath="Name" SelectionChanged="OnScopeSelectionChanged"
-                ToolTip="프로젝트 범위는 등록된 파일 기준입니다. 엔진은 확인된 설치 경로 기준입니다." />
+                ToolTip="Ctrl+Tab/Ctrl+Shift+Tab으로 바꿉니다. 프로젝트 범위는 등록된 파일 기준, 엔진은 확인된 설치 경로 기준입니다." />
     </DockPanel>
 
     <Grid Grid.Row="2">
@@ -122,7 +123,18 @@
                ScrollViewer.VerticalScrollBarVisibility="Visible"
                VirtualizingPanel.IsVirtualizing="True"
                VirtualizingPanel.VirtualizationMode="Recycling"
+               PreviewMouseRightButtonDown="OnResultsPreviewMouseRightButtonDown"
+               ContextMenuOpening="OnResultsContextMenuOpening"
                MouseDoubleClick="OnResultDoubleClick">
+        <ListView.ContextMenu>
+          <ContextMenu>
+            <MenuItem Header="열기" Click="OnContextOpenClick" />
+            <Separator />
+            <MenuItem Header="이름 복사" Click="OnContextCopyNameClick" />
+            <MenuItem Header="전체 경로 복사" Click="OnContextCopyPathClick" />
+            <MenuItem Header="탐색기에서 보기" Click="OnContextShowInExplorerClick" />
+          </ContextMenu>
+        </ListView.ContextMenu>
         <ListView.View>
           <GridView AllowsColumnReorder="False">
             <GridViewColumn Header="심볼" Width="390">
@@ -199,8 +211,9 @@
             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
             BorderThickness="0,1,0,0">
       <Grid>
-        <TextBlock x:Name="StatusText" HorizontalAlignment="Left" Text="0개 결과" />
-        <TextBlock HorizontalAlignment="Right" Text="↑↓ 선택   Enter 열기   Esc 닫기" />
+        <TextBlock x:Name="StatusText" HorizontalAlignment="Left" Margin="0,0,330,0" TextTrimming="CharacterEllipsis" Text="0개 결과" />
+        <TextBlock x:Name="KeyboardHintText" HorizontalAlignment="Right" Opacity="0.72"
+                   Text="↑↓ 선택   Enter 열기   Ctrl+Tab 범위   Esc 닫기" />
       </Grid>
     </Border>
   </Grid>

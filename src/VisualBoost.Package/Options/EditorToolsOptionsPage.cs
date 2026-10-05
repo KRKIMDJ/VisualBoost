@@ -8,9 +8,10 @@ namespace VisualBoost.Options;
 public sealed class EditorToolsOptionsPage : DialogPage
 {
     [Category("코드 도구"), DisplayName("빠른 인클루드 사용"), DefaultValue(true)]
+    [Description("오류로 표시된 C++ 이름에서 코드 도구(Shift+Alt+Q)를 열면 그 이름을 선언한 헤더의 #include를 추가합니다.")]
     public bool QuickIncludeEnabled { get; set; } = true;
     [Category("주석 탐색"), DisplayName("주석 링크 사용"), DefaultValue(true)]
-    [Description("C++·C# 파일 링크와 C++ 클래스·네임스페이스·한정 함수 이름 링크를 표시합니다.")]
+    [Description("C++·C# 파일 링크와 C++ 클래스·네임스페이스·한정 함수 이름 링크를 표시합니다. Ctrl+클릭으로 엽니다.")]
     public bool CommentLinksEnabled { get; set; } = true;
     protected override void OnApply(PageApplyEventArgs e)
     { base.OnApply(e); if (e.ApplyBehavior != ApplyKind.Cancel) CommentLinks.CommentLinkRuntime.Enabled = CommentLinksEnabled; }

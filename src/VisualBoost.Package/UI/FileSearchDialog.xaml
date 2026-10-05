@@ -161,7 +161,7 @@
                      BorderThickness="0"
                      Background="Transparent"
                      Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
-                     ToolTip="파일명 또는 경로를 입력하세요."
+                     ToolTip="파일명 또는 경로를 입력하세요. 공백으로 나눈 검색어를 모두 만족하는 파일을 찾고, 끝에 :줄 또는 (줄)을 붙이면 연 뒤 그 줄로 이동합니다."
                      TextChanged="OnSearchTextChanged"
                      GotKeyboardFocus="OnSearchFocusChanged"
                      LostKeyboardFocus="OnSearchFocusChanged" />
@@ -169,7 +169,7 @@
                        Margin="1,0,0,0"
                        VerticalAlignment="Center"
                        Opacity="0.62"
-                       Text="파일명 또는 경로 검색"
+                       Text="파일명 또는 경로 검색 · 끝에 :줄 번호를 붙이면 그 줄로 이동"
                        IsHitTestVisible="False" />
           </Grid>
 
@@ -320,7 +320,7 @@
                    DockPanel.Dock="Right"
                    Margin="14,0,0,0"
                    Opacity="0.72"
-                   Text="↑↓ 선택   Enter 열기   Esc 닫기" />
+                   Text="↑↓ 선택   Enter 열기   Ctrl+Tab 범위   Esc 닫기" />
         <TextBlock x:Name="StatusText" Opacity="0.78" TextTrimming="CharacterEllipsis" />
       </DockPanel>
     </Border>

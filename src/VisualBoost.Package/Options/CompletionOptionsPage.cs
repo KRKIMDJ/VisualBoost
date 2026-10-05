@@ -14,9 +14,11 @@ public sealed class CompletionOptionsPage : DialogPage
     public bool Enabled { get; set; } = true;
 
     [Category("입력 보조"), DisplayName("최소 입력 글자 수"), DefaultValue(3)]
+    [Description("이름을 이 글자 수 이상 입력했을 때부터 제안합니다. 3~10 범위로 적용됩니다.")]
     public int MinimumLength { get; set; } = 3;
 
     [Category("입력 보조"), DisplayName("입력 대기 시간(ms)"), DefaultValue(250)]
+    [Description("입력을 멈춘 뒤 제안을 보이기까지 기다리는 시간입니다. 150~1000ms 범위로 적용됩니다.")]
     public int DelayMilliseconds { get; set; } = 250;
 
     internal void Publish()

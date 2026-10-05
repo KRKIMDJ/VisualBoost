@@ -35,6 +35,8 @@
     <Compile Include="../../src/VisualBoost.Package/UI/FittedResultsList.cs" Link="FittedResultsList.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/NavigationResultItem.cs" Link="NavigationResultItem.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/ReferenceResults.cs" Link="ReferenceResults.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/ResultListKeys.cs" Link="ResultListKeys.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/WindowPlacement.cs" Link="WindowPlacement.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>

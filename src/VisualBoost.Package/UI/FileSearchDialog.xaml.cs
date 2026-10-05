@@ -1,15 +1,13 @@
 using System;
 using System.Collections.Generic;
-using System.ComponentModel;
-using System.Diagnostics;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
@@ -45,7 +43,8 @@ public partial class FileSearchDialog : DialogWindow
         string? solutionRoot,
         IReadOnlyCollection<string> openFiles,
         IReadOnlyList<SolutionProjectInfo> projects,
-        IReadOnlyList<string>? candidatePaths = null)
+        IReadOnlyList<string>? candidatePaths = null,
+        string? initialQuery = null)
     {
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
         this.options = options ?? throw new ArgumentNullException(nameof(options));
@@ -65,6 +64,8 @@ public partial class FileSearchDialog : DialogWindow
         ConfigureScopeButtons();
         ConfigureMode();
         RestoreWindowPlacement();
+        // 로드 전 TextChanged는 무시되고, 첫 검색은 OnLoaded에서 이 검색어로 실행합니다.
+        if (!string.IsNullOrEmpty(initialQuery)) SearchBox.Text = initialQuery;
 
         statusTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
@@ -77,6 +78,12 @@ public partial class FileSearchDialog : DialogWindow
 
     public string? SelectedPath { get; private set; }
 
+    /// <summary>검색어 끝에 줄 표기(<c>Foo.cpp:120</c>)가 있었으면 연 뒤 이동할 줄(1부터)입니다.</summary>
+    public int? SelectedLine { get; private set; }
+
+    /// <summary>줄 표기에 열이 있었으면 이동할 열(1부터)입니다.</summary>
+    public int? SelectedColumn { get; private set; }
+
     [SuppressMessage(
         "Usage",
         "VSTHRD100:Avoid async void methods",
@@ -85,6 +92,8 @@ public partial class FileSearchDialog : DialogWindow
     {
         SearchBox.Focus();
         Keyboard.Focus(SearchBox);
+        // 미리 채운 검색어는 전체 선택해 두어 바로 입력하면 덮어쓰게 합니다.
+        SearchBox.SelectAll();
         UpdateSearchControls();
         statusTimer.Start();
         await RefreshResultsAsync(useDebounce: false);
@@ -151,7 +160,8 @@ public partial class FileSearchDialog : DialogWindow
         searchCancellation = currentCancellation;
         previousCancellation?.Cancel();
 
-        var query = SearchBox.Text;
+        // 줄 표기는 검색에서 빼고 열 때만 씁니다.
+        var query = FileLocationQuery.Parse(SearchBox.Text).SearchText;
         var selectedScope = scope;
         var cancellationToken = currentCancellation.Token;
         isSearching = true;
@@ -249,14 +259,24 @@ public partial class FileSearchDialog : DialogWindow
                     SolutionFileIndexState.Faulted => "인덱스 오류",
                     _ => "인덱스 없음",
                 });
-        StatusText.Text = candidatePaths is null
+        var location = FileLocationQuery.Parse(SearchBox.Text);
+        var lineNote = location.Line is { } line ? $" · 열면 {line:N0}번째 줄로 이동" : string.Empty;
+        StatusText.Text = (candidatePaths is null
             ? $"{displayedResultCount:N0}개 결과 · {snapshot.FileCount:N0}개 인덱싱 · {stateText}"
-            : $"{displayedResultCount:N0}개 후보 · {stateText}";
+            : $"{displayedResultCount:N0}개 후보 · {stateText}") + lineNote;
         CancelSearchButton.Visibility = isSearching ? Visibility.Visible : Visibility.Collapsed;
         KeyboardHintText.Text = isSearching
             ? "Esc 검색 취소"
-            : "↑↓ 선택   Enter 열기   Esc 닫기";
+            : candidatePaths is null
+                ? "↑↓ 선택   Enter 열기   Ctrl+Tab 범위   Esc 닫기"
+                : "↑↓ 선택   Enter 열기   Esc 닫기";
+        KeyboardHintText.ToolTip = KeysDescription();
     }
+
+    private string KeysDescription() =>
+        ResultListKeys.MoveKeysDescription +
+        (candidatePaths is null ? "\n" + ResultListKeys.ScopeKeysDescription : string.Empty) +
+        "\n검색어 끝에 :줄 또는 (줄)을 붙이면 연 뒤 그 줄로 이동\nEnter 열기 · Esc 닫기";
 
     private void SetStatusNotice(string message)
     {
@@ -422,16 +442,31 @@ public partial class FileSearchDialog : DialogWindow
             return;
         }
 
-        if (eventArgs.Key == Key.Down)
+        if (candidatePaths is null && ResultListKeys.IsScopeCycle(eventArgs.Key, Keyboard.Modifiers, out var forward))
         {
-            MoveSelection(1);
+            CycleScope(forward);
+            eventArgs.Handled = true;
+            return;
+        }
+
+        var pageSize = ResultListKeys.PageSize(ResultsList.ActualHeight - 28, 24);
+        if (ResultListKeys.TryMove(eventArgs.Key, Keyboard.Modifiers, ResultsList.SelectedIndex, ResultsList.Items.Count, pageSize, out var target))
+        {
+            Select(target);
             eventArgs.Handled = true;
         }
-        else if (eventArgs.Key == Key.Up)
-        {
-            MoveSelection(-1);
-            eventArgs.Handled = true;
-        }
+    }
+
+    /// <summary>범위 단추를 순서대로 넘깁니다. 쓸 수 없는 범위(기준 루트·열린 파일 없음)는 건너뜁니다.</summary>
+    private void CycleScope(bool forward)
+    {
+        var buttons = new[] { AllScopeButton, CurrentProjectScopeButton, OpenFilesScopeButton, ExternalSourcesScopeButton };
+        var current = Array.FindIndex(buttons, button => button.IsChecked == true);
+        var next = ResultListKeys.NextScope(current, buttons.Length, forward, index => buttons[index].IsEnabled);
+        if (next < 0 || next == current) return;
+        buttons[next].IsChecked = true;
+        // 단추를 누른 것과 같은 경로로 범위를 바꾸고 다시 검색합니다. 초점은 검색란에 남습니다.
+        buttons[next].RaiseEvent(new RoutedEventArgs(ButtonBase.ClickEvent, buttons[next]));
     }
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs eventArgs)
@@ -487,55 +522,25 @@ public partial class FileSearchDialog : DialogWindow
 
     private void OnContextCopyPathClick(object sender, RoutedEventArgs eventArgs)
     {
-        if (ResultsList.SelectedItem is not FileSearchResultItem selected)
+        if (ResultsList.SelectedItem is FileSearchResultItem selected)
         {
-            return;
-        }
-
-        try
-        {
-            Clipboard.SetText(selected.FullPath);
-            SetStatusNotice("전체 경로를 복사했습니다.");
-        }
-        catch (ExternalException)
-        {
-            SetStatusNotice("클립보드를 사용할 수 없습니다.");
+            SetStatusNotice(ResultActions.Copy(selected.FullPath, "전체 경로를 복사했습니다."));
         }
     }
 
     private void OnContextShowInExplorerClick(object sender, RoutedEventArgs eventArgs)
     {
-        if (ResultsList.SelectedItem is not FileSearchResultItem selected)
+        if (ResultsList.SelectedItem is FileSearchResultItem selected &&
+            ResultActions.ShowInExplorer(selected.FullPath) is { } failure)
         {
-            return;
-        }
-
-        try
-        {
-            Process.Start(new ProcessStartInfo
-            {
-                FileName = "explorer.exe",
-                Arguments = $"/select,\"{selected.FullPath}\"",
-                UseShellExecute = true,
-            });
-        }
-        catch (Exception exception) when (
-            exception is Win32Exception ||
-            exception is InvalidOperationException)
-        {
-            SetStatusNotice("탐색기를 열 수 없습니다.");
+            SetStatusNotice(failure);
         }
     }
 
-    private void MoveSelection(int offset)
+    private void Select(int index)
     {
-        if (ResultsList.Items.Count == 0)
-        {
-            return;
-        }
-
-        var current = ResultsList.SelectedIndex < 0 ? 0 : ResultsList.SelectedIndex;
-        ResultsList.SelectedIndex = Math.Max(0, Math.Min(ResultsList.Items.Count - 1, current + offset));
+        if (index < 0 || index >= ResultsList.Items.Count) return;
+        ResultsList.SelectedIndex = index;
         ResultsList.ScrollIntoView(ResultsList.SelectedItem);
     }
 
@@ -546,7 +551,10 @@ public partial class FileSearchDialog : DialogWindow
             return;
         }
 
+        var location = FileLocationQuery.Parse(SearchBox.Text);
         SelectedPath = selected.FullPath;
+        SelectedLine = location.Line;
+        SelectedColumn = location.Column;
         DialogResult = true;
     }
 
@@ -564,46 +572,18 @@ public partial class FileSearchDialog : DialogWindow
 
     private void RestoreWindowPlacement()
     {
-        if (IsFinite(options.FileSearchWidth) && options.FileSearchWidth >= MinWidth)
-        {
-            Width = options.FileSearchWidth;
-        }
-
-        if (IsFinite(options.FileSearchHeight) && options.FileSearchHeight >= MinHeight)
-        {
-            Height = options.FileSearchHeight;
-        }
-
-        if (!options.FileSearchPlacementSaved ||
-            !IsFinite(options.FileSearchLeft) ||
-            !IsFinite(options.FileSearchTop))
-        {
-            return;
-        }
-
-        var savedBounds = new Rect(options.FileSearchLeft, options.FileSearchTop, Width, Height);
-        var virtualScreen = new Rect(
-            SystemParameters.VirtualScreenLeft,
-            SystemParameters.VirtualScreenTop,
-            SystemParameters.VirtualScreenWidth,
-            SystemParameters.VirtualScreenHeight);
-        if (!savedBounds.IntersectsWith(virtualScreen))
-        {
-            return;
-        }
-
-        WindowStartupLocation = WindowStartupLocation.Manual;
-        Left = options.FileSearchLeft;
-        Top = options.FileSearchTop;
+        // 위치는 한 번이라도 저장한 뒤에만 씁니다. 손상된 음수 크기는 Rect가 받지 않으므로 무시합니다.
+        static double Size(double value) => value >= 0 ? value : double.NaN;
+        WindowPlacement.Apply(this, new Rect(
+            options.FileSearchPlacementSaved ? options.FileSearchLeft : double.NaN,
+            options.FileSearchPlacementSaved ? options.FileSearchTop : double.NaN,
+            Size(options.FileSearchWidth),
+            Size(options.FileSearchHeight)));
     }
 
     private void SaveWindowPlacement()
     {
-        var bounds = WindowState == WindowState.Normal
-            ? new Rect(Left, Top, ActualWidth, ActualHeight)
-            : RestoreBounds;
-        if (IsFinite(bounds.Width) && bounds.Width >= MinWidth &&
-            IsFinite(bounds.Height) && bounds.Height >= MinHeight)
+        if (WindowPlacement.Capture(this) is { } bounds)
         {
             options.FileSearchWidth = bounds.Width;
             options.FileSearchHeight = bounds.Height;
@@ -623,8 +603,6 @@ public partial class FileSearchDialog : DialogWindow
         Enum.TryParse(value, ignoreCase: false, out FileSearchScope parsed)
             ? parsed
             : FileSearchScope.All;
-
-    private static bool IsFinite(double value) => !double.IsNaN(value) && !double.IsInfinity(value);
 }
 
 internal sealed class FileSearchResultItem

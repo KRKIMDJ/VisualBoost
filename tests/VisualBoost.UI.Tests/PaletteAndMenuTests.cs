@@ -59,8 +59,28 @@ internal static class PaletteAndMenuTests
         Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 10, "정의·참조 탐색과 참조 결과 창을 포함한 사용자 명령 열 개 유지");
         var placements = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement")
             .Select(p => (string?)p.Attribute("id") + "|" + (string?)p.Element(ns + "Parent")!.Attribute("id")).ToArray();
-        Assert(placements.SequenceEqual(new[] { "GenerateFunctionCommand|VisualBoostGenerationContextGroup", "ShowReferencesWindowCommand|IDG_VS_WNDO_OTRWNDWS1" }),
-            "코드 편집기 메뉴가 같은 생성 명령을 재사용하고, 참조 결과 창은 보기 > 다른 창에서도 연다");
+        Assert(placements.SequenceEqual(new[] {
+                "GoToDefinitionCommand|VisualBoostNavigationContextGroup", "FindReferencesCommand|VisualBoostNavigationContextGroup",
+                "SwitchHeaderSourceCommand|VisualBoostNavigationContextGroup", "GenerateFunctionCommand|VisualBoostGenerationContextGroup",
+                "ShowReferencesWindowCommand|IDG_VS_WNDO_OTRWNDWS1" }),
+            "코드 편집기 메뉴가 같은 이동·생성 명령을 재사용하고, 참조 결과 창은 보기 > 다른 창에서도 연다");
+        var codeMenuGroups = groups.Values.Where(g => (string?)g.Element(ns + "Parent")!.Attribute("id") == "VisualBoostCodeMenu")
+            .OrderBy(g => Convert.ToInt32((string)g.Attribute("priority")!, 16)).Select(g => (string)g.Attribute("id")!);
+        Assert(codeMenuGroups.SequenceEqual(new[] { "VisualBoostNavigationContextGroup", "VisualBoostGenerationContextGroup" }),
+            "편집기 문맥 메뉴는 이동 명령 묶음 뒤에 코드 도구를 구분선으로 나눈다");
+
+        // Tools > Visual Boost는 찾기 · 코드 이동 · 코드 도구 · 설정 묶음을 이 순서로 구분선과 함께 보인다.
+        var submenuGroups = groups.Values.Where(g => (string?)g.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu")
+            .OrderBy(g => Convert.ToInt32((string)g.Attribute("priority")!, 16)).Select(g => (string)g.Attribute("id")!).ToArray();
+        Assert(submenuGroups.SequenceEqual(new[] { "VisualBoostCommandGroup", "VisualBoostNavigationGroup", "VisualBoostEditGroup", "VisualBoostSettingsGroup" }),
+            "도구 하위 메뉴 묶음 순서");
+        string GroupOf(string id) => (string)commands.Element(ns + "Buttons")!.Elements(ns + "Button")
+            .Single(b => (string?)b.Attribute("id") == id).Element(ns + "Parent")!.Attribute("id")!;
+        Assert(new[] { "OpenFileSearchCommand", "OpenSymbolSearchCommand", "OpenDocumentMembersCommand" }.All(id => GroupOf(id) == "VisualBoostCommandGroup") &&
+               new[] { "GoToDefinitionCommand", "FindReferencesCommand", "ShowReferencesWindowCommand", "SwitchHeaderSourceCommand" }.All(id => GroupOf(id) == "VisualBoostNavigationGroup") &&
+               GroupOf("GenerateFunctionCommand") == "VisualBoostEditGroup" &&
+               new[] { "OpenOptionsCommand", "ShowIndexStatusCommand" }.All(id => GroupOf(id) == "VisualBoostSettingsGroup"),
+            "명령별 메뉴 묶음");
         var generationCommand = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "GenerateFunctionCommand.cs"));
         Assert(!generationCommand.Contains("ShowModal") && !generationCommand.Contains("ShowMessageBox") && generationCommand.Contains("paths[0]") && generationCommand.Contains("SystemSounds.Beep.Play"), "파일 선택·미리보기·이동 질문 제거, 1순위 자동 대상과 알림음");
         var package = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs"));

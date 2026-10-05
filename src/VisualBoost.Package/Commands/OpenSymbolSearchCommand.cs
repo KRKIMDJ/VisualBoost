@@ -7,6 +7,7 @@ using EnvDTE80;
 using Microsoft;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using VisualBoost.Core.Searching;
 using VisualBoost.Services;
 using VisualBoost.UI;
 
@@ -15,6 +16,7 @@ namespace VisualBoost.Commands;
 internal sealed class OpenSymbolSearchCommand
 {
     private static readonly Guid CommandSet = new("4cce3464-a08f-4e0d-a5fd-a297c7fcd41e");
+    private const string PlacementName = "SymbolSearch";
 
     private readonly VisualBoostPackage package;
     private readonly SolutionFileIndexService fileIndex;
@@ -76,8 +78,15 @@ internal sealed class OpenSymbolSearchCommand
         var dte = await package.GetServiceAsync(typeof(SDTE)) as DTE2;
         Assumes.Present(dte);
         var context = FileSearchContext.Collect(dte);
-        var dialog = new SymbolSearchDialog(fileIndex, context.Projects);
-        if (dialog.ShowModal() != true || dialog.SelectedLocation is null)
+        var dialog = new SymbolSearchDialog(
+            fileIndex,
+            context.Projects,
+            context.SolutionRoot,
+            SearchQuerySeed.ForSymbolSearch(FileSearchContext.GetSelectedText(dte)));
+        WindowPlacement.Apply(dialog, WindowPlacementStore.Load(package, PlacementName));
+        var accepted = dialog.ShowModal() == true;
+        WindowPlacementStore.Save(package, PlacementName, dialog.ClosedBounds);
+        if (!accepted || dialog.SelectedLocation is null)
         {
             return;
         }

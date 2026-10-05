@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.Diagnostics.CodeAnalysis;
 using System.IO;
 using System.Linq;
@@ -19,8 +20,14 @@ namespace VisualBoost.UI;
 
 public partial class SymbolSearchDialog : DialogWindow
 {
+    // 마지막으로 고른 범위는 같은 Solution 안에서만 VS를 닫을 때까지 기억합니다. 프로젝트 범위 ID가
+    // Solution마다 다르므로 다른 Solution에서는 쓰지 않고, 영구 저장도 하지 않습니다. UI thread에서만 씁니다.
+    private static string? rememberedSolution;
+    private static string? rememberedScopeId;
+
     private readonly SolutionFileIndexService fileIndex;
     private readonly IReadOnlyList<SolutionProjectInfo> projects;
+    private readonly string? solutionRoot;
     private readonly DispatcherTimer statusTimer;
     private CancellationTokenSource? searchCancellation;
     private bool isSearching;
@@ -30,25 +37,40 @@ public partial class SymbolSearchDialog : DialogWindow
     private string? observedAnalysisError;
     private IReadOnlyList<SymbolSearchScope>? observedScopes;
     private bool updatingScopes;
+    private string preferredScopeId;
 
     internal SymbolSearchDialog(
         SolutionFileIndexService fileIndex,
-        IReadOnlyList<SolutionProjectInfo> projects)
+        IReadOnlyList<SolutionProjectInfo> projects,
+        string? solutionRoot = null,
+        string? initialQuery = null)
     {
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
         this.projects = projects ?? throw new ArgumentNullException(nameof(projects));
+        this.solutionRoot = solutionRoot;
+        preferredScopeId = rememberedScopeId is not null && SameSolution(rememberedSolution, solutionRoot)
+            ? rememberedScopeId
+            : SymbolSearchScope.All.Id;
         InitializeComponent();
         UpdateScopes();
+        // 로드 전 TextChanged는 무시되고, 첫 검색은 OnLoaded에서 이 검색어로 실행합니다.
+        if (!string.IsNullOrEmpty(initialQuery)) SearchBox.Text = initialQuery;
+        KeyboardHintText.ToolTip = ResultListKeys.MoveKeysDescription + "\n" + ResultListKeys.ScopeKeysDescription +
+                                   "\nEnter 열기 · Esc 닫기 · 결과 우클릭으로 이름·경로 복사";
         statusTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(500),
         };
         statusTimer.Tick += OnStatusTimerTick;
         Loaded += OnLoaded;
+        Closing += OnClosing;
         Closed += OnClosed;
     }
 
     public SourceSymbolLocation? SelectedLocation { get; private set; }
+
+    /// <summary>닫힐 때의 창 경계입니다. 명령이 다음 열기를 위해 저장합니다.</summary>
+    internal Rect? ClosedBounds { get; private set; }
 
     private SymbolSearchScope SelectedScope => ScopeSelector.SelectedItem as SymbolSearchScope ?? SymbolSearchScope.All;
 
@@ -56,13 +78,13 @@ public partial class SymbolSearchDialog : DialogWindow
     {
         var scopes = fileIndex.SymbolScopes;
         if (ReferenceEquals(scopes, observedScopes)) return false;
-        var selectedId = SelectedScope.Id;
         observedScopes = scopes;
         updatingScopes = true;
         try
         {
             ScopeSelector.ItemsSource = scopes;
-            ScopeSelector.SelectedItem = scopes.FirstOrDefault(s => s.Id == selectedId) ?? SymbolSearchScope.All;
+            // 고른 범위가 아직 게시되지 않았거나(파일 수집 중) 사라졌으면 전체를 보이고, 다시 게시되면 고른 범위로 돌아갑니다.
+            ScopeSelector.SelectedItem = scopes.FirstOrDefault(s => s.Id == preferredScopeId) ?? SymbolSearchScope.All;
         }
         finally { updatingScopes = false; }
         return true;
@@ -71,20 +93,29 @@ public partial class SymbolSearchDialog : DialogWindow
     [SuppressMessage("Usage", "VSTHRD100:Avoid async void methods", Justification = "WPF 이벤트이며 검색 취소와 예외를 호출 경로에서 처리합니다.")]
     private async void OnScopeSelectionChanged(object sender, SelectionChangedEventArgs args)
     {
-        if (!IsLoaded || isClosed || updatingScopes) return;
+        if (updatingScopes || isClosed) return;
+        preferredScopeId = SelectedScope.Id;
+        if (!IsLoaded) return;
         await RefreshResultsAsync(useDebounce: false);
     }
 
-    private void OnLoaded(object sender, RoutedEventArgs eventArgs)
+    [SuppressMessage("Usage", "VSTHRD100:Avoid async void methods", Justification = "WPF 이벤트이며 검색 취소와 예외를 호출 경로에서 처리합니다.")]
+    private async void OnLoaded(object sender, RoutedEventArgs eventArgs)
     {
         SearchBox.Focus();
         Keyboard.Focus(SearchBox);
+        // 미리 채운 검색어는 전체 선택해 두어 바로 입력하면 덮어쓰게 합니다.
+        SearchBox.SelectAll();
+        UpdateSearchControls();
         var snapshot = fileIndex.GetSnapshot();
         observedSymbolCount = snapshot.SymbolCount;
         observedIsAnalyzing = snapshot.IsAnalyzing;
         UpdateIdleState(snapshot);
         statusTimer.Start();
+        if (!string.IsNullOrWhiteSpace(SearchBox.Text)) await RefreshResultsAsync(useDebounce: false);
     }
+
+    private void OnClosing(object? sender, CancelEventArgs eventArgs) => ClosedBounds = WindowPlacement.Capture(this);
 
     private void OnClosed(object? sender, EventArgs eventArgs)
     {
@@ -93,6 +124,8 @@ public partial class SymbolSearchDialog : DialogWindow
         statusTimer.Tick -= OnStatusTimerTick;
         searchCancellation?.Cancel();
         searchCancellation = null;
+        rememberedSolution = solutionRoot;
+        rememberedScopeId = preferredScopeId;
     }
 
     [SuppressMessage(
@@ -102,10 +135,15 @@ public partial class SymbolSearchDialog : DialogWindow
     private async void OnSearchTextChanged(object sender, TextChangedEventArgs eventArgs)
     {
         if (!IsLoaded || isClosed) return;
+        UpdateSearchControls();
+        await RefreshResultsAsync(useDebounce: true);
+    }
+
+    private void UpdateSearchControls()
+    {
         var isEmpty = string.IsNullOrWhiteSpace(SearchBox.Text);
         SearchPlaceholder.Visibility = isEmpty ? Visibility.Visible : Visibility.Collapsed;
         ClearSearchButton.Visibility = isEmpty ? Visibility.Hidden : Visibility.Visible;
-        await RefreshResultsAsync(useDebounce: true);
     }
 
     private async Task RefreshResultsAsync(bool useDebounce)
@@ -155,7 +193,9 @@ public partial class SymbolSearchDialog : DialogWindow
                     : "일치하는 심볼이 없습니다.";
                 EmptyStateDescription.Text = snapshot.IsAnalyzing
                     ? "캐시 또는 새 분석 결과가 준비되면 자동으로 다시 검색합니다."
-                    : snapshot.AnalysisError ?? "심볼명을 변경해 보세요.";
+                    : snapshot.AnalysisError ?? (scope.Id == SymbolSearchScope.All.Id
+                        ? "심볼명을 변경해 보세요."
+                        : "심볼명을 변경하거나 Ctrl+Tab으로 검색 범위를 바꿔 보세요.");
             }
 
             var currentSnapshot = fileIndex.GetSnapshot();
@@ -229,7 +269,7 @@ public partial class SymbolSearchDialog : DialogWindow
         else
         {
             EmptyStateTitle.Text = "심볼명을 입력하세요.";
-            EmptyStateDescription.Text = snapshot.AnalysisError ?? "심볼 이름만 검색합니다.";
+            EmptyStateDescription.Text = snapshot.AnalysisError ?? "심볼 이름만 검색합니다. Ctrl+Tab으로 검색 범위를 바꿉니다.";
         }
 
         StatusText.Text = $"0개 표시 · {SelectedScope.Name} · 전체 등록 위치 {snapshot.SymbolCount:N0}개" +
@@ -251,6 +291,7 @@ public partial class SymbolSearchDialog : DialogWindow
     {
         if (eventArgs.Key == Key.Escape)
         {
+            if (ScopeSelector.IsDropDownOpen) return;
             if (isSearching)
             {
                 searchCancellation?.Cancel();
@@ -264,6 +305,9 @@ public partial class SymbolSearchDialog : DialogWindow
             return;
         }
 
+        // 범위 드롭다운이 열려 있으면 화살표·Enter는 드롭다운 항목 선택에 씁니다.
+        if (ScopeSelector.IsDropDownOpen) return;
+
         if (eventArgs.Key == Key.Enter)
         {
             AcceptSelection();
@@ -271,14 +315,23 @@ public partial class SymbolSearchDialog : DialogWindow
             return;
         }
 
-        if (eventArgs.Key == Key.Down)
+        if (ResultListKeys.IsScopeCycle(eventArgs.Key, Keyboard.Modifiers, out var forward))
         {
-            MoveSelection(1);
+            var next = ResultListKeys.NextScope(ScopeSelector.SelectedIndex, ScopeSelector.Items.Count, forward, _ => true);
+            if (next >= 0) ScopeSelector.SelectedIndex = next;
             eventArgs.Handled = true;
+            return;
         }
-        else if (eventArgs.Key == Key.Up)
+
+        var pageSize = ResultListKeys.PageSize(ResultsList.ActualHeight - 28, 24);
+        if (ResultListKeys.TryMove(eventArgs.Key, Keyboard.Modifiers, ResultsList.SelectedIndex, ResultsList.Items.Count, pageSize, out var target))
         {
-            MoveSelection(-1);
+            if (target >= 0)
+            {
+                ResultsList.SelectedIndex = target;
+                ResultsList.ScrollIntoView(ResultsList.SelectedItem);
+            }
+
             eventArgs.Handled = true;
         }
     }
@@ -289,16 +342,49 @@ public partial class SymbolSearchDialog : DialogWindow
             AcceptSelection();
     }
 
-    private void MoveSelection(int offset)
+    private void OnResultsPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs eventArgs)
     {
-        if (ResultsList.Items.Count == 0)
+        // 우클릭한 행을 먼저 골라 메뉴 동작이 보이는 행에 적용되게 합니다.
+        if (ItemsControl.ContainerFromElement(ResultsList, eventArgs.OriginalSource as DependencyObject) is not ListBoxItem item)
         {
+            ResultsList.SelectedItem = null;
             return;
         }
 
-        var current = ResultsList.SelectedIndex < 0 ? 0 : ResultsList.SelectedIndex;
-        ResultsList.SelectedIndex = Math.Max(0, Math.Min(ResultsList.Items.Count - 1, current + offset));
-        ResultsList.ScrollIntoView(ResultsList.SelectedItem);
+        item.IsSelected = true;
+        ResultsList.Focus();
+    }
+
+    private void OnResultsContextMenuOpening(object sender, ContextMenuEventArgs eventArgs)
+    {
+        if (ResultsList.SelectedItem is null) eventArgs.Handled = true;
+    }
+
+    private void OnContextOpenClick(object sender, RoutedEventArgs eventArgs) => AcceptSelection();
+
+    private void OnContextCopyNameClick(object sender, RoutedEventArgs eventArgs)
+    {
+        if (ResultsList.SelectedItem is SymbolSearchResultItem selected)
+            ShowNotice(ResultActions.Copy(selected.Name, "이름을 복사했습니다."));
+    }
+
+    private void OnContextCopyPathClick(object sender, RoutedEventArgs eventArgs)
+    {
+        if (ResultsList.SelectedItem is SymbolSearchResultItem selected)
+            ShowNotice(ResultActions.Copy(selected.FullPath, "전체 경로를 복사했습니다."));
+    }
+
+    private void OnContextShowInExplorerClick(object sender, RoutedEventArgs eventArgs)
+    {
+        if (ResultsList.SelectedItem is SymbolSearchResultItem selected && ResultActions.ShowInExplorer(selected.FullPath) is { } failure)
+            ShowNotice(failure);
+    }
+
+    /// <summary>복사 결과처럼 짧은 알림은 다음 검색·상태 갱신 때까지 상태 줄에 둡니다.</summary>
+    private void ShowNotice(string message)
+    {
+        StatusText.Text = message;
+        StatusText.ToolTip = null;
     }
 
     private void AcceptSelection()
@@ -311,6 +397,8 @@ public partial class SymbolSearchDialog : DialogWindow
         SelectedLocation = selected.Location;
         DialogResult = true;
     }
+
+    private static bool SameSolution(string? left, string? right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 }
 
 internal sealed class SymbolSearchResultItem

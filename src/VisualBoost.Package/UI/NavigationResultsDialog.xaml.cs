@@ -61,20 +61,18 @@ public partial class NavigationResultsDialog : DialogWindow
             case Key.Enter:
                 AcceptSelection();
                 break;
-            case Key.Down:
-                MoveSelection(1);
-                break;
-            case Key.Up:
-                MoveSelection(-1);
-                break;
-            case Key.PageDown:
-                MoveSelection(10);
-                break;
-            case Key.PageUp:
-                MoveSelection(-10);
-                break;
             default:
-                return;
+                // 파일·심볼 탐색과 같은 목록 이동 키(↑↓·PgUp/PgDn·Ctrl+Home/End)를 씁니다.
+                var pageSize = ResultListKeys.PageSize(ResultsList.ActualHeight - 28, 24);
+                if (!ResultListKeys.TryMove(eventArgs.Key, Keyboard.Modifiers, ResultsList.SelectedIndex, ResultsList.Items.Count, pageSize, out var target))
+                    return;
+                if (target >= 0)
+                {
+                    ResultsList.SelectedIndex = target;
+                    ResultsList.ScrollIntoView(ResultsList.SelectedItem);
+                }
+
+                break;
         }
 
         eventArgs.Handled = true;
@@ -86,14 +84,6 @@ public partial class NavigationResultsDialog : DialogWindow
         {
             AcceptSelection();
         }
-    }
-
-    private void MoveSelection(int offset)
-    {
-        if (ResultsList.Items.Count == 0) return;
-        var current = ResultsList.SelectedIndex < 0 ? 0 : ResultsList.SelectedIndex;
-        ResultsList.SelectedIndex = Math.Max(0, Math.Min(ResultsList.Items.Count - 1, current + offset));
-        ResultsList.ScrollIntoView(ResultsList.SelectedItem);
     }
 
     private void AcceptSelection()

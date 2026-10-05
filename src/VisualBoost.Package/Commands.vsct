@@ -35,13 +35,24 @@
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostCodeContextGroup" priority="0x0800">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_CTXT_CODEWIN" />
       </Group>
+      <!-- 편집기 문맥 메뉴 > Visual Boost: 커서 위치의 이동 명령을 코드 도구 위에 둡니다. -->
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostNavigationContextGroup" priority="0x0080">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCodeMenu" />
+      </Group>
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostGenerationContextGroup" priority="0x0100">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCodeMenu" />
       </Group>
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostToolsGroup" priority="0x0600">
         <Parent guid="guidSHLMainMenu" id="IDM_VS_MENU_TOOLS" />
       </Group>
+      <!-- Tools > Visual Boost는 찾기 · 코드 이동 · 코드 도구 · 설정 순서로 구분선을 둡니다. -->
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" priority="0x0100">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" />
+      </Group>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostNavigationGroup" priority="0x0140">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" />
+      </Group>
+      <Group guid="guidVisualBoostCommandSet" id="VisualBoostEditGroup" priority="0x0180">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" />
       </Group>
       <Group guid="guidVisualBoostCommandSet" id="VisualBoostSettingsGroup" priority="0x0200">
@@ -65,7 +76,7 @@
         <Strings><ButtonText>선언 접근 수준</ButtonText></Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x01C0" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostEditGroup" />
         <Strings><ButtonText>현재 코드 도구...</ButtonText><CanonicalName>VisualBoost.GenerateFunction</CanonicalName></Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenDocumentMembersCommand" priority="0x0195" type="Button">
@@ -76,28 +87,28 @@
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="GoToDefinitionCommand" priority="0x0110" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationGroup" />
         <Strings>
           <ButtonText>정의로 이동</ButtonText>
           <CanonicalName>VisualBoost.GoToDefinition</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="FindReferencesCommand" priority="0x0120" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationGroup" />
         <Strings>
           <ButtonText>참조 찾기</ButtonText>
           <CanonicalName>VisualBoost.FindReferences</CanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="ShowReferencesWindowCommand" priority="0x0125" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationGroup" />
         <Strings>
           <ButtonText>참조 결과 창</ButtonText>
           <CanonicalName>VisualBoost.ShowReferencesWindow</CanonicalName>
         </Strings>
       </Button>
-      <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0100" type="Button">
-        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+      <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0130" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationGroup" />
         <Strings>
           <ButtonText>헤더/구현 파일 전환</ButtonText>
           <CanonicalName>VisualBoost.SwitchHeaderSource</CanonicalName>
@@ -135,6 +146,16 @@
   </Commands>
 
   <CommandPlacements>
+    <!-- 편집기 문맥 메뉴에서도 단축키와 같은 명령을 찾을 수 있게 같은 명령을 다시 배치합니다. -->
+    <CommandPlacement guid="guidVisualBoostCommandSet" id="GoToDefinitionCommand" priority="0x0100">
+      <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationContextGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidVisualBoostCommandSet" id="FindReferencesCommand" priority="0x0110">
+      <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationContextGroup" />
+    </CommandPlacement>
+    <CommandPlacement guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0120">
+      <Parent guid="guidVisualBoostCommandSet" id="VisualBoostNavigationContextGroup" />
+    </CommandPlacement>
     <CommandPlacement guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x0100">
       <Parent guid="guidVisualBoostCommandSet" id="VisualBoostGenerationContextGroup" />
     </CommandPlacement>
@@ -169,6 +190,9 @@
       <IDSymbol name="VisualBoostCodeMenu" value="0x1024" />
       <IDSymbol name="VisualBoostCodeContextGroup" value="0x1025" />
       <IDSymbol name="VisualBoostGenerationContextGroup" value="0x1026" />
+      <IDSymbol name="VisualBoostNavigationGroup" value="0x1027" />
+      <IDSymbol name="VisualBoostEditGroup" value="0x1028" />
+      <IDSymbol name="VisualBoostNavigationContextGroup" value="0x1029" />
       <IDSymbol name="SwitchHeaderSourceCommand" value="0x0100" />
       <IDSymbol name="OpenOptionsCommand" value="0x0101" />
       <IDSymbol name="ShowIndexStatusCommand" value="0x0102" />

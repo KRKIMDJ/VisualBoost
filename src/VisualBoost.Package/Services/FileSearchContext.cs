@@ -59,6 +59,21 @@ internal sealed class FileSearchContext
         }
     }
 
+    /// <summary>활성 텍스트 문서의 선택 텍스트입니다. 텍스트 문서가 아니거나 선택이 없으면 null입니다.</summary>
+    internal static string? GetSelectedText(DTE2 dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            return dte.ActiveDocument?.Selection is EnvDTE.TextSelection { IsEmpty: false } selection ? selection.Text : null;
+        }
+        catch (COMException)
+        {
+            // 디자이너 등 텍스트 선택을 제공하지 않는 문서는 선택이 없는 것으로 봅니다.
+            return null;
+        }
+    }
+
     private static string? GetSolutionDirectory(DTE2 dte)
     {
         ThreadHelper.ThrowIfNotOnUIThread();

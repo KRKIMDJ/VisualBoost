@@ -55,6 +55,7 @@ internal static class Program
             SharedColorTests.Run();
             ProjectCollectionTests.Run();
             SearchHighlightTests.Run();
+            SearchKeyboardTests.Run(root);
             NavigationResultTests.Run();
             ReferenceResultsTests.Run(root, output);
             CompletionInteractionTests.Run(root);
