@@ -56,6 +56,13 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private static readonly TimeSpan SourceChangeQuiet = TimeSpan.FromSeconds(2);
 
+    // 컴파일 명령이 아직 없을 때(빌드 전, CMake 구성 중) 요청이 다시 시도하기까지의 간격입니다.
+    private static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(15);
+
+    // 폴더 작업 영역은 VS가 연 뒤에 CMake 구성을 시작하므로 배경에서 몇 번 더 시도합니다.
+    private static readonly TimeSpan FolderRetryDelay = TimeSpan.FromSeconds(30);
+    private const int MaxFolderRetries = 10;
+
     private readonly object gate = new();
     private readonly SolutionFileIndexService fileIndex;
     private readonly Func<CancellationToken, Task<IReadOnlyList<MsBuildProjectConfiguration>>>? projectProvider;
@@ -69,6 +76,9 @@ internal sealed class SemanticNavigationService : IDisposable
     private Task<ClangdNavigator?>? starting;
     private CancellationTokenSource? startCancellation;
     private string? unavailableReason;
+    private bool unavailableRetryable;
+    private DateTime unavailableAt;
+    private int folderRetries;
     private string? clangdPath;
     private int unexpectedExits;
     private int disposed;
@@ -156,6 +166,7 @@ internal sealed class SemanticNavigationService : IDisposable
         {
             solutionPath = string.IsNullOrWhiteSpace(path) ? null : path;
             unexpectedExits = 0;
+            folderRetries = 0;
             unavailableReason = null;
             start = solutionPath is not null && settings.Enabled && settings.StartOnSolutionOpen;
         }
@@ -170,7 +181,10 @@ internal sealed class SemanticNavigationService : IDisposable
     }
 
     /// <summary>빌드가 끝나면 응답 파일·프로젝트 설정이 바뀌었을 수 있으므로 명령을 다시 만들고, 바뀌었으면 다시 시작합니다.</summary>
-    public void BuildCompleted()
+    public void BuildCompleted() => RefreshCommands();
+
+    /// <summary>컴파일 명령을 다시 만들어 바뀌었으면 다시 시작합니다. 쓸 수 없던 상태는 다음 요청에서 다시 시도하게 합니다.</summary>
+    private void RefreshCommands()
     {
         ClangdNavigator? current;
         string? solution;
@@ -188,7 +202,7 @@ internal sealed class SemanticNavigationService : IDisposable
             }
         }
 
-        if (current is null || solution is null || current.Context.Kind is not (CompileContextKind.Unreal or CompileContextKind.MsBuild or CompileContextKind.Ninja))
+        if (current is null || solution is null || current.Context.Kind == CompileContextKind.None)
         {
             return;
         }
@@ -210,7 +224,7 @@ internal sealed class SemanticNavigationService : IDisposable
             catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is InvalidDataException ||
                                               exception is FormatException)
             {
-                ActivityLog.LogWarning("VisualBoost/SemanticNavigation", "빌드 뒤 컴파일 명령 갱신 실패: " + exception);
+                ActivityLog.LogWarning("VisualBoost/SemanticNavigation", "컴파일 명령 갱신 실패: " + exception);
             }
         });
     }
@@ -224,7 +238,12 @@ internal sealed class SemanticNavigationService : IDisposable
             if (!settings.Enabled) throw new SemanticNavigationUnavailableException("옵션에서 정의·참조 탐색이 꺼져 있습니다.");
             if (solutionPath is null) throw new SemanticNavigationUnavailableException("열린 Solution이 없습니다.");
             if (navigator is { HasExited: false } current) return current;
-            if (unavailableReason is not null) throw new SemanticNavigationUnavailableException(unavailableReason);
+            if (unavailableReason is not null)
+            {
+                if (!unavailableRetryable || DateTime.UtcNow - unavailableAt < RetryInterval) throw new SemanticNavigationUnavailableException(unavailableReason);
+                unavailableReason = null;
+            }
+
             task = starting ?? StartLockedAsync();
         }
 
@@ -344,7 +363,7 @@ internal sealed class SemanticNavigationService : IDisposable
             var executable = ClangdLocator.Find(options.ClangdPath);
             if (executable is null)
             {
-                return Unavailable(observed, string.IsNullOrWhiteSpace(options.ClangdPath)
+                return Unavailable(observed, retryable: false, string.IsNullOrWhiteSpace(options.ClangdPath)
                     ? "clangd를 찾지 못했습니다. Visual Studio 설치 관리자에서 'C++ Clang 도구'를 설치하거나 옵션에서 경로를 지정하세요."
                     : "옵션에 지정한 clangd가 없습니다: " + options.ClangdPath);
             }
@@ -388,7 +407,7 @@ internal sealed class SemanticNavigationService : IDisposable
         }
         catch (SemanticNavigationUnavailableException exception)
         {
-            return Unavailable(observed, exception.Message);
+            return Unavailable(observed, retryable: true, exception.Message);
         }
         catch (OperationCanceledException)
         {
@@ -404,17 +423,38 @@ internal sealed class SemanticNavigationService : IDisposable
                                           exception is FormatException || exception is LspConnectionClosedException)
         {
             ActivityLog.LogError("VisualBoost/SemanticNavigation", exception.ToString());
-            return Unavailable(observed, "clangd 탐색을 준비하지 못했습니다: " + exception.Message);
+            return Unavailable(observed, retryable: true, "clangd 탐색을 준비하지 못했습니다: " + exception.Message);
         }
     }
 
-    private ClangdNavigator? Unavailable(int observed, string reason)
+    /// <param name="retryable">컴파일 명령이 나중에 생길 수 있는 이유입니다(clangd 없음·옵션 꺼짐은 아님).</param>
+    private ClangdNavigator? Unavailable(int observed, bool retryable, string reason)
     {
+        bool retryInBackground;
         lock (gate)
         {
             if (observed != generation) return null;
             starting = null;
             unavailableReason = reason;
+            unavailableRetryable = retryable;
+            unavailableAt = DateTime.UtcNow;
+            retryInBackground = retryable && settings.StartOnSolutionOpen && solutionPath is not null && Directory.Exists(solutionPath) &&
+                                folderRetries++ < MaxFolderRetries;
+        }
+
+        if (retryInBackground)
+        {
+            _ = Task.Delay(FolderRetryDelay).ContinueWith(_ =>
+            {
+                bool retry;
+                lock (gate)
+                {
+                    retry = observed == generation && unavailableReason is not null && unavailableRetryable;
+                    if (retry) unavailableReason = null;
+                }
+
+                if (retry) BeginStart();
+            }, TaskScheduler.Default);
         }
 
         RaiseStateChanged();
@@ -545,6 +585,7 @@ internal sealed class SemanticNavigationService : IDisposable
         }
 
         if (current is not { HasExited: false }) return;
+        if (batch.CommandsChanged) RefreshCommands();
         // 편집기에 열린 문서는 편집기 내용이 기준이며, 다시 불러오면 문서 추적기가 알립니다.
         var paths = batch.Paths.Where(path => !SemanticDocumentTracker.IsOpenInEditor(path)).ToArray();
         if (batch.RequiresRestart || paths.Length > MaxReloadsPerBatch)

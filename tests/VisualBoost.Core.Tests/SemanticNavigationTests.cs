@@ -714,6 +714,9 @@ internal static class SemanticNavigationTests
             Check(Next().Paths.Contains(nested, StringComparer.OrdinalIgnoreCase), "하위 폴더 소스");
             Directory.Delete(Path.GetDirectoryName(nested)!, true);
             Check(Next().RequiresRestart, "폴더 삭제는 재시작 요구");
+            Write(Path.Combine(root, "out", "build", "x64-Debug", "build.ninja"), "rule x\n");
+            var regenerated = Next();
+            Check(regenerated.CommandsChanged && regenerated.Paths.Count == 0 && !regenerated.RequiresRestart, "Ninja 빌드 파일 변경은 명령 갱신 요구");
             Check(!batches.TryTake(out _, 1000), "남은 알림 없음");
         }
         finally

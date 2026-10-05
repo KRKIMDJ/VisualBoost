@@ -10,10 +10,11 @@ namespace VisualBoost.Core.SemanticNavigation;
 /// <summary>잠잠해진 뒤 한 번에 전달하는 C++ 소스 변경 묶음입니다.</summary>
 public sealed class SourceChangeBatch
 {
-    public SourceChangeBatch(IReadOnlyList<string> paths, bool requiresRestart)
+    public SourceChangeBatch(IReadOnlyList<string> paths, bool requiresRestart, bool commandsChanged = false)
     {
         Paths = paths;
         RequiresRestart = requiresRestart;
+        CommandsChanged = commandsChanged;
     }
 
     /// <summary>내용이 바뀌었거나 새로 생긴 C++ 소스입니다.</summary>
@@ -23,6 +24,9 @@ public sealed class SourceChangeBatch
     /// 소스·폴더가 사라졌거나 감시 버퍼가 넘쳤습니다. 색인에서 지울 방법이 재시작뿐이라 다시 시작해야 합니다.
     /// </summary>
     public bool RequiresRestart { get; }
+
+    /// <summary>컴파일 명령의 출처(Ninja 빌드 파일, compile_commands.json)가 바뀌었습니다. 명령을 다시 만들어야 합니다.</summary>
+    public bool CommandsChanged { get; }
 }
 
 /// <summary>
@@ -40,6 +44,8 @@ public sealed class SourceChangeMonitor : IDisposable
         ".h", ".hh", ".hpp", ".hxx", ".inl", ".ipp", ".c", ".cc", ".cpp", ".cxx"
     };
 
+    private static readonly HashSet<string> CommandFiles = new(StringComparer.OrdinalIgnoreCase) { "build.ninja", "compile_commands.json" };
+
     private static readonly string[] IgnoredSegments =
     {
         "Intermediate", "Binaries", "Saved", "DerivedDataCache", "CMakeFiles", ".vs", ".git", "node_modules"
@@ -55,6 +61,7 @@ public sealed class SourceChangeMonitor : IDisposable
     private readonly HashSet<string> removed = new(StringComparer.OrdinalIgnoreCase);
     private long pendingSince;
     private bool overflow;
+    private bool commandsChanged;
     private int disposed;
 
     /// <param name="root">감시할 폴더(하위 포함). 없으면 <see cref="ArgumentException"/>입니다.</param>
@@ -100,6 +107,19 @@ public sealed class SourceChangeMonitor : IDisposable
 
     private void Record(string path, bool gone)
     {
+        // CMake 재구성 등으로 명령 출처가 바뀌면 소스와 별도로 알립니다.
+        if (CommandFiles.Contains(Path.GetFileName(path)) && !IsIgnored(path))
+        {
+            lock (gate)
+            {
+                commandsChanged = true;
+                if (pendingSince == 0) pendingSince = Stopwatch.GetTimestamp();
+            }
+
+            Schedule();
+            return;
+        }
+
         // 폴더를 지우거나 옮기면 안의 파일은 따로 알리지 않습니다. 확장자 없는 경로의 삭제는 폴더로 봅니다.
         var folder = gone && Path.GetExtension(path).Length == 0;
         if (!(folder ? !IsIgnored(path) : IsSourcePath(path))) return;
@@ -150,7 +170,7 @@ public sealed class SourceChangeMonitor : IDisposable
         SourceChangeBatch batch;
         lock (gate)
         {
-            if (changed.Count == 0 && removed.Count == 0 && !overflow) return;
+            if (changed.Count == 0 && removed.Count == 0 && !overflow && !commandsChanged) return;
             var restart = overflow;
             foreach (var path in removed)
             {
@@ -159,13 +179,14 @@ public sealed class SourceChangeMonitor : IDisposable
                 else restart = true;
             }
 
-            batch = new SourceChangeBatch(changed.Where(File.Exists).ToArray(), restart);
+            batch = new SourceChangeBatch(changed.Where(File.Exists).ToArray(), restart, commandsChanged);
             changed.Clear();
             removed.Clear();
             overflow = false;
+            commandsChanged = false;
             pendingSince = 0;
         }
 
-        if (Volatile.Read(ref disposed) == 0 && (batch.Paths.Count > 0 || batch.RequiresRestart)) callback(batch);
+        if (Volatile.Read(ref disposed) == 0 && (batch.Paths.Count > 0 || batch.RequiresRestart || batch.CommandsChanged)) callback(batch);
     }
 }
