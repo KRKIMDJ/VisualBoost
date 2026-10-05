@@ -30,8 +30,16 @@ internal static class NavigationLocationOpener
             }
         }
 
-        if (activate) frame?.Show();
-        else frame?.ShowNoActivate();
+        if (activate)
+        {
+            // 미리 보기로 연 임시 탭이면 OpenDocument가 그 프레임을 그대로 돌려줍니다. 고정 탭으로 바꿔 다음 미리 보기가 이 문서를 바꾸지 않게 합니다.
+            frame?.SetProperty((int)__VSFPROPID5.VSFPROPID_IsProvisional, false);
+            frame?.Show();
+        }
+        else
+        {
+            frame?.ShowNoActivate();
+        }
         if (textView is null) return;
         var line = location.Line;
         var column = location.Character;

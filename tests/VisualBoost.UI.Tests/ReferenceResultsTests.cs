@@ -91,12 +91,18 @@ internal static class ReferenceResultsTests
         // XAML이 초기값을 넣으며 변경 처리기를 부르면 처리기가 아직 만들지 않은 요소를 건드려 창 생성이 실패합니다(0.38.0 첫 빌드 결함).
         var pairs = new[] { ("Checked", "IsChecked"), ("Unchecked", "IsChecked"), ("TextChanged", "Text"),
             ("SelectionChanged", "SelectedIndex"), ("SelectionChanged", "SelectedItem"), ("SelectionChanged", "SelectedValue") };
-        var xml = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "UI", "ReferencesControl.xaml"));
-        foreach (var element in xml.Descendants())
+        var files = Directory.GetFiles(Path.Combine(root, "src", "VisualBoost.Package"), "*.xaml", SearchOption.AllDirectories)
+            .Where(file => !file.Contains(Path.DirectorySeparatorChar + "obj" + Path.DirectorySeparatorChar) && !file.Contains(Path.DirectorySeparatorChar + "bin" + Path.DirectorySeparatorChar))
+            .ToArray();
+        Assert(files.Any(file => Path.GetFileName(file) == "ReferencesControl.xaml"), "검사 대상 XAML 찾기");
+        foreach (var file in files)
         {
-            foreach (var (handler, value) in pairs)
-                Assert(element.Attribute(handler) is null || element.Attribute(value) is null,
-                    $"{element.Name.LocalName}: {value} 초기값과 {handler} 처리기를 함께 두지 않음");
+            foreach (var element in XDocument.Load(file).Descendants())
+            {
+                foreach (var (handler, value) in pairs)
+                    Assert(element.Attribute(handler) is null || element.Attribute(value) is null,
+                        $"{Path.GetFileName(file)} {element.Name.LocalName}: {value} 초기값과 {handler} 처리기를 함께 두지 않음");
+            }
         }
     }
 

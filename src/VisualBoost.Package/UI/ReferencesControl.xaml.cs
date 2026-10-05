@@ -230,7 +230,8 @@ public partial class ReferencesControl : UserControl
     private void OnResultTextInput(object sender, TextCompositionEventArgs eventArgs)
     {
         // 목록에서 글자를 치면 필터로 옮겨 이어서 입력합니다.
-        if (model.Current is null || string.IsNullOrEmpty(eventArgs.Text) || char.IsControl(eventArgs.Text[0])) return;
+        // Space는 미리 보기 키입니다. 메시지 처리 경로에 따라 공백 문자 입력이 뒤따를 수 있어 공백은 넘기지 않습니다.
+        if (model.Current is null || string.IsNullOrWhiteSpace(eventArgs.Text) || char.IsControl(eventArgs.Text[0])) return;
         eventArgs.Handled = true;
         FilterBox.Focus();
         FilterBox.Text += eventArgs.Text;

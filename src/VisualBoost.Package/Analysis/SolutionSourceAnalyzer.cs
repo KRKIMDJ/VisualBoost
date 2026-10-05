@@ -98,18 +98,27 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         // 캐시를 읽는 동안 연 파일도 반영되게 대기열을 먼저 공개합니다.
         var queue = new SourceAnalysisQueue(sourceFiles, priority ?? SourceAnalysisPriority.None, focus);
         activeQueue = queue;
-        IReadOnlyDictionary<string, CachedSourceAnalysis> previous;
         try
         {
-            previous = LoadPrevious(solutionPath, cancellationToken);
+            return AnalyzeQueued(solutionPath, files, includeRoots, sourceFiles, queue, cancellationToken, reportProgress);
         }
-        catch
+        finally
         {
-            // 분석을 시작하지 못하면 대기열을 거둬, 이후 Focus가 끝난 패스를 붙잡지 않게 합니다.
+            // 끝났거나 실패한 패스의 대기열을 다음 분석까지 붙잡지 않습니다. 그 사이 새 패스가 대기열을 바꿨으면 두고 갑니다.
             if (ReferenceEquals(activeQueue, queue)) activeQueue = null;
-            throw;
         }
+    }
 
+    private IReadOnlyList<string> AnalyzeQueued(
+        string solutionPath,
+        IReadOnlyList<string> files,
+        IReadOnlyList<string> includeRoots,
+        string[] sourceFiles,
+        SourceAnalysisQueue queue,
+        CancellationToken cancellationToken,
+        Action<SourceAnalysisProgress>? reportProgress)
+    {
+        var previous = LoadPrevious(solutionPath, cancellationToken);
         var progressGate = new object();
         var completedFiles = 0;
         var activeFiles = new Dictionary<string, SourceAnalysisStage>(StringComparer.OrdinalIgnoreCase);
@@ -167,18 +176,11 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         // 편집기 응답성을 우선하고 남는 처리량만 초기 분석에 사용합니다.
         var workers = Math.Min(2, Math.Max(1, Environment.ProcessorCount - 1));
         var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = workers };
-        try
+        // 작업자 하나가 예외로 끝나면 다른 작업자도 남은 대기열(엔진 포함)을 계속 비우지 않고 멈춥니다.
+        Parallel.For(0, workers, parallelOptions, (_, loop) =>
         {
-            // 작업자 하나가 예외로 끝나면 다른 작업자도 남은 대기열(엔진 포함)을 계속 비우지 않고 멈춥니다.
-            Parallel.For(0, workers, parallelOptions, (_, loop) =>
-            {
-                while (!loop.ShouldExitCurrentIteration && queue.TryTake(out var file, out var rank)) AnalyzeFile(file, rank);
-            });
-        }
-        finally
-        {
-            if (ReferenceEquals(activeQueue, queue)) activeQueue = null;
-        }
+            while (!loop.ShouldExitCurrentIteration && queue.TryTake(out var file, out var rank)) AnalyzeFile(file, rank);
+        });
 
         void AnalyzeFile(string file, SourceAnalysisRank rank)
         {

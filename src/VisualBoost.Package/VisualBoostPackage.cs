@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.39.0")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.39.1")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 // 폴더 열기 작업 영역(CMake 등)은 Solution 존재 상태를 켜지 않으므로 따로 등록합니다.
@@ -83,9 +83,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         projectItemsEvents.ItemRenamed += OnProjectItemRenamed;
         buildEvents = dte.Events.BuildEvents;
         buildEvents.OnBuildDone += OnBuildDone;
-        // 패키지보다 먼저 복원된 문서도 분석 우선순위에 넣습니다. 활성 문서를 마지막에 기록해 가장 앞에 둡니다.
-        foreach (Document document in dte.Documents) fileIndex.RecordRecentFile(document.FullName);
-        fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
+        RecordOpenDocuments(dte);
 
         MigrateLegacyOptions();
         ((CompletionOptionsPage)GetDialogPage(typeof(CompletionOptionsPage))).Publish();
@@ -147,6 +145,28 @@ public sealed class VisualBoostPackage : AsyncPackage
         }
 
         base.Dispose(disposing);
+    }
+
+    /// <summary>
+    /// 패키지보다 먼저 복원된 문서도 분석 우선순위에 넣습니다. 활성 문서를 마지막에 기록해 가장 앞에 둡니다.
+    /// 우선순위 힌트일 뿐이므로 읽지 못한 문서는 건너뛰고 패키지 초기화를 계속합니다.
+    /// </summary>
+    private void RecordOpenDocuments(DTE2 dte)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        try
+        {
+            foreach (Document document in dte.Documents)
+            {
+                try { fileIndex.RecordRecentFile(document.FullName); }
+                catch (COMException) { }
+            }
+
+            fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
+        }
+        catch (COMException)
+        {
+        }
     }
 
     private void UnsubscribeSolutionEvents()
