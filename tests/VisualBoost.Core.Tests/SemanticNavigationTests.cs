@@ -455,6 +455,150 @@ internal static class SemanticNavigationTests
         }
     }
 
+    public static void RunMsBuildCommands()
+    {
+        var lines = new[]
+        {
+            "GetProjectDirectories\tC:\\p\\App.vcxproj\t\t\tC:\\VC\\include;;C:\\SDK\\ucrt;relative\tC:\\VC\\include\tdummy",
+            "GetClCommandLines\tC:\\p\\App.vcxproj\tC:\\p\tC:\\p\\Main.cpp;Extra.cpp\t\t\t" +
+                "/c /Iinc /D APP=3 /D \"B=a b\" /EHsc /std:c++20 /Yu\"pch.h\" /Fp\"x64\\Debug\\App.pch\" /Fo\"x64\\Debug\\\\\" /FI\"pch.h\" /FI forced.h /clr /errorReport:queue /TP",
+            "GetClCommandLines\tC:\\p\\App.vcxproj\tC:\\p\tC:\\VC\\modules\\std.ixx\t\t\t/scanModules /c /interface /ifcOutput \"x64\\\\\" /TP",
+            "GetClCommandLines\tC:\\p\\Other.vcxproj\tC:\\q\tC:\\p\\Main.cpp;C:\\q\\Q.c\t\t\t/c /TC",
+            "broken line"
+        };
+        var commands = MsBuildCompileCommands.Parse(lines, "clang-cl.exe", out var answered);
+        Check(commands.Select(c => c.File).SequenceEqual(new[] { "C:/p/Extra.cpp", "C:/p/Main.cpp", "C:/q/Q.c" }), "소스만, 상대 경로 해석, 중복 파일은 처음 것: " +
+            string.Join(",", commands.Select(c => c.File)));
+        Check(answered == 2, "명령을 준 프로젝트 수");
+        var main = commands.Single(c => c.File == "C:/p/Main.cpp");
+        Check(main.Directory == "C:/p" && main.Arguments[0] == "clang-cl.exe" && main.Arguments[1] == "--driver-mode=cl" && main.Arguments.Last() == main.File,
+            "작업 폴더·컴파일러·source 위치");
+        var args = main.Arguments.ToList();
+        Check(args.Contains("/Iinc") && args.Contains("APP=3") && args.Contains("B=a b") && args.Contains("/std:c++20"), "일반 옵션 유지: " + string.Join(" ", args));
+        Check(!args.Any(a => a.StartsWith("/Yu") || a.StartsWith("/Fp") || a.StartsWith("/Fo") || a.StartsWith("/clr") || a.StartsWith("/errorReport")),
+            "PCH·출력·C++/CLI 옵션 제거");
+        Check(string.Join(" ", args).Contains("-Xclang -include -Xclang pch.h -Xclang -include -Xclang forced.h"), "강제 include는 PCH 헤더도 유지");
+        var imsvc = args.Select((a, i) => (a, i)).Where(x => x.a == "/imsvc").Select(x => args[x.i + 1]).ToArray();
+        Check(imsvc.SequenceEqual(new[] { "C:/VC/include", "C:/SDK/ucrt" }), "시스템 include는 절대 경로만 중복 없이: " + string.Join(",", imsvc));
+        Check(commands.Single(c => c.File == "C:/q/Q.c").Arguments.All(a => a != "/imsvc"), "디렉터리 정보 없는 프로젝트");
+
+        Check(MsBuildCompileCommands.Escape("C:\\a;b\\$x@y%z'*?.vcxproj") == "C:\\a%3Bb\\%24x%40y%25z%27%2A%3F.vcxproj", "MSBuild 특수 문자 이스케이프");
+        var wrapper = MsBuildCompileCommands.CreateWrapper("C:\\s & t\\Game.sln", new[] { new MsBuildProjectConfiguration("C:\\s & t\\A;B.vcxproj", "Debug", "Win32") });
+        Check(wrapper.Contains("Include=\"C:\\s &amp; t\\A%3BB.vcxproj\"") && wrapper.Contains("SolutionDir=C:\\s &amp; t\\;") &&
+              wrapper.Contains("Configuration=Debug;Platform=Win32;DesignTimeBuild=true"), "래퍼 프로젝트 속성·XML 이스케이프");
+    }
+
+    public static void RunMsBuildIntegration()
+    {
+        var clangd = FindClangd();
+        var msbuild = FindMsBuild(clangd);
+        if (clangd is null || msbuild is null)
+        {
+            Console.WriteLine("SKIP: MSBuild 명령 통합 시험은 VS의 MSBuild·C++ 도구와 clangd가 필요합니다(VISUALBOOST_TEST_MSBUILD로 지정 가능).");
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.MsBuild 한글." + Guid.NewGuid().ToString("N"));
+        var cacheRoot = Path.Combine(Path.GetTempPath(), "VisualBoost.MsBuildCache." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var project = Path.Combine(root, "App Dir");
+            Write(Path.Combine(project, "inc", "Lib.h"), "#pragma once\nint Lib(int v);\n");
+            Write(Path.Combine(project, "pch.h"), "#pragma once\n#include <vector>\n");
+            Write(Path.Combine(project, "forced.h"), "#pragma once\nint Forced();\n");
+            Write(Path.Combine(project, "pch.cpp"), "#include \"pch.h\"\n");
+            var mainText = "#include \"pch.h\"\n#include \"Lib.h\"\n#include \"forced.h\"\nint main() { std::vector<int> v{1}; return Lib(APP_VALUE) + Forced() + (int)v.size(); }\n";
+            var main = Path.Combine(project, "Main.cpp");
+            Write(main, mainText);
+            var lib = Path.Combine(project, "Lib.cpp");
+            Write(lib, "#include \"pch.h\"\n#include \"Lib.h\"\n#ifdef LIB_ONLY\nint Lib(int v) { return v; }\n#endif\nint Forced() { return 2; }\n");
+            var extra = Path.Combine(project, "Extra.cpp");
+            Write(extra, "#include \"pch.h\"\nint Extra() { return Forced(); }\n");
+            // $(SolutionDir)을 쓰는 include 경로는 Solution 속성을 넘겨야 맞습니다.
+            Write(Path.Combine(root, "shared", "Shared.h"), "#pragma once\nint Shared();\n");
+            var vcxproj = Path.Combine(project, "App.vcxproj");
+            Write(vcxproj, string.Join("\n",
+                "<?xml version=\"1.0\" encoding=\"utf-8\"?>",
+                "<Project DefaultTargets=\"Build\" xmlns=\"http://schemas.microsoft.com/developer/msbuild/2003\">",
+                "  <ItemGroup Label=\"ProjectConfigurations\">",
+                "    <ProjectConfiguration Include=\"Debug|x64\"><Configuration>Debug</Configuration><Platform>x64</Platform></ProjectConfiguration>",
+                "  </ItemGroup>",
+                "  <PropertyGroup Label=\"Globals\"><ProjectGuid>{0B6C9F4E-2C7A-4E1B-9D35-6A1E2F3B4C51}</ProjectGuid></PropertyGroup>",
+                "  <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.Default.props\" />",
+                "  <PropertyGroup Label=\"Configuration\">",
+                "    <ConfigurationType>Application</ConfigurationType>",
+                "    <PlatformToolset>$(DefaultPlatformToolset)</PlatformToolset>",
+                "  </PropertyGroup>",
+                "  <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.props\" />",
+                "  <ItemDefinitionGroup>",
+                "    <ClCompile>",
+                "      <AdditionalIncludeDirectories>inc;$(SolutionDir)shared;%(AdditionalIncludeDirectories)</AdditionalIncludeDirectories>",
+                "      <PreprocessorDefinitions>APP_VALUE=3;%(PreprocessorDefinitions)</PreprocessorDefinitions>",
+                "      <LanguageStandard>stdcpp17</LanguageStandard>",
+                "      <PrecompiledHeader>Use</PrecompiledHeader>",
+                "      <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>",
+                "    </ClCompile>",
+                "  </ItemDefinitionGroup>",
+                "  <ItemGroup>",
+                "    <ClCompile Include=\"pch.cpp\"><PrecompiledHeader>Create</PrecompiledHeader></ClCompile>",
+                "    <ClCompile Include=\"Main.cpp\" />",
+                "    <ClCompile Include=\"Lib.cpp\"><PreprocessorDefinitions>LIB_ONLY;%(PreprocessorDefinitions)</PreprocessorDefinitions></ClCompile>",
+                "    <ClCompile Include=\"Extra.cpp\"><ForcedIncludeFiles>forced.h</ForcedIncludeFiles></ClCompile>",
+                "  </ItemGroup>",
+                "  <Import Project=\"$(VCTargetsPath)\\Microsoft.Cpp.targets\" />",
+                "</Project>",
+                ""));
+            var solution = Path.Combine(root, "App.sln");
+            var projects = new[] { new MsBuildProjectConfiguration(vcxproj, "Debug", "x64"), new MsBuildProjectConfiguration(Path.Combine(root, "Missing.vcxproj"), "Debug", "x64") };
+            var before = Directory.GetFileSystemEntries(root, "*", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal).ToArray();
+
+            var stopwatch = Stopwatch.StartNew();
+            var context = CompileContextBuilder.Prepare(solution, cacheRoot, null, "clang-cl.exe", CancellationToken.None, msbuild, projects);
+            Console.WriteLine($"  MSBuild 설계 시점 명령 {stopwatch.ElapsedMilliseconds}ms: {context.Summary}");
+            Check(context.Kind == CompileContextKind.MsBuild && context.Commands.Count == 4, "설계 시점 명령 4개: " + context.Kind + " " + context.Reason);
+            var libCommand = context.Commands.Single(c => c.File.EndsWith("/Lib.cpp", StringComparison.Ordinal));
+            Check(libCommand.Arguments.Contains("LIB_ONLY") && libCommand.Arguments.Any(a => a.Replace('\\', '/').EndsWith("/shared", StringComparison.OrdinalIgnoreCase)),
+                "파일별 정의와 $(SolutionDir) 경로: " + string.Join(" ", libCommand.Arguments));
+            Check(libCommand.Arguments.Contains("/imsvc"), "시스템 include 추가");
+            Check(context.Summary.Contains("1/2"), "없는 프로젝트는 건너뜀: " + context.Summary);
+            Check(Directory.GetFileSystemEntries(root, "*", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal).SequenceEqual(before),
+                "프로젝트 폴더에 아무것도 쓰지 않음");
+
+            using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = solution, WorkerCount = 1, MsBuildPath = msbuild, Projects = projects
+            }, CancellationToken.None).Result;
+            Check(navigator.Context.Kind == CompileContextKind.MsBuild, "탐색기가 MSBuild 명령으로 시작");
+            Check(SpinUntil(() => navigator.Progress.Completed, 60000), "프로젝트 색인 완료");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(60));
+            var line = mainText.Split('\n')[3];
+            var definition = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(main, mainText, 1), 3, line.IndexOf("Lib(", StringComparison.Ordinal)), null, timeout.Token).Result;
+            Check(definition.Locations.Any(l => l.Path == lib && l.Line == 3), "파일별 정의로만 보이는 정의: " + string.Join(",", definition.Locations));
+            var references = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(main, mainText, 1), 3, line.IndexOf("Forced(", StringComparison.Ordinal)), timeout.Token).Result;
+            Check(references.Locations.Any(l => l.Path == extra), "강제 include로만 선언되는 파일의 참조: " + string.Join(",", references.Locations));
+            navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+        }
+        finally
+        {
+            TryDelete(cacheRoot);
+            TryDelete(root);
+        }
+    }
+
+    private static string? FindMsBuild(string? clangd)
+    {
+        var configured = Environment.GetEnvironmentVariable("VISUALBOOST_TEST_MSBUILD");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return File.Exists(configured) ? configured : null;
+        }
+
+        // clangd와 같은 VS 설치(VC/Tools/Llvm/x64/bin의 여섯 단계 위)를 우선합니다.
+        var install = clangd;
+        for (var i = 0; i < 6 && install is not null; i++) install = Path.GetDirectoryName(install);
+        return install is null ? null : MsBuildCompileCommands.FindMsBuild(install);
+    }
+
     public static void RunSourceChangeMonitor()
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost.Watch." + Guid.NewGuid().ToString("N"));

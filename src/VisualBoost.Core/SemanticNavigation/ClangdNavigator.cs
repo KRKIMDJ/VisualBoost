@@ -41,6 +41,12 @@ public sealed class ClangdNavigatorOptions
     /// <summary>파일 이름(확장자 제외)으로 파일을 찾는 조회입니다.</summary>
     public Func<string, IReadOnlyList<string>>? FindByStem { get; set; }
 
+    /// <summary>compile_commands.json이 없는 C++ 프로젝트에 명령을 물어볼 MSBuild입니다. 없으면 이 경로를 쓰지 않습니다.</summary>
+    public string? MsBuildPath { get; set; }
+
+    /// <summary>Solution의 C++ 프로젝트와 활성 구성입니다.</summary>
+    public IReadOnlyList<MsBuildProjectConfiguration> Projects { get; set; } = Array.Empty<MsBuildProjectConfiguration>();
+
     public int MaxEngineCandidates { get; set; } = 3;
 
     public TimeSpan CandidateTimeout { get; set; } = TimeSpan.FromSeconds(45);
@@ -154,7 +160,7 @@ public sealed class ClangdNavigator : IDisposable
 
         var compiler = Path.Combine(Path.GetDirectoryName(options.ClangdPath)!, "clang-cl.exe");
         var context = await Task.Run(() => CompileContextBuilder.Prepare(options.SolutionPath, options.CacheRoot, options.EngineRoot,
-            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken), cancellationToken).ConfigureAwait(false);
+            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, options.MsBuildPath, options.Projects), cancellationToken).ConfigureAwait(false);
         if (!context.IsAvailable)
         {
             throw new SemanticNavigationUnavailableException(context.Reason ?? "컴파일 명령이 없습니다.");

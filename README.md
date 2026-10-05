@@ -30,7 +30,7 @@ VisualBoost는 Visual Studio에서 파일·심볼 탐색과 C++ 편집 작업을
 
 현재 초기 개발 단계입니다. 복잡한 C++ 구문에서는 일부 기능이 제한될 수 있으며, 생성하거나 추가한 코드는 확인 후 저장해 주세요.
 
-C++ 정의 이동·참조 찾기는 Visual Studio의 `C++ Clang 도구` 구성 요소와 프로젝트의 컴파일 명령이 필요합니다. Unreal 프로젝트는 한 번 빌드하면 되고, 그 밖의 프로젝트는 `compile_commands.json`을 사용합니다. 조건이 맞지 않으면 Visual Studio 기본 탐색을 실행합니다.
+C++ 정의 이동·참조 찾기는 Visual Studio의 `C++ Clang 도구` 구성 요소가 필요합니다. Unreal 프로젝트는 한 번 빌드하면 되고, 일반 C++ 프로젝트는 프로젝트 설정을 그대로 사용하며 `compile_commands.json`이 있으면 그것을 우선합니다. 조건이 맞지 않으면 Visual Studio 기본 탐색을 실행합니다.
 
 ## 라이선스
 

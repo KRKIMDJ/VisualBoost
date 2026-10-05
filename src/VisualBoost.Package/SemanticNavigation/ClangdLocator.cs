@@ -74,7 +74,7 @@ internal static class ClangdLocator
     }
 
     /// <summary>devenv.exe가 있는 <c>Common7\IDE</c>의 두 단계 위가 설치 루트입니다.</summary>
-    private static string? CurrentInstallDirectory()
+    internal static string? CurrentInstallDirectory()
     {
         try
         {

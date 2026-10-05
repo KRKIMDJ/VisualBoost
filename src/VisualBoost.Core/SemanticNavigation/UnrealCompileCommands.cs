@@ -79,8 +79,8 @@ public static class UnrealCompileCommands
 {
     private const int MaxResponseFileBytes = 4 * 1024 * 1024;
     private static readonly Regex UnityInclude = new("^\\s*#include\\s+\"([^\"]+)\"", RegexOptions.Multiline | RegexOptions.CultureInvariant);
-    private static readonly string[] DropWithValue = { "/experimental:log", "/sourceDependencies" };
-    private static readonly string[] DropPrefixes = { "/Yu", "/Yc", "/Fp", "/Fo", "/Fd", "/Fa", "/analyze", "/errorReport", "/d1", "/d2" };
+    internal static readonly string[] DropWithValue = { "/experimental:log", "/sourceDependencies" };
+    internal static readonly string[] DropPrefixes = { "/Yu", "/Yc", "/Fp", "/Fo", "/Fd", "/Fa", "/analyze", "/errorReport", "/d1", "/d2" };
 
     /// <summary>프로젝트와 프로젝트 플러그인의 빌드 폴더 중 응답 파일이 가장 최근인 대상·구성을 고릅니다.</summary>
     public static UnrealBuildVariant? DetectVariant(string projectDirectory, string platform = "Win64", string architecture = "x64")

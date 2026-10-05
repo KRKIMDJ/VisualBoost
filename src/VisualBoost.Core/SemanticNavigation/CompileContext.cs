@@ -17,7 +17,10 @@ public enum CompileContextKind
     Unreal,
 
     /// <summary>Solution 근처의 기존 compile_commands.json을 가져왔습니다.</summary>
-    Database
+    Database,
+
+    /// <summary>C++ 프로젝트(vcxproj)의 MSBuild 설계 시점 대상으로 명령을 만들었습니다.</summary>
+    MsBuild
 }
 
 /// <summary>clangd에 넘길 compilation database와 그 출처입니다.</summary>
@@ -95,7 +98,10 @@ public static class CompileContextBuilder
 
     /// <param name="engineRoot">Unreal 프로젝트일 때 호출자가 찾은 엔진 설치 루트. 찾지 못했으면 null.</param>
     /// <param name="compiler">명령의 첫 인자로 쓸 cl 호환 컴파일러 경로. clangd는 이 이름으로 드라이버 모드를 고릅니다.</param>
-    public static CompileContext Prepare(string solutionPath, string cacheRoot, string? engineRoot, string compiler, CancellationToken cancellationToken = default)
+    /// <param name="msbuildPath">compile_commands.json이 없을 때 C++ 프로젝트에 명령을 물어볼 MSBuild. 없으면 이 단계를 건너뜁니다.</param>
+    /// <param name="projects">Solution의 C++ 프로젝트와 활성 구성입니다.</param>
+    public static CompileContext Prepare(string solutionPath, string cacheRoot, string? engineRoot, string compiler, CancellationToken cancellationToken = default,
+        string? msbuildPath = null, IReadOnlyList<MsBuildProjectConfiguration>? projects = null)
     {
         var solutionDirectory = Path.GetDirectoryName(Path.GetFullPath(solutionPath))!;
         var directory = CacheDirectory(cacheRoot, solutionPath);
@@ -138,8 +144,24 @@ public static class CompileContextBuilder
             }
         }
 
+        // Unreal의 NMake 프로젝트는 설계 시점 명령이 엔진 전체를 가리키므로 응답 파일 경로만 씁니다.
+        string? msbuildReason = null;
+        if (project is null && msbuildPath is not null && projects is { Count: > 0 })
+        {
+            var result = MsBuildCompileCommands.Query(msbuildPath, solutionPath, projects, Path.Combine(directory, "msbuild"), compiler,
+                TimeSpan.FromMinutes(3), cancellationToken);
+            if (result.Commands.Count > 0)
+            {
+                var changed = CompileCommandDatabase.WriteIfChanged(directory, result.Commands);
+                var summary = $"C++ 프로젝트 {result.AnsweredProjects:N0}/{result.Projects:N0}개의 MSBuild 설계 시점 명령 · 컴파일 명령 {result.Commands.Count:N0}개";
+                return new CompileContext(CompileContextKind.MsBuild, directory, result.Commands, summary, null, engineRoot, changed);
+            }
+
+            msbuildReason = "C++ 프로젝트에서 컴파일 명령을 얻지 못했습니다" + (result.Error is null ? "." : ": " + result.Error);
+        }
+
         return new CompileContext(CompileContextKind.None, directory, Array.Empty<CompileCommand>(), string.Empty,
-            unrealReason ?? "compile_commands.json을 찾지 못했습니다.", engineRoot, false);
+            unrealReason ?? msbuildReason ?? "compile_commands.json을 찾지 못했습니다.", engineRoot, false);
     }
 
     private static IEnumerable<string> SafeFiles(string directory, string pattern)

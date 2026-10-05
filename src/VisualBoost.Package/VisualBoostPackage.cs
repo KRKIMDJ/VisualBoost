@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.35.3")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.36.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
@@ -87,7 +87,8 @@ public sealed class VisualBoostPackage : AsyncPackage
         var statusBar = await GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         // 정의·참조 탐색은 Solution 이벤트보다 먼저 만들어 이미 열린 Solution도 처리합니다.
-        navigation = new SemanticNavigationService(fileIndex, ((CodeNavigationOptionsPage)GetDialogPage(typeof(CodeNavigationOptionsPage))).CreateSettings());
+        navigation = new SemanticNavigationService(fileIndex, ((CodeNavigationOptionsPage)GetDialogPage(typeof(CodeNavigationOptionsPage))).CreateSettings(),
+            token => VcProjectCollector.CollectAsync(dte, token));
         SemanticNavigationRuntime.Service = navigation;
         var currentNavigation = navigation;
         if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar, () => currentNavigation.StatusText);
