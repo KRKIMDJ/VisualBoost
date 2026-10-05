@@ -10,6 +10,9 @@ TestResults/
 
 # 로컬 진단 및 개발 산출물
 artifacts/
+
+# 브랜딩 원본·시안. 이미 추적 중인 파일(README 로고 등)은 그대로 추적된다.
+assets/
 *.log
 *.userprefs
 
