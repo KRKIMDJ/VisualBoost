@@ -14,8 +14,10 @@
         <CommandFlag>TextChanges</CommandFlag>
         <Strings><ButtonText>선언 생성</ButtonText></Strings>
       </Menu>
+      <!-- C++ 문서에서만 보입니다(CodeContextMenuCommand가 표시 여부를 정함). -->
       <Menu guid="guidVisualBoostCommandSet" id="VisualBoostCodeMenu" priority="0x0100" type="Menu">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCodeContextGroup" />
+        <CommandFlag>DynamicVisibility</CommandFlag>
         <Strings><ButtonText>Visual Boost</ButtonText></Strings>
       </Menu>
       <Menu guid="guidVisualBoostCommandSet" id="VisualBoostSubmenu" priority="0x0100" type="Menu">

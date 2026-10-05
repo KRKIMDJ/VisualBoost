@@ -1,5 +1,8 @@
 using System;
+using System.Windows;
+using System.Windows.Controls;
 using System.Windows.Input;
+using System.Windows.Media;
 
 namespace VisualBoost.UI;
 
@@ -65,9 +68,36 @@ internal static class ResultListKeys
         return current;
     }
 
-    /// <summary>보이는 행 수에서 한 줄을 겹친 쪽 이동 크기입니다.</summary>
+    /// <summary>
+    /// 목록의 한 화면 이동 크기(보이는 항목 수에서 한 줄을 겹친 값)입니다. 항목 단위로 스크롤하는 목록은
+    /// ScrollViewer의 뷰포트 높이가 곧 보이는 항목 수이므로 DPI·글꼴·행 높이가 바뀌어도 맞습니다.
+    /// 픽셀 단위로 스크롤하거나 아직 배치되지 않았으면 <paramref name="estimatedRowHeight"/>로 추정합니다.
+    /// </summary>
+    public static int PageSize(ItemsControl list, double estimatedRowHeight)
+    {
+        if (list is null) throw new ArgumentNullException(nameof(list));
+        var viewer = FindScrollViewer(list);
+        if (viewer is { CanContentScroll: true } && viewer.ViewportHeight >= 1)
+            return Math.Max(1, (int)viewer.ViewportHeight - 1);
+        return PageSize(viewer?.ViewportHeight ?? list.ActualHeight, estimatedRowHeight);
+    }
+
+    /// <summary>픽셀 높이로 추정한 한 화면 이동 크기입니다.</summary>
     public static int PageSize(double viewportHeight, double rowHeight) =>
         rowHeight <= 0 || double.IsNaN(viewportHeight) || viewportHeight <= rowHeight
             ? 1
             : Math.Max(1, (int)(viewportHeight / rowHeight) - 1);
+
+    // 목록 템플릿의 ScrollViewer는 맨 위 몇 단계 안에 있으므로 첫 번째로 만나는 것을 씁니다.
+    private static ScrollViewer? FindScrollViewer(DependencyObject parent)
+    {
+        for (var index = 0; index < VisualTreeHelper.GetChildrenCount(parent); index++)
+        {
+            var child = VisualTreeHelper.GetChild(parent, index);
+            if (child is ScrollViewer viewer) return viewer;
+            if (FindScrollViewer(child) is { } nested) return nested;
+        }
+
+        return null;
+    }
 }

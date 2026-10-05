@@ -68,6 +68,13 @@ internal static class PaletteAndMenuTests
             .OrderBy(g => Convert.ToInt32((string)g.Attribute("priority")!, 16)).Select(g => (string)g.Attribute("id")!);
         Assert(codeMenuGroups.SequenceEqual(new[] { "VisualBoostNavigationContextGroup", "VisualBoostGenerationContextGroup" }),
             "편집기 문맥 메뉴는 이동 명령 묶음 뒤에 코드 도구를 구분선으로 나눈다");
+        var codeMenu = commands.Element(ns + "Menus")!.Elements(ns + "Menu").Single(m => (string?)m.Attribute("id") == "VisualBoostCodeMenu");
+        var codeMenuId = xml.Root.Element(ns + "Symbols")!.Descendants(ns + "IDSymbol").Single(s => (string?)s.Attribute("name") == "VisualBoostCodeMenu");
+        var commandIds = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "CommandIds.cs"));
+        Assert(codeMenu.Elements(ns + "CommandFlag").Any(f => f.Value == "DynamicVisibility") &&
+               commandIds.Contains("CodeContextMenu = " + (string)codeMenuId.Attribute("value")!) &&
+               File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs")).Contains("CodeContextMenuCommand.InitializeAsync"),
+            "편집기 문맥 하위 메뉴는 C++ 문서에서만 보이도록 표시 여부를 처리한다");
 
         // Tools > Visual Boost는 찾기 · 코드 이동 · 코드 도구 · 설정 묶음을 이 순서로 구분선과 함께 보인다.
         var submenuGroups = groups.Values.Where(g => (string?)g.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu")

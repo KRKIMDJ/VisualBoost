@@ -38,7 +38,7 @@ internal static class SearchKeyboardTests
         Check(ResultListKeys.NextScope(0, 0, true, _ => true) == -1, "범위 없음");
         Check(ResultListKeys.PageSize(240, 24) == 9 && ResultListKeys.PageSize(10, 24) == 1 && ResultListKeys.PageSize(double.NaN, 24) == 1, "쪽 크기");
 
-        var screen = new Rect(0, 0, 1920, 1080);
+        var screen = new[] { new Rect(0, 0, 1920, 1040) };
         var minimum = new Size(720, 380);
         var plan = WindowPlacement.Resolve(new Rect(100, 50, 1000, 600), minimum, screen);
         Check(plan.Width == 1000 && plan.Height == 600 && plan.Position == new Point(100, 50), "저장한 크기·위치 복원");
@@ -50,6 +50,33 @@ internal static class SearchKeyboardTests
         Check(plan.Width == 1000 && plan.Position is null, "위치를 저장하지 않았으면 가운데에 열기");
         plan = WindowPlacement.Resolve(null, minimum, screen);
         Check(plan.Width is null && plan.Height is null && plan.Position is null, "저장값 없음");
+        plan = WindowPlacement.Resolve(new Rect(100, -500, 1000, 600), minimum, screen);
+        Check(plan.Position is null, "제목 표시줄이 화면 위쪽 밖이면 창 일부가 보여도 위치를 버림");
+        plan = WindowPlacement.Resolve(new Rect(100, -10, 1000, 600), minimum, screen);
+        Check(plan.Position == new Point(100, -10), "제목 표시줄 대부분이 보이면 위치 유지");
+        plan = WindowPlacement.Resolve(new Rect(-995, 100, 1000, 600), minimum, screen);
+        Check(plan.Position is null, "가장자리에 몇 픽셀만 걸치면 끌 수 없으므로 위치를 버림");
+        // ㄱ자 배치: 오른쪽 모니터가 위로 올라가 있어 외접 사각형의 오른쪽 아래는 빈 영역입니다.
+        var lShape = new[] { new Rect(0, 0, 1920, 1040), new Rect(1920, -1080, 1920, 1040) };
+        plan = WindowPlacement.Resolve(new Rect(2500, 200, 1000, 600), minimum, lShape);
+        Check(plan.Position is null, "모니터 사이 빈 영역의 위치를 버림");
+        plan = WindowPlacement.Resolve(new Rect(2500, -900, 1000, 600), minimum, lShape);
+        Check(plan.Position == new Point(2500, -900), "보조 모니터 위의 위치 유지");
+        plan = WindowPlacement.Resolve(new Rect(1500, 100, 1000, 600), minimum, lShape);
+        Check(plan.Position == new Point(1500, 100), "두 모니터에 걸쳐도 제목 표시줄이 잡히면 유지");
+
+        // 쪽 크기는 실제 뷰포트의 보이는 항목 수를 따릅니다(항목 높이 30, 뷰포트 300 → 10개 보임 → 9).
+        var pageList = new ListBox { Height = 300, ItemContainerStyle = new Style(typeof(ListBoxItem)) };
+        pageList.ItemContainerStyle.Setters.Add(new Setter(FrameworkElement.HeightProperty, 30.0));
+        pageList.ItemContainerStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(0)));
+        pageList.ItemsSource = Enumerable.Range(1, 100).ToArray();
+        var host = new Window { Content = pageList, Width = 300, Height = 400, Left = -20000, ShowInTaskbar = false };
+        host.Show();
+        Program.Pump();
+        var size = ResultListKeys.PageSize(pageList, 24);
+        host.Close();
+        Check(size is >= 8 and <= 9, $"뷰포트 기준 쪽 크기(행 높이 추정값 24와 무관): {size}");
+        Check(ResultListKeys.PageSize(new ListBox(), 24) == 1, "배치 전 목록은 한 줄");
 
         var symbol = Program.LoadXaml(root, "SymbolSearchDialog");
         var list = (ListView)symbol.FindName("ResultsList");

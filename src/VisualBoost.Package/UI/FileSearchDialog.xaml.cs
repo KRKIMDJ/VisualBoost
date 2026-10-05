@@ -449,7 +449,7 @@ public partial class FileSearchDialog : DialogWindow
             return;
         }
 
-        var pageSize = ResultListKeys.PageSize(ResultsList.ActualHeight - 28, 24);
+        var pageSize = ResultListKeys.PageSize(ResultsList, 24);
         if (ResultListKeys.TryMove(eventArgs.Key, Keyboard.Modifiers, ResultsList.SelectedIndex, ResultsList.Items.Count, pageSize, out var target))
         {
             Select(target);

@@ -23,6 +23,13 @@ internal static class SearchInputTests
         Location("Foo.cpp:", "Foo.cpp:", null, null, "숫자 없는 콜론");
         Location("Foo.cpp:1234567890", "Foo.cpp:1234567890", null, null, "범위를 넘는 줄 번호");
         Location(null, "", null, null, "null 입력");
+        Location(@"1>C:\src\Foo.cpp(120,5): error C2065: 'x': undeclared identifier", @"C:\src\Foo.cpp", 120, 5, "MSBuild 진단 줄 전체");
+        Location("Foo.cpp:120:5: error: use of undeclared identifier 'x'", "Foo.cpp", 120, 5, "clang 진단 줄 전체");
+        Location(@"c:\src\foo.cpp(12) : warning C4100: 'a': unreferenced parameter", @"c:\src\foo.cpp", 12, null, "공백 뒤 콜론 진단 형식");
+        Location("12>Foo.cpp", "Foo.cpp", null, null, "줄 표기 없는 프로젝트 번호 접두어");
+        Location(@"C:\Dir(2)\Foo.cpp(12)", @"C:\Dir(2)\Foo.cpp", 12, null, "경로 안의 괄호 숫자는 줄 표기가 아님");
+        Location("Widget(2).png", "Widget(2).png", null, null, "이름에 붙은 괄호 뒤에 이름이 이어지면 줄 표기가 아님");
+        Location("Foo.cpp(12) note", "Foo.cpp(12) note", null, null, "위치 뒤 콜론 없는 문장은 줄 표기가 아님");
 
         Check(SearchQuerySeed.ForFileSearch("Widget.h") == "Widget.h", "파일 이름 선택");
         Check(SearchQuerySeed.ForFileSearch("  Source/Game/Widget.cpp ") == "Source/Game/Widget.cpp", "경로 선택과 공백 제거");

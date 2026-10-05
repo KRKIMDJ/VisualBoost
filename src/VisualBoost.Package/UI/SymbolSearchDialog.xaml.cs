@@ -24,6 +24,7 @@ public partial class SymbolSearchDialog : DialogWindow
     // Solution마다 다르므로 다른 Solution에서는 쓰지 않고, 영구 저장도 하지 않습니다. UI thread에서만 씁니다.
     private static string? rememberedSolution;
     private static string? rememberedScopeId;
+    private static string? rememberedScopeName;
 
     private readonly SolutionFileIndexService fileIndex;
     private readonly IReadOnlyList<SolutionProjectInfo> projects;
@@ -37,7 +38,9 @@ public partial class SymbolSearchDialog : DialogWindow
     private string? observedAnalysisError;
     private IReadOnlyList<SymbolSearchScope>? observedScopes;
     private bool updatingScopes;
+    // 사용자가 바라는 범위입니다. 아직 게시되지 않았으면(파일 수집 중) 화면은 '전체'이고 이 값과 다릅니다.
     private string preferredScopeId;
+    private string preferredScopeName;
 
     internal SymbolSearchDialog(
         SolutionFileIndexService fileIndex,
@@ -48,9 +51,9 @@ public partial class SymbolSearchDialog : DialogWindow
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
         this.projects = projects ?? throw new ArgumentNullException(nameof(projects));
         this.solutionRoot = solutionRoot;
-        preferredScopeId = rememberedScopeId is not null && SameSolution(rememberedSolution, solutionRoot)
-            ? rememberedScopeId
-            : SymbolSearchScope.All.Id;
+        var remembered = rememberedScopeId is not null && SameSolution(rememberedSolution, solutionRoot);
+        preferredScopeId = remembered ? rememberedScopeId! : SymbolSearchScope.All.Id;
+        preferredScopeName = remembered ? rememberedScopeName ?? string.Empty : SymbolSearchScope.All.Name;
         InitializeComponent();
         UpdateScopes();
         // 로드 전 TextChanged는 무시되고, 첫 검색은 OnLoaded에서 이 검색어로 실행합니다.
@@ -95,6 +98,7 @@ public partial class SymbolSearchDialog : DialogWindow
     {
         if (updatingScopes || isClosed) return;
         preferredScopeId = SelectedScope.Id;
+        preferredScopeName = SelectedScope.Name;
         if (!IsLoaded) return;
         await RefreshResultsAsync(useDebounce: false);
     }
@@ -126,7 +130,26 @@ public partial class SymbolSearchDialog : DialogWindow
         searchCancellation = null;
         rememberedSolution = solutionRoot;
         rememberedScopeId = preferredScopeId;
+        rememberedScopeName = preferredScopeName;
     }
+
+    /// <summary>기억한 범위가 아직 게시되지 않아 다른 범위(전체)를 보이는 중인지입니다.</summary>
+    private bool IsScopePending => SelectedScope.Id != preferredScopeId;
+
+    /// <summary>
+    /// 사용자가 지금 범위로 입력·이동을 시작하면 늦게 게시되는 이전 범위로 바꾸지 않습니다. 보던 결과가 저절로
+    /// 바뀌지 않게 하려는 것입니다.
+    /// </summary>
+    private void SettleScope()
+    {
+        if (!IsScopePending) return;
+        var note = PendingScopeNote();
+        preferredScopeId = SelectedScope.Id;
+        preferredScopeName = SelectedScope.Name;
+        StatusText.Text = StatusText.Text.Replace(note, string.Empty);
+    }
+
+    private string PendingScopeNote() => IsScopePending ? $" · 마지막 범위 '{preferredScopeName}' 준비 중" : string.Empty;
 
     [SuppressMessage(
         "Usage",
@@ -135,6 +158,7 @@ public partial class SymbolSearchDialog : DialogWindow
     private async void OnSearchTextChanged(object sender, TextChangedEventArgs eventArgs)
     {
         if (!IsLoaded || isClosed) return;
+        SettleScope();
         UpdateSearchControls();
         await RefreshResultsAsync(useDebounce: true);
     }
@@ -200,7 +224,7 @@ public partial class SymbolSearchDialog : DialogWindow
 
             var currentSnapshot = fileIndex.GetSnapshot();
             StatusText.Text = $"{items.Length:N0}개 표시" + (matches.Count > 200 ? " · 추가 결과 있음" : string.Empty) +
-                              $" · {scope.Name} · 전체 등록 위치 {currentSnapshot.SymbolCount:N0}개" +
+                              $" · {scope.Name}{PendingScopeNote()} · 전체 등록 위치 {currentSnapshot.SymbolCount:N0}개" +
                               AnalysisStatus(currentSnapshot);
             StatusText.ToolTip = currentSnapshot.AnalysisError;
         }
@@ -272,7 +296,7 @@ public partial class SymbolSearchDialog : DialogWindow
             EmptyStateDescription.Text = snapshot.AnalysisError ?? "심볼 이름만 검색합니다. Ctrl+Tab으로 검색 범위를 바꿉니다.";
         }
 
-        StatusText.Text = $"0개 표시 · {SelectedScope.Name} · 전체 등록 위치 {snapshot.SymbolCount:N0}개" +
+        StatusText.Text = $"0개 표시 · {SelectedScope.Name}{PendingScopeNote()} · 전체 등록 위치 {snapshot.SymbolCount:N0}개" +
                           AnalysisStatus(snapshot);
         StatusText.ToolTip = snapshot.AnalysisError;
     }
@@ -323,9 +347,10 @@ public partial class SymbolSearchDialog : DialogWindow
             return;
         }
 
-        var pageSize = ResultListKeys.PageSize(ResultsList.ActualHeight - 28, 24);
+        var pageSize = ResultListKeys.PageSize(ResultsList, 24);
         if (ResultListKeys.TryMove(eventArgs.Key, Keyboard.Modifiers, ResultsList.SelectedIndex, ResultsList.Items.Count, pageSize, out var target))
         {
+            SettleScope();
             if (target >= 0)
             {
                 ResultsList.SelectedIndex = target;

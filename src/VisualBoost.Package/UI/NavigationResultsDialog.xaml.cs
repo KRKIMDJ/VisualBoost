@@ -63,7 +63,7 @@ public partial class NavigationResultsDialog : DialogWindow
                 break;
             default:
                 // 파일·심볼 탐색과 같은 목록 이동 키(↑↓·PgUp/PgDn·Ctrl+Home/End)를 씁니다.
-                var pageSize = ResultListKeys.PageSize(ResultsList.ActualHeight - 28, 24);
+                var pageSize = ResultListKeys.PageSize(ResultsList, 24);
                 if (!ResultListKeys.TryMove(eventArgs.Key, Keyboard.Modifiers, ResultsList.SelectedIndex, ResultsList.Items.Count, pageSize, out var target))
                     return;
                 if (target >= 0)

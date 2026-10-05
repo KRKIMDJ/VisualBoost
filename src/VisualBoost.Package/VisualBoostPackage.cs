@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.39.1")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.39.2")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 // 폴더 열기 작업 영역(CMake 등)은 Solution 존재 상태를 켜지 않으므로 따로 등록합니다.
@@ -107,6 +107,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await OpenSymbolSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
         await GenerateFunctionCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await CodeContextMenuCommand.InitializeAsync(this, cancellationToken);
         await SemanticNavigationCommand.InitializeAsync(this, navigation, cancellationToken);
     }
 
