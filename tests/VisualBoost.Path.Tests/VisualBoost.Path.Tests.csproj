@@ -4,6 +4,8 @@
     <TargetFramework>net472</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../VisualBoost.Core.Tests/CommentSymbolLinkTests.cs" Link="CommentSymbolLinkTests.cs" />
+    <Compile Include="../../src/VisualBoost.Package/CommentLinks/CommentSymbolLinkResolver.cs" Link="CommentSymbolLinkResolver.cs" />
     <Compile Include="../VisualBoost.Core.Tests/QuickColorTests.cs" Link="QuickColorTests.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileCatalog.cs" Link="SolutionFileCatalog.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexService.cs" Link="SolutionFileIndexService.cs" />

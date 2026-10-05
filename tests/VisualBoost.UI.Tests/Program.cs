@@ -21,6 +21,8 @@ internal static class Program
     {
         try
         {
+            if (args.Length == 1 && args[0] == "--comment-links")
+            { CommentLinkTooltipTests.Run(); return 0; }
             // 색상 검증은 파일·프로젝트나 창을 만들지 않고 메모리상의 서식 저장소만 사용합니다.
             if (args.Length == 1 && args[0] == "--coloring")
             {

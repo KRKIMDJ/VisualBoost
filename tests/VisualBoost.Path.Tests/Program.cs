@@ -8,6 +8,10 @@ internal static class Program
     {
         try
         {
+            if (args.Length == 2 && args[0] == "--comment-links-cases")
+            { CommentSymbolProjectTests.Run(args[1]); return 0; }
+            VisualBoost.Core.Tests.CommentSymbolLinkTests.Run();
+            CommentSymbolProjectTests.RunSample();
             VisualBoost.Core.Tests.QuickColorTests.Run();
             Check(SearchPath.TryNormalize("  \"C:\\Samples\\Game\\Main.cpp\"  ", out var normalized) && normalized == @"C:\Samples\Game\Main.cpp", "따옴표를 포함한 파일 경로 정규화");
             Check(SearchPath.DirectoryOf(@"C:\Samples\Game\Main.cpp") == @"C:\Samples\Game", "공용 문서 폴더 확인");
