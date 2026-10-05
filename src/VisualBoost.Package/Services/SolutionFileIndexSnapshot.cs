@@ -1,4 +1,5 @@
 using System;
+using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Services;
 
@@ -21,7 +22,8 @@ internal sealed class SolutionFileIndexSnapshot
         int includeEdgeCount,
         TimeSpan lastBuildDuration,
         string? lastError,
-        string? analysisError)
+        string? analysisError,
+        SourceAnalysisProgress? analysisProgress = null)
     {
         State = state;
         FileCount = fileCount;
@@ -32,6 +34,7 @@ internal sealed class SolutionFileIndexSnapshot
         LastBuildDuration = lastBuildDuration;
         LastError = lastError;
         AnalysisError = analysisError;
+        AnalysisProgress = analysisProgress;
     }
 
     public SolutionFileIndexState State { get; }
@@ -51,4 +54,5 @@ internal sealed class SolutionFileIndexSnapshot
     public string? LastError { get; }
 
     public string? AnalysisError { get; }
+    public SourceAnalysisProgress? AnalysisProgress { get; }
 }

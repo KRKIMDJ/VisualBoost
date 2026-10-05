@@ -12,7 +12,7 @@ internal static class HostControlStyleTests
     public static void Run(string root)
     {
         XNamespace wpf = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
-        var files = new[] { "UI/FileSearchDialog.xaml", "UI/SymbolSearchDialog.xaml", "UI/SymbolUsagesControl.xaml",
+        var files = new[] { "UI/FileSearchDialog.xaml", "UI/SymbolSearchDialog.xaml",
             "DocumentNavigation/DocumentNavigationControl.xaml" };
         foreach (var file in files)
         {

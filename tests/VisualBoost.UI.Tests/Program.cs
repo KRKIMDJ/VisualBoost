@@ -21,6 +21,12 @@ internal static class Program
     {
         try
         {
+            // 이 검증은 저장소 경로나 산출물 디렉터리 없이 메모리상의 DTE 대역만 사용합니다.
+            if (args.Length == 1 && args[0] == "--project-collection")
+            {
+                ProjectCollectionTests.Run();
+                return 0;
+            }
             var root = Path.GetFullPath(args[0]);
             var output = Path.Combine(root, "artifacts", "ui-validation");
             Directory.CreateDirectory(output);
@@ -32,14 +38,13 @@ internal static class Program
             { GenerationInteractionTests.Run(output); return 0; }
             if (args.Skip(1).Contains("--document-navigation"))
             { DocumentNavigationInteractionTests.Run(root); return 0; }
-            foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog", "SymbolUsagesControl" })
+            foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog" })
                 Validate(root, output, name);
-            UsageLifecycleTests.Run();
             ColorFormatTests.Run();
             PaletteAndMenuTests.Run(root);
             GenerationInteractionTests.Run(output);
             SharedColorTests.Run();
-            NavigationIntegrationTests.Run();
+            ProjectCollectionTests.Run();
             SearchHighlightTests.Run();
             CompletionInteractionTests.Run(root);
             DocumentNavigationInteractionTests.Run(root);
@@ -138,7 +143,7 @@ internal static class Program
             list.SelectedIndex = 2;
         }
         Pump();
-        if (name == "SymbolSearchDialog" || name == "SymbolUsagesControl")
+        if (name == "SymbolSearchDialog")
         {
             var symbolItems = Descendants<ListViewItem>(items).ToArray();
             var unselectedText = Descendants<TextBlock>(symbolItems.First(item => !item.IsSelected)).First(IsSearchSymbol);
@@ -162,34 +167,6 @@ internal static class Program
                     Assert(runs.All(run => ((SolidColorBrush)run.Foreground).Color == ((SolidColorBrush)block.Foreground).Color), "심볼 구간은 팔레트/선택 색상 상속");
                     Assert(block.TextTrimming == TextTrimming.CharacterEllipsis, "심볼 말줄임 유지");
                 }
-            }
-            if (name == "SymbolUsagesControl")
-            {
-                var row = symbolItems.First(item => !item.IsSelected);
-                var texts = Descendants<TextBlock>(row).ToArray();
-                Assert(texts.First(t => t.Text == "Widget").Foreground is SolidColorBrush typeBrush && typeBrush.Color == Color.FromRgb(0x68, 0xD5, 0xC4), "사용처 타입 색상");
-                Assert(texts.First(t => t.Text == "Movement").Foreground is SolidColorBrush variableBrush && variableBrush.Color == Color.FromRgb(0xB4, 0xD8, 0xFA), "사용처 변수 색상");
-                Assert(texts.First(t => t.Text == "MODE").Foreground is SolidColorBrush macroBrush && macroBrush.Color == Color.FromRgb(0xD2, 0xAA, 0xF5), "사용처 매크로 색상");
-                Assert(unselectedText.FontWeight == FontWeights.Bold, "검색한 식별자 굵게 유지");
-                Assert(unselectedText.TextDecorations.Any(d => d.Location == TextDecorationLocation.Underline), "사용처 검색 심볼 밑줄");
-                Assert(selectedText.TextDecorations.Any(d => d.Location == TextDecorationLocation.Underline), "사용처 선택 행에서도 밑줄 유지");
-                Assert(texts.First(t => t.Text == "Movement").TextDecorations.Count == 0, "다른 식별자에 밑줄을 붙이지 않음");
-                var comment = texts.First(t => t.Text.Contains("// SetMovementMode"));
-                Assert(comment.TextDecorations.Count == 0, "주석의 동일 이름은 밑줄 제외");
-                Assert(comment.FontWeight == FontWeights.Normal && ((SolidColorBrush)comment.Foreground).Color == Color.FromRgb(0xE5, 0xE5, 0xE5), "주석의 동일 이름은 강조하지 않음");
-                ColoringSettings.Publish(new ColoringSettings(false, new string[8]));
-                Pump();
-                Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0xE5, 0xE5, 0xE5), "사용처 색상 비활성화 복원");
-                Assert(((SolidColorBrush)selectedText.Foreground).Color == Colors.White, "사용처 선택 색상 유지");
-                ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
-                var usageControl = (UserControl)element;
-                var originalBackground = usageControl.Background;
-                usageControl.Background = Brushes.White;
-                Pump();
-                Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0x84, 0x51, 0x14), "사용처 밝은 테마 팔레트");
-                usageControl.Background = originalBackground;
-                Pump();
-                Assert(((SolidColorBrush)unselectedText.Foreground).Color == Color.FromRgb(0xF2, 0xCB, 0x8D), "사용처 어두운 테마 복원");
             }
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
             Pump();
@@ -250,12 +227,5 @@ internal static class Program
         public string IconText => "C++";
         public object[] FileNameSegments => new object[] { new { Text = FileName, IsMatch = true } };
         public object[] PathSegments => new object[] { new { Text = DirectoryPath, IsMatch = false } };
-        public object CodeSegments => UsageTextSegment.Create(
-            CppIdentifierUsageScanner.Find(Name, FullPath, "Widget Movement; Movement->" + Name + "(MODE); // " + Name)[0],
-            symbol => symbol switch
-            {
-                "Widget" => SourceSymbolKind.Type, "Movement" => SourceSymbolKind.Variable,
-                "MODE" => SourceSymbolKind.Macro, "SetMovementMode" => SourceSymbolKind.Function, _ => SourceSymbolKind.Unknown,
-            });
     }
 }

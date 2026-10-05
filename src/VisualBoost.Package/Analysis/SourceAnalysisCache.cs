@@ -5,6 +5,7 @@ using System.Linq;
 using System.Security;
 using System.Security.Cryptography;
 using System.Text;
+using System.Threading;
 using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Analysis;
@@ -12,10 +13,11 @@ namespace VisualBoost.Analysis;
 internal sealed class SourceAnalysisCache
 {
     private const string Magic = "VisualBoost.SourceAnalysis";
-    private const int Version = 3;
+    private const int Version = 6;
     private const int MaximumFiles = 1_000_000;
     private const int MaximumItemsPerFile = 100_000;
     private readonly string directory;
+    internal bool NeedsUpgrade { get; private set; }
 
     internal SourceAnalysisCache(string? directory = null)
     {
@@ -23,8 +25,10 @@ internal sealed class SourceAnalysisCache
             "VisualBoost", "Cache", "Analysis");
     }
 
-    public IReadOnlyDictionary<string, CachedSourceAnalysis> Load(string solutionPath)
+    public IReadOnlyDictionary<string, CachedSourceAnalysis> Load(string solutionPath, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
+        NeedsUpgrade = false;
         var path = GetPath(solutionPath);
         if (path is null || !File.Exists(path))
         {
@@ -35,7 +39,9 @@ internal sealed class SourceAnalysisCache
         {
             using var stream = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
             using var reader = new BinaryReader(stream, Encoding.UTF8, false);
-            if (reader.ReadString() != Magic || reader.ReadInt32() != Version)
+            if (reader.ReadString() != Magic) return Empty();
+            var version = reader.ReadInt32();
+            if (version < 3 || version > Version)
             {
                 return Empty();
             }
@@ -44,13 +50,16 @@ internal sealed class SourceAnalysisCache
             var entries = new Dictionary<string, CachedSourceAnalysis>(count, StringComparer.OrdinalIgnoreCase);
             for (var fileIndex = 0; fileIndex < count; fileIndex++)
             {
+                cancellationToken.ThrowIfCancellationRequested();
                 var file = reader.ReadString();
+                var revision = version >= 5 ? reader.ReadInt32() : CachedSourceAnalysis.CurrentRevision;
                 var length = reader.ReadInt64();
                 var ticks = reader.ReadInt64();
                 var includeCount = ReadCount(reader, MaximumItemsPerFile);
                 var includes = new List<SourceIncludeReference>(includeCount);
                 for (var includeIndex = 0; includeIndex < includeCount; includeIndex++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     includes.Add(new SourceIncludeReference(reader.ReadString(), reader.ReadBoolean(), reader.ReadInt32()));
                 }
 
@@ -58,17 +67,24 @@ internal sealed class SourceAnalysisCache
                 var symbols = new List<SourceSymbolLocation>(symbolCount);
                 for (var symbolIndex = 0; symbolIndex < symbolCount; symbolIndex++)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var name = reader.ReadString();
                     var line = reader.ReadInt32();
                     var column = reader.ReadInt32();
                     var kind = (SourceSymbolKind)reader.ReadInt32();
                     symbols.Add(new SourceSymbolLocation(name, file, line, column, kind, reader.ReadString(), reader.ReadString()));
+                    // 이전 실험 버전의 선언·정의 분류 값은 호환성 때문에 읽기만 하고 폐기합니다.
+                    if (version == 4 || version == 5) reader.ReadInt32();
                 }
 
+                // 구형 캐시의 상세 종류 이전 항목만 갱신하고, 이후에는 명시적 분석 버전으로 판정합니다.
+                if (version <= 4 && symbols.Any(s => s.Kind == SourceSymbolKind.Type)) revision = 0;
                 entries[file] = new CachedSourceAnalysis(
-                    length, ticks, new SourceFileAnalysis(file, includes, symbols));
+                    length, ticks, new SourceFileAnalysis(file, includes, symbols), revision);
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
+            NeedsUpgrade = version != Version;
             return entries;
         }
         catch (Exception exception) when (
@@ -80,8 +96,9 @@ internal sealed class SourceAnalysisCache
         }
     }
 
-    public void Save(string solutionPath, IEnumerable<KeyValuePair<string, CachedSourceAnalysis>> entries)
+    public void Save(string solutionPath, IEnumerable<KeyValuePair<string, CachedSourceAnalysis>> entries, CancellationToken cancellationToken = default)
     {
+        cancellationToken.ThrowIfCancellationRequested();
         var path = GetPath(solutionPath);
         if (path is null)
         {
@@ -101,13 +118,16 @@ internal sealed class SourceAnalysisCache
                 writer.Write(values.Length);
                 foreach (var pair in values)
                 {
+                    cancellationToken.ThrowIfCancellationRequested();
                     var entry = pair.Value;
                     writer.Write(pair.Key);
+                    writer.Write(entry.Revision);
                     writer.Write(entry.Length);
                     writer.Write(entry.LastWriteUtcTicks);
                     writer.Write(entry.Analysis.Includes.Count);
                     foreach (var include in entry.Analysis.Includes)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         writer.Write(include.Value);
                         writer.Write(include.IsSystem);
                         writer.Write(include.Line);
@@ -116,6 +136,7 @@ internal sealed class SourceAnalysisCache
                     writer.Write(entry.Analysis.Symbols.Count);
                     foreach (var symbol in entry.Analysis.Symbols)
                     {
+                        cancellationToken.ThrowIfCancellationRequested();
                         writer.Write(symbol.Name);
                         writer.Write(symbol.Line);
                         writer.Write(symbol.Column);
@@ -126,6 +147,7 @@ internal sealed class SourceAnalysisCache
                 }
             }
 
+            cancellationToken.ThrowIfCancellationRequested();
             if (File.Exists(path))
             {
                 File.Replace(temporaryPath, path, null);
@@ -134,6 +156,7 @@ internal sealed class SourceAnalysisCache
             {
                 File.Move(temporaryPath, path);
             }
+            NeedsUpgrade = false;
         }
         catch (Exception exception) when (
             exception is IOException || exception is UnauthorizedAccessException || exception is SecurityException)

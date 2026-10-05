@@ -263,6 +263,10 @@ public static class FuzzyFileSearch
         var qualityComparison = right.NameMatchQuality.CompareTo(left.NameMatchQuality);
         if (qualityComparison != 0) return qualityComparison;
 
+        // 같은 이름 일치 등급 안에서 코드가 문서·설정·에셋보다 먼저 표시됩니다.
+        var codeComparison = CodeFilePriority.IsCode(right.Path).CompareTo(CodeFilePriority.IsCode(left.Path));
+        if (codeComparison != 0) return codeComparison;
+
         var scoreComparison = right.Score.CompareTo(left.Score);
         if (scoreComparison != 0)
         {

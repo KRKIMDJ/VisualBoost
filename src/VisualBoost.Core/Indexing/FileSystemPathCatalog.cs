@@ -15,7 +15,9 @@ public static class FileSystemPathCatalog
 
     public static IReadOnlyList<string> GetFiles(
         IEnumerable<string> searchRoots,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default,
+        Func<string, bool>? includeFile = null,
+        Action<string>? onFile = null)
     {
         if (searchRoots is null)
         {
@@ -42,7 +44,11 @@ public static class FileSystemPathCatalog
                 foreach (var file in Directory.EnumerateFiles(directory))
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    results.Add(file);
+                    if (includeFile is null || includeFile(file))
+                    {
+                        results.Add(file);
+                        onFile?.Invoke(file);
+                    }
                 }
 
                 foreach (var childDirectory in Directory.EnumerateDirectories(directory))

@@ -16,11 +16,9 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.24.2")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.32.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
-[ProvideToolWindow(typeof(UI.SymbolUsagesToolWindow), Style = VsDockStyle.Tabbed,
-    Window = EnvDTE.Constants.vsWindowKindOutput, DockedHeight = 320)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideProfile(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
 [ProvideOptionPage(typeof(FileSearchOptionsPage), "VisualBoost", "파일 탐색", 0, 0, true)]
@@ -45,6 +43,9 @@ public sealed class VisualBoostPackage : AsyncPackage
     private readonly SolutionFileIndexService fileIndex = new();
     private SolutionEvents? solutionEvents;
     private DocumentEvents? documentEvents;
+    private ProjectItemsEvents? projectItemsEvents;
+    private CancellationTokenSource? discoveryCancellation;
+    private AnalysisStatusBar? analysisStatus;
 
     protected override async Task InitializeAsync(
         CancellationToken cancellationToken,
@@ -62,6 +63,10 @@ public sealed class VisualBoostPackage : AsyncPackage
         solutionEvents.ProjectRenamed += OnProjectRenamed;
         documentEvents = dte.Events.DocumentEvents;
         documentEvents.DocumentOpened += OnDocumentOpened;
+        projectItemsEvents = ((Events2)dte.Events).ProjectItemsEvents;
+        projectItemsEvents.ItemAdded += OnProjectItemChanged;
+        projectItemsEvents.ItemRemoved += OnProjectItemChanged;
+        projectItemsEvents.ItemRenamed += OnProjectItemRenamed;
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         MigrateLegacyOptions();
@@ -71,6 +76,9 @@ public sealed class VisualBoostPackage : AsyncPackage
         Assumes.Present(components);
         Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
         Coloring.ColoringSettings.Publish(((ColoringOptionsPage)GetDialogPage(typeof(ColoringOptionsPage))).CreateSettings());
+        var statusBar = await GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
+        await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar);
         StartFileIndex(dte);
         CommentLinks.CommentLinkRuntime.Enabled = ((EditorToolsOptionsPage)GetDialogPage(typeof(EditorToolsOptionsPage))).CommentLinksEnabled;
         CommentLinks.CommentLinkRuntime.Index = fileIndex;
@@ -79,8 +87,6 @@ public sealed class VisualBoostPackage : AsyncPackage
         await ShowIndexStatusCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenFileSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenSymbolSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
-        await NavigateToDefinitionCommand.InitializeAsync(this, cancellationToken);
-        await FindSymbolUsagesCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
         await GenerateFunctionCommand.InitializeAsync(this, fileIndex, cancellationToken);
     }
@@ -89,13 +95,15 @@ public sealed class VisualBoostPackage : AsyncPackage
     {
         if (disposing)
         {
+            discoveryCancellation?.Cancel();
             JoinableTaskFactory.Run(async () =>
             {
                 await JoinableTaskFactory.SwitchToMainThreadAsync();
                 UnsubscribeSolutionEvents();
+                analysisStatus?.Dispose();
+                analysisStatus = null;
                 Completion.CompletionRuntime.GetSnapshot = null;
                 CommentLinks.CommentLinkRuntime.Index = null;
-                ResetUsageSearch();
                 Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
                 Coloring.SharedColorPalette.Detach();
             });
@@ -124,6 +132,12 @@ public sealed class VisualBoostPackage : AsyncPackage
         {
             documentEvents.DocumentOpened -= OnDocumentOpened;
         }
+        if (projectItemsEvents is not null)
+        {
+            projectItemsEvents.ItemAdded -= OnProjectItemChanged;
+            projectItemsEvents.ItemRemoved -= OnProjectItemChanged;
+            projectItemsEvents.ItemRenamed -= OnProjectItemRenamed;
+        }
     }
 
     internal bool IsQuickIncludeEnabled() => ((EditorToolsOptionsPage)GetDialogPage(typeof(EditorToolsOptionsPage))).QuickIncludeEnabled;
@@ -151,16 +165,9 @@ public sealed class VisualBoostPackage : AsyncPackage
     private void OnSolutionClosed()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        discoveryCancellation?.Cancel();
         Completion.CompletionRuntime.GetSnapshot = null;
-        ResetUsageSearch();
         fileIndex.Clear();
-    }
-
-    private void ResetUsageSearch()
-    {
-        ThreadHelper.ThrowIfNotOnUIThread();
-        if (FindToolWindow(typeof(UI.SymbolUsagesToolWindow), 0, create: false) is UI.SymbolUsagesToolWindow window)
-            window.View.ResetSearch();
     }
 
     private void OnProjectChanged(Project project)
@@ -190,7 +197,45 @@ public sealed class VisualBoostPackage : AsyncPackage
         ThreadHelper.ThrowIfNotOnUIThread();
         Completion.CompletionRuntime.GetSnapshot = () => fileIndex.CompletionSnapshot;
         fileIndex.Configure(GetIndexingOptions().CreateConfiguration());
-        fileIndex.Start(SolutionSearchRootCollector.Collect(dte));
+        discoveryCancellation?.Cancel();
+        var cancellation = new CancellationTokenSource();
+        discoveryCancellation = cancellation;
+        fileIndex.BeginDiscovery(dte.Solution.FullName ?? string.Empty);
+        JoinableTaskFactory.RunAsync(async () =>
+        {
+            try
+            {
+                // 프로젝트 일괄 추가 이벤트는 한 번의 스냅샷 수집으로 합칩니다.
+                await Task.Delay(200, cancellation.Token);
+                await JoinableTaskFactory.SwitchToMainThreadAsync(cancellation.Token);
+                var discovery = await SolutionSearchRootCollector.CollectAsync(dte, cancellation.Token,
+                    files => fileIndex.PublishDiscoveredFiles(files, cancellation.Token));
+                cancellation.Token.ThrowIfCancellationRequested();
+                fileIndex.Start(discovery);
+            }
+            catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
+            catch (Exception exception)
+            {
+                fileIndex.FailDiscovery(exception.Message, cancellation.Token);
+            }
+            finally
+            {
+                await JoinableTaskFactory.SwitchToMainThreadAsync();
+                if (ReferenceEquals(discoveryCancellation, cancellation)) discoveryCancellation = null;
+                cancellation.Dispose();
+            }
+        }).FileAndForget("VisualBoost/CollectProjectFiles");
+    }
+
+    private void OnProjectItemChanged(ProjectItem item)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        RefreshFileIndexRoots();
+    }
+    private void OnProjectItemRenamed(ProjectItem item, string oldName)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        RefreshFileIndexRoots();
     }
 
     internal GeneralOptionsPage GetGeneralOptions()

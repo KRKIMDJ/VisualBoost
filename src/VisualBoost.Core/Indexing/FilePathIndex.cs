@@ -31,7 +31,7 @@ public sealed class FilePathIndex : IDisposable
         }
     }
 
-    public void ReplaceAll(IEnumerable<string> paths)
+    public void ReplaceAll(IEnumerable<string> paths, CancellationToken cancellationToken = default)
     {
         if (paths is null)
         {
@@ -43,6 +43,7 @@ public sealed class FilePathIndex : IDisposable
 
         foreach (var path in paths)
         {
+            cancellationToken.ThrowIfCancellationRequested();
             if (!TryNormalize(path, out var normalizedPath) || !replacementPaths.Add(normalizedPath))
             {
                 continue;
@@ -54,6 +55,7 @@ public sealed class FilePathIndex : IDisposable
         gate.EnterWriteLock();
         try
         {
+            cancellationToken.ThrowIfCancellationRequested();
             allPaths = replacementPaths;
             pathsByStem = replacementMap;
             searchSnapshot = replacementPaths.ToArray();

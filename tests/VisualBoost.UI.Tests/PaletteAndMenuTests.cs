@@ -44,8 +44,7 @@ internal static class PaletteAndMenuTests
             Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
         }
         var expected = new[] { "GenerateFunctionCommand|GUID_TextEditorFactory|Shift Alt|Q", "OpenDocumentMembersCommand|GUID_TextEditorFactory|ALT|M", "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
-            "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S", "FindSymbolUsagesCommand|GUID_TextEditorFactory|Shift Alt|F",
-            "NavigateToDefinitionCommand|GUID_TextEditorFactory|ALT|G" };
+            "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S" };
         var actual = xml.Root.Element(ns + "KeyBindings")!.Elements(ns + "KeyBinding").Select(k =>
             string.Join("|", new[] { "id", "editor", "mod1", "key1" }.Select(name => (string?)k.Attribute(name))));
         Assert(actual.SequenceEqual(expected), "기존 단축키와 적용 범위 유지");
@@ -56,21 +55,13 @@ internal static class PaletteAndMenuTests
         Assert(navigationView.Descendants().Any(node => (string?)node.Attribute(x + "Name") == "Search"), "상단 줄과 별개로 숨김 모드 검색란 유지");
         var navigationOptions = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Options", "DocumentNavigationOptionsPage.cs"));
         Assert(navigationOptions.Contains("ShowBar") && navigationOptions.Contains("NameOrder"), "상단 줄 표시·정렬 설정 유지");
-        var codeSearch = commands.Element(ns + "Buttons")!.Elements(ns + "Button")
-            .Single(button => (string?)button.Attribute("id") == "FindSymbolUsagesCommand");
-        Assert((string?)codeSearch.Element(ns + "Strings")!.Element(ns + "ButtonText") == "코드 검색", "코드 검색 메뉴 표시 이름");
-        var view = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesControl.xaml"));
-        XNamespace wpf = "http://schemas.microsoft.com/winfx/2006/xaml/presentation";
-        Assert(view.Descendants(wpf + "TextBlock").Any(block => (string?)block.Attribute("Text") == "심볼:"), "코드 검색 상단 심볼 라벨");
-        var pane = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "UI", "SymbolUsagesToolWindow.cs"));
-        Assert(pane.Contains("Caption = \"VisualBoost 코드 검색\""), "코드 검색 도킹 창 제목");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 9, "내부 메뉴 항목과 별개로 사용자 명령 아홉 개 유지");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 7, "미구현 명령을 제외한 사용자 명령 일곱 개 유지");
         var placement = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement").Single();
         Assert((string?)placement.Attribute("id") == "GenerateFunctionCommand" && (string?)placement.Element(ns + "Parent")!.Attribute("id") == "VisualBoostGenerationContextGroup", "코드 편집기 메뉴가 같은 생성 명령을 재사용");
         var generationCommand = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "GenerateFunctionCommand.cs"));
         Assert(!generationCommand.Contains("ShowModal") && !generationCommand.Contains("ShowMessageBox") && generationCommand.Contains("paths[0]") && generationCommand.Contains("SystemSounds.Beep.Play"), "파일 선택·미리보기·이동 질문 제거, 1순위 자동 대상과 알림음");
         var package = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoostPackage.cs"));
-        Assert(package.Contains("ProvideToolWindow") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"), "이름 검색 창만 등록하고 정밀 옵션·인덱스는 제외");
+        Assert(!package.Contains("ProvideToolWindow") && !package.Contains("PrecisionSearchOptionsPage") && !package.Contains("SemanticIndex"), "폐기한 검색 창과 정밀 옵션·인덱스 등록 제외");
         var project = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "VisualBoost.Package.csproj"));
         Assert(!project.Contains("Clang") && !project.Contains("CodeAnalysis") && !project.Contains("LanguageServices"), "정밀 분석기 직접 의존성 재도입 방지");
         Console.WriteLine("PASS: 색상 선택·취소·기존 설정·견본 및 도구 하위 메뉴·단축키 검증");

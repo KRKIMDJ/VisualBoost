@@ -4,7 +4,7 @@ using VisualBoost.Core.Analysis;
 
 internal static class Program
 {
-    private static int Main()
+    private static int Main(string[] args)
     {
         try
         {
@@ -14,9 +14,13 @@ internal static class Program
             Check(SearchPath.TryNormalize(@"\\server\share\소스 코드\Main.cpp", out _), "UNC 및 한글·공백 경로 보존");
             foreach (var invalid in new[] { "", "C:relative.cpp", "metadata://assembly/Type.cs", "vsls://session/Main.cpp", "C:\\bad\"file.cpp", "C:\\bad:file.cpp", "\\only-root.cpp", "\\\\server" })
                 Check(!SearchPath.TryNormalize(invalid, out _), "비파일·불완전 경로 제외: " + invalid);
-            NameUsageProviderTests.Run();
             SymbolCacheTests.Run();
             SourceAnalysisRegressionTests.Run();
+            AnalysisProgressTests.Run();
+            RestartCacheTests.Run();
+            ProjectScopeTests.Run();
+            ProgressiveIndexTests.Run();
+            SymbolScopeTests.Run();
             Console.WriteLine("모든 .NET Framework 경로·이름 검색 회귀 테스트가 통과했습니다.");
             return 0;
         }

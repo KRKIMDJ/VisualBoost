@@ -16,9 +16,9 @@ internal sealed class FileIndexCache
 
     private readonly string cacheDirectory;
 
-    public FileIndexCache()
+    public FileIndexCache(string? directory = null)
     {
-        cacheDirectory = Path.Combine(
+        cacheDirectory = directory ?? Path.Combine(
             Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
             "VisualBoost",
             "Cache",

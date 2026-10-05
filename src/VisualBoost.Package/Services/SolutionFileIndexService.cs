@@ -16,8 +16,13 @@ internal sealed class SolutionFileIndexService : IDisposable
 {
     private readonly object gate = new();
     private readonly FilePathIndex index = new();
-    private readonly FileIndexCache cache = new();
+    private readonly FileIndexCache cache;
     private readonly SolutionSourceAnalyzer sourceAnalyzer;
+    private readonly SemaphoreSlim workerGate = new(1, 1);
+    private Timer? refreshTimer;
+    private int refreshEpoch;
+    private Task outstandingWork = Task.CompletedTask;
+    private long generation;
     private CancellationTokenSource rebuildCancellation = new();
     private IReadOnlyList<string> roots = Array.Empty<string>();
     private IReadOnlyList<string> explicitFiles = Array.Empty<string>();
@@ -32,18 +37,100 @@ internal sealed class SolutionFileIndexService : IDisposable
     private string? lastError;
     private bool isAnalyzing;
     private string? analysisError;
+    private SourceAnalysisProgress? analysisProgress;
     private readonly LinkedList<string> recentFiles = new();
     private readonly HashSet<string> recentFileSet = new(StringComparer.OrdinalIgnoreCase);
     private SolutionFileIndexConfiguration configuration = SolutionFileIndexConfiguration.Default;
     private bool disposed;
+    private IReadOnlyList<SymbolSearchScope> symbolScopes = new[] { SymbolSearchScope.All };
+    public IReadOnlyList<SymbolSearchScope> SymbolScopes { get { lock (gate) return symbolScopes; } }
 
-    internal SolutionFileIndexService(SolutionSourceAnalyzer? sourceAnalyzer = null)
+    internal SolutionFileIndexService(SolutionSourceAnalyzer? sourceAnalyzer = null, FileIndexCache? cache = null)
     {
         this.sourceAnalyzer = sourceAnalyzer ?? new SolutionSourceAnalyzer();
+        this.cache = cache ?? new FileIndexCache();
     }
 
     public int Count => index.Count;
     public SymbolCompletionSnapshot CompletionSnapshot => sourceAnalyzer.CompletionSnapshot;
+    public long Generation => Interlocked.Read(ref generation);
+    public void BeginDiscovery(string path)
+    {
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            Interlocked.Increment(ref generation);
+            CancelBuildNoLock();
+            rebuildCancellation = new CancellationTokenSource();
+            DisposeWatchersNoLock();
+            refreshTimer?.Dispose();
+            refreshTimer = null;
+            refreshEpoch++;
+            requestedRoots = Array.Empty<string>();
+            requestedFiles = Array.Empty<string>();
+            roots = Array.Empty<string>();
+            explicitFiles = Array.Empty<string>();
+            solutionPath = path;
+            symbolScopes = new[] { SymbolSearchScope.All };
+            index.Clear();
+            sourceAnalyzer.Clear();
+            state = SolutionFileIndexState.Building;
+            analysisProgress = null;
+            lastError = analysisError = null;
+            isAnalyzing = configuration.EnableSourceAnalysis;
+            if (configuration.EnableSourceAnalysis)
+            {
+                var token = rebuildCancellation.Token;
+                var restore = Task.Run(async () =>
+                {
+                    var entered = false;
+                    try
+                    {
+                        await workerGate.WaitAsync(token).ConfigureAwait(false); entered = true;
+                        sourceAnalyzer.PrepareCachedDiscovery(path, token);
+                        sourceAnalyzer.PublishCachedDiscovery(path, index.GetPathsSnapshot(), token);
+                    }
+                    catch (OperationCanceledException) when (token.IsCancellationRequested) { }
+                    catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException)
+                    {
+                        lock (gate) if (!disposed && !token.IsCancellationRequested) analysisError = exception.Message;
+                    }
+                    finally { if (entered) workerGate.Release(); }
+                }, token);
+                outstandingWork = Task.WhenAll(outstandingWork, restore);
+            }
+        }
+    }
+
+    public void PublishDiscoveredFiles(IReadOnlyList<string> files, CancellationToken token)
+    {
+        // 디스크 확인은 호출자가 백그라운드에서 수행하며, 수집 취소와 공개를 같은 잠금으로 보호합니다.
+        var existing = files.Where(File.Exists).ToArray();
+        string currentSolution;
+        CancellationToken discoveryToken;
+        lock (gate)
+        {
+            if (disposed || token.IsCancellationRequested) return;
+            foreach (var file in existing) index.Add(file);
+            currentSolution = solutionPath;
+            discoveryToken = rebuildCancellation.Token;
+        }
+        // 다른 Solution 또는 본 분석으로 전환된 뒤 이전 수집 결과를 덧붙이지 않습니다.
+        using var publication = CancellationTokenSource.CreateLinkedTokenSource(token, discoveryToken);
+        sourceAnalyzer.PublishCachedDiscovery(currentSolution, existing, publication.Token);
+    }
+
+    public void FailDiscovery(string message, CancellationToken token)
+    {
+        lock (gate)
+        {
+            if (disposed || token.IsCancellationRequested) return;
+            state = SolutionFileIndexState.Faulted;
+            lastError = message;
+            isAnalyzing = false;
+            analysisProgress = null;
+        }
+    }
 
     public void Configure(SolutionFileIndexConfiguration value)
     {
@@ -59,7 +146,7 @@ internal sealed class SolutionFileIndexService : IDisposable
         }
     }
 
-    public void Start(SolutionIndexDiscoveryResult discovery)
+    public void Start(SolutionIndexDiscoveryResult discovery, bool force = false)
     {
         if (discovery is null)
         {
@@ -80,16 +167,27 @@ internal sealed class SolutionFileIndexService : IDisposable
         lock (gate)
         {
             ThrowIfDisposed();
-            if (requestedRoots.SequenceEqual(candidateRoots, StringComparer.OrdinalIgnoreCase) &&
+            if (!force && string.Equals(solutionPath, discovery.SolutionPath, StringComparison.OrdinalIgnoreCase) &&
+                requestedRoots.SequenceEqual(candidateRoots, StringComparer.OrdinalIgnoreCase) &&
                 requestedFiles.SequenceEqual(candidateFiles, StringComparer.OrdinalIgnoreCase) &&
-                state != SolutionFileIndexState.Faulted)
+                state == SolutionFileIndexState.Ready)
             {
+                if (discovery.SymbolScopes is not null) symbolScopes = discovery.SymbolScopes;
                 return;
             }
 
             requestedRoots = candidateRoots;
+            Interlocked.Increment(ref generation);
             requestedFiles = candidateFiles;
+            if (!string.Equals(solutionPath, discovery.SolutionPath, StringComparison.OrdinalIgnoreCase))
+            {
+                index.Clear();
+                sourceAnalyzer.Clear();
+                symbolScopes = new[] { SymbolSearchScope.All };
+            }
+            if (discovery.SymbolScopes is not null) symbolScopes = discovery.SymbolScopes;
             solutionPath = discovery.SolutionPath;
+            analysisProgress = null;
             CancelBuildNoLock();
             rebuildCancellation = new CancellationTokenSource();
             var cancellationToken = rebuildCancellation.Token;
@@ -97,13 +195,14 @@ internal sealed class SolutionFileIndexService : IDisposable
                 ? SolutionFileIndexState.Empty
                 : SolutionFileIndexState.Building;
             lastError = null;
-            activeBuild = Task.Run(
-                () => BuildIndex(
-                    discovery.SolutionPath,
-                    candidateRoots,
-                    candidateFiles,
-                    cancellationToken),
-                cancellationToken);
+            DisposeWatchersNoLock();
+            activeBuild = Task.Run(async () =>
+            {
+                await workerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+                try { BuildIndex(discovery.SolutionPath, candidateRoots, candidateFiles, cancellationToken); }
+                finally { workerGate.Release(); }
+            }, cancellationToken);
+            outstandingWork = Task.WhenAll(outstandingWork, activeBuild);
         }
     }
 
@@ -121,7 +220,8 @@ internal sealed class SolutionFileIndexService : IDisposable
                 sourceAnalyzer.IncludeEdgeCount,
                 lastBuildDuration,
                 lastError,
-                analysisError);
+                analysisError,
+                analysisProgress);
         }
     }
 
@@ -179,6 +279,21 @@ internal sealed class SolutionFileIndexService : IDisposable
         ISet<string>? openFiles,
         CancellationToken cancellationToken)
     {
+        var code = GetSuggestionsOfType(maximumResults, preferredRoot, solutionRoot, scope, openFiles, cancellationToken, true);
+        if (code.Count >= maximumResults) return code;
+        return code.Concat(GetSuggestionsOfType(maximumResults - code.Count, preferredRoot, solutionRoot,
+            scope, openFiles, cancellationToken, false)).ToArray();
+    }
+
+    private IReadOnlyList<FileSearchMatch> GetSuggestionsOfType(
+        int maximumResults,
+        string? preferredRoot,
+        string? solutionRoot,
+        FileSearchScope scope,
+        ISet<string>? openFiles,
+        CancellationToken cancellationToken,
+        bool code)
+    {
         if (maximumResults <= 0)
         {
             return Array.Empty<FileSearchMatch>();
@@ -191,7 +306,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             recentPaths = recentFiles.ToArray();
         }
 
-        var paths = index.GetPathsSnapshot();
+        var paths = index.GetPathsSnapshot().Where(path => CodeFilePriority.IsCode(path) == code).ToArray();
         var availablePaths = new HashSet<string>(paths, StringComparer.OrdinalIgnoreCase);
         var selectedPaths = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         var suggestions = new List<FileSearchMatch>(maximumResults);
@@ -290,6 +405,8 @@ internal sealed class SolutionFileIndexService : IDisposable
 
     private static int CompareSuggestions(string first, string second, string? preferredRoot)
     {
+        var codeComparison = CodeFilePriority.IsCode(second).CompareTo(CodeFilePriority.IsCode(first));
+        if (codeComparison != 0) return codeComparison;
         var firstIsPreferred = FileSearchScopeFilter.IsInside(first, preferredRoot);
         var secondIsPreferred = FileSearchScopeFilter.IsInside(second, preferredRoot);
         if (firstIsPreferred != secondIsPreferred)
@@ -395,8 +512,9 @@ internal sealed class SolutionFileIndexService : IDisposable
     public IReadOnlyList<SourceSymbolMatch> SearchSymbols(
         string query,
         int maximumResults,
-        CancellationToken cancellationToken) =>
-        sourceAnalyzer.SearchSymbols(query, maximumResults, cancellationToken);
+        CancellationToken cancellationToken, SymbolSearchScope? scope = null) =>
+        sourceAnalyzer.SearchSymbols(query, maximumResults, cancellationToken,
+            scope is null || ReferenceEquals(scope, SymbolSearchScope.All) ? null : scope.Includes);
 
     public async Task WaitUntilAnalysisReadyAsync()
     {
@@ -443,8 +561,13 @@ internal sealed class SolutionFileIndexService : IDisposable
             requestedRoots = Array.Empty<string>();
             requestedFiles = Array.Empty<string>();
             solutionPath = string.Empty;
+            symbolScopes = new[] { SymbolSearchScope.All };
+            Interlocked.Increment(ref generation);
             CancelBuildNoLock();
             rebuildCancellation = new CancellationTokenSource();
+            refreshTimer?.Dispose();
+            refreshTimer = null;
+            refreshEpoch++;
             DisposeWatchersNoLock();
             index.Clear();
             sourceAnalyzer.Clear();
@@ -455,6 +578,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             lastError = null;
             isAnalyzing = false;
             analysisError = null;
+            analysisProgress = null;
         }
     }
 
@@ -471,8 +595,10 @@ internal sealed class SolutionFileIndexService : IDisposable
 
             disposed = true;
             CancelBuildNoLock();
+            refreshTimer?.Dispose();
+            refreshEpoch++;
             DisposeWatchersNoLock();
-            build = activeBuild;
+            build = outstandingWork;
             analysis = activeAnalysis;
         }
 
@@ -502,11 +628,7 @@ internal sealed class SolutionFileIndexService : IDisposable
 
         try
         {
-            var solutionDirectory = Path.GetDirectoryName(currentSolutionPath);
-            var engineRoots = UnrealEngineSourceLocator.Find(
-                solutionDirectory,
-                searchRoots.Concat(projectFiles));
-            var initialRoots = NormalizeRoots(searchRoots.Concat(engineRoots));
+            var effectiveRoots = NormalizeRoots(searchRoots);
             var effectiveProjectFiles = projectFiles
                 .Where(File.Exists)
                 .Select(Path.GetFullPath)
@@ -515,25 +637,44 @@ internal sealed class SolutionFileIndexService : IDisposable
             var cachedFiles = currentConfiguration.UsePersistentFileCache
                 ? cache.Load(currentSolutionPath)
                 : Array.Empty<string>();
-            if (cachedFiles.Count > 0)
+            var explicitSet = new HashSet<string>(effectiveProjectFiles, StringComparer.OrdinalIgnoreCase);
+            bool IsInScope(string path) => explicitSet.Contains(path) ||
+                (ProjectSourceScope.IsSupplementalCode(path) && effectiveRoots.Any(root => IsInside(path, root)));
+            // 디스크 검증과 큰 검색 맵 구축 중에는 UI 상태 조회 잠금을 점유하지 않습니다.
+            index.ReplaceAll(cachedFiles.Where(IsInScope).Where(File.Exists).Concat(effectiveProjectFiles), cancellationToken);
+            if (currentConfiguration.EnableSourceAnalysis)
             {
-                index.ReplaceAll(cachedFiles.Concat(effectiveProjectFiles));
+                // 보충 파일 순회를 마치기 전 등록 범위의 저장된 심볼을 먼저 검색 가능하게 합니다.
+                sourceAnalyzer.LoadCachedSymbols(currentSolutionPath, cancellationToken, index.GetPathsSnapshot());
+            }
+            lock (gate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                roots = effectiveRoots;
+                explicitFiles = effectiveProjectFiles;
+                // 순회 중 추가·삭제된 파일도 놓치지 않게 먼저 감시를 시작합니다.
+                ReplaceWatchersNoLock(effectiveRoots);
             }
 
-            var initialFiles = SolutionFileCatalog.GetFiles(initialRoots, cancellationToken);
-            var includeRoots = CppProjectSearchRootLocator.Find(solutionDirectory, initialFiles);
-            var effectiveRoots = NormalizeRoots(initialRoots.Concat(includeRoots));
-            var additionalRoots = effectiveRoots.Where(candidate =>
-                !initialRoots.Any(root =>
-                    string.Equals(candidate, root, StringComparison.OrdinalIgnoreCase) ||
-                    IsInside(candidate, root)));
-            var files = initialFiles
-                .Concat(SolutionFileCatalog.GetFiles(additionalRoots, cancellationToken))
-                .Concat(effectiveProjectFiles)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
+            FileSystemPathCatalog.GetFiles(effectiveRoots, cancellationToken, ProjectSourceScope.IsSupplementalCode,
+                file =>
+                {
+                    lock (gate)
+                    {
+                        cancellationToken.ThrowIfCancellationRequested();
+                        index.Add(file);
+                    }
+                });
             cancellationToken.ThrowIfCancellationRequested();
-            index.ReplaceAll(files);
+            var files = index.GetPathsSnapshot().Where(File.Exists).ToArray();
+            // 감시 이벤트보다 늦게 열거된 삭제 파일을 정리하되, 순회 이후 생성된 파일은 보존합니다.
+            var surviving = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
+            var vanished = index.GetPathsSnapshot().Where(path => !surviving.Contains(path) && !File.Exists(path)).ToArray();
+            lock (gate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var path in vanished) index.Remove(path);
+            }
             stopwatch.Stop();
 
             lock (gate)
@@ -547,7 +688,6 @@ internal sealed class SolutionFileIndexService : IDisposable
                         ? SolutionFileIndexState.Empty
                         : SolutionFileIndexState.Ready;
                     lastError = null;
-                    ReplaceWatchersNoLock(effectiveRoots);
                     isAnalyzing = currentConfiguration.EnableSourceAnalysis;
                     analysisError = null;
                     activeAnalysis = currentConfiguration.EnableSourceAnalysis
@@ -560,6 +700,7 @@ internal sealed class SolutionFileIndexService : IDisposable
                                     cancellationToken),
                             cancellationToken)
                         : Task.CompletedTask;
+                    outstandingWork = Task.WhenAll(outstandingWork, activeAnalysis);
                 }
             }
 
@@ -595,27 +736,28 @@ internal sealed class SolutionFileIndexService : IDisposable
         TimeSpan delay,
         CancellationToken cancellationToken)
     {
+        var entered = false;
         try
         {
-            // 캐시 로딩과 시작 대기도 같은 오류 경계에 포함해 분석 중 표시가 남지 않게 합니다.
-            sourceAnalyzer.LoadCachedSymbols(currentSolutionPath, cancellationToken);
+            await workerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            entered = true;
+            // BuildIndex에서 이미 캐시를 공개했습니다. 같은 큰 심볼 검색 인덱스를 다시 만들지 않습니다.
+            // 캐시 갱신과 대기 중 오류도 이 경계에서 처리합니다.
+            ReportProgress(new SourceAnalysisProgress(SourceAnalysisStage.Waiting, 0, 0));
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
-            var externalFiles = sourceAnalyzer.Analyze(
+            sourceAnalyzer.Analyze(
                 currentSolutionPath,
                 files,
                 includeRoots,
-                cancellationToken);
-            foreach (var file in externalFiles)
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                index.Add(file);
-            }
+                cancellationToken,
+                ReportProgress);
 
             lock (gate)
             {
                 if (!disposed && !cancellationToken.IsCancellationRequested)
                 {
                     isAnalyzing = false;
+                    analysisProgress = null;
                     analysisError = sourceAnalyzer.LastWarning;
                 }
             }
@@ -630,9 +772,17 @@ internal sealed class SolutionFileIndexService : IDisposable
                 if (!disposed && !cancellationToken.IsCancellationRequested)
                 {
                     isAnalyzing = false;
+                    analysisProgress = null;
                     analysisError = exception.Message;
                 }
             }
+        }
+        finally { if (entered) workerGate.Release(); }
+
+        void ReportProgress(SourceAnalysisProgress value)
+        {
+            lock (gate)
+                if (!disposed && !cancellationToken.IsCancellationRequested) analysisProgress = value;
         }
     }
 
@@ -648,10 +798,11 @@ internal sealed class SolutionFileIndexService : IDisposable
                 var watcher = new FileSystemWatcher(root)
                 {
                     IncludeSubdirectories = true,
-                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName,
+                    NotifyFilter = NotifyFilters.FileName | NotifyFilters.DirectoryName | NotifyFilters.LastWrite | NotifyFilters.Size,
                     EnableRaisingEvents = false,
                 };
                 watcher.Created += OnCreated;
+                watcher.Changed += OnCreated;
                 watcher.Deleted += OnDeleted;
                 watcher.Renamed += OnRenamed;
                 watcher.Error += OnWatcherError;
@@ -669,39 +820,76 @@ internal sealed class SolutionFileIndexService : IDisposable
 
     private void OnCreated(object sender, FileSystemEventArgs eventArgs)
     {
-        if (File.Exists(eventArgs.FullPath) && !SolutionFileCatalog.IsExcludedPath(eventArgs.FullPath))
+        // 네트워크·잠긴 경로의 디스크 조회가 UI 상태 조회 잠금을 붙잡지 않게 합니다.
+        var fileExists = File.Exists(eventArgs.FullPath);
+        var directoryExists = !fileExists && Directory.Exists(eventArgs.FullPath);
+        lock (gate)
         {
-            index.Add(eventArgs.FullPath);
+            if (disposed || !watchers.Contains(sender)) return;
+            if (fileExists && (explicitFiles.Contains(eventArgs.FullPath, StringComparer.OrdinalIgnoreCase) ||
+                ProjectSourceScope.IsSupplementalCode(eventArgs.FullPath)))
+            {
+                index.Add(eventArgs.FullPath);
+                ScheduleRefreshNoLock();
+            }
+            else if (directoryExists && !SolutionFileCatalog.IsExcludedPath(eventArgs.FullPath))
+                ScheduleRefreshNoLock();
         }
     }
 
-    private void OnDeleted(object sender, FileSystemEventArgs eventArgs) => index.Remove(eventArgs.FullPath);
+    private void OnDeleted(object sender, FileSystemEventArgs eventArgs)
+    {
+        lock (gate)
+        {
+            if (disposed || !watchers.Contains(sender)) return;
+            var removed = index.GetPathsSnapshot().Where(path =>
+                string.Equals(path, eventArgs.FullPath, StringComparison.OrdinalIgnoreCase) || IsInside(path, eventArgs.FullPath)).ToArray();
+            foreach (var path in removed)
+                index.Remove(path);
+            if (removed.Length > 0)
+            {
+                ScheduleRefreshNoLock();
+            }
+        }
+    }
 
     private void OnRenamed(object sender, RenamedEventArgs eventArgs)
     {
-        index.Remove(eventArgs.OldFullPath);
+        OnDeleted(sender, new FileSystemEventArgs(WatcherChangeTypes.Deleted,
+            Path.GetDirectoryName(eventArgs.OldFullPath)!, Path.GetFileName(eventArgs.OldFullPath)));
         OnCreated(sender, eventArgs);
     }
 
     private void OnWatcherError(object sender, ErrorEventArgs eventArgs)
     {
-        IReadOnlyList<string> currentRoots;
-        IReadOnlyList<string> currentFiles;
-        string currentSolutionPath;
         lock (gate)
         {
-            if (disposed)
+            if (disposed || !watchers.Contains(sender))
             {
                 return;
             }
 
-            currentRoots = roots;
-            currentFiles = explicitFiles;
-            currentSolutionPath = solutionPath;
-            requestedRoots = Array.Empty<string>();
+            // 검증과 재시작 사이에 솔루션이 바뀌어 이전 루트가 되살아나는 경합을 막습니다.
+            Start(new SolutionIndexDiscoveryResult(solutionPath, requestedRoots, requestedFiles), force: true);
         }
+    }
 
-        Start(new SolutionIndexDiscoveryResult(currentSolutionPath, currentRoots, currentFiles));
+    private void ScheduleRefreshNoLock()
+    {
+        if (refreshTimer is null)
+        {
+            var epoch = ++refreshEpoch;
+            refreshTimer = new Timer(_ =>
+            {
+                lock (gate)
+                {
+                    if (disposed || epoch != refreshEpoch || state == SolutionFileIndexState.Empty) return;
+                    Start(new SolutionIndexDiscoveryResult(solutionPath, requestedRoots, requestedFiles), force: true);
+                }
+            }, null, Timeout.Infinite, Timeout.Infinite);
+        }
+        // 저장·생성 시 연속으로 발생하는 알림을 한 번의 캐시 검증으로 합칩니다.
+        refreshTimer.Change(750, Timeout.Infinite);
     }
 
     private void CancelBuildNoLock()

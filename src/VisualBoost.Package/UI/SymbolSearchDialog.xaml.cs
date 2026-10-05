@@ -12,6 +12,7 @@ using System.Windows.Threading;
 using Microsoft.VisualStudio.PlatformUI;
 using VisualBoost.Core.Analysis;
 using VisualBoost.Core.Searching;
+using VisualBoost.Core.Indexing;
 using VisualBoost.Services;
 
 namespace VisualBoost.UI;
@@ -27,6 +28,8 @@ public partial class SymbolSearchDialog : DialogWindow
     private int observedSymbolCount = -1;
     private bool observedIsAnalyzing;
     private string? observedAnalysisError;
+    private IReadOnlyList<SymbolSearchScope>? observedScopes;
+    private bool updatingScopes;
 
     internal SymbolSearchDialog(
         SolutionFileIndexService fileIndex,
@@ -35,6 +38,7 @@ public partial class SymbolSearchDialog : DialogWindow
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
         this.projects = projects ?? throw new ArgumentNullException(nameof(projects));
         InitializeComponent();
+        UpdateScopes();
         statusTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(500),
@@ -45,6 +49,31 @@ public partial class SymbolSearchDialog : DialogWindow
     }
 
     public SourceSymbolLocation? SelectedLocation { get; private set; }
+
+    private SymbolSearchScope SelectedScope => ScopeSelector.SelectedItem as SymbolSearchScope ?? SymbolSearchScope.All;
+
+    private bool UpdateScopes()
+    {
+        var scopes = fileIndex.SymbolScopes;
+        if (ReferenceEquals(scopes, observedScopes)) return false;
+        var selectedId = SelectedScope.Id;
+        observedScopes = scopes;
+        updatingScopes = true;
+        try
+        {
+            ScopeSelector.ItemsSource = scopes;
+            ScopeSelector.SelectedItem = scopes.FirstOrDefault(s => s.Id == selectedId) ?? SymbolSearchScope.All;
+        }
+        finally { updatingScopes = false; }
+        return true;
+    }
+
+    [SuppressMessage("Usage", "VSTHRD100:Avoid async void methods", Justification = "WPF 이벤트이며 검색 취소와 예외를 호출 경로에서 처리합니다.")]
+    private async void OnScopeSelectionChanged(object sender, SelectionChangedEventArgs args)
+    {
+        if (!IsLoaded || isClosed || updatingScopes) return;
+        await RefreshResultsAsync(useDebounce: false);
+    }
 
     private void OnLoaded(object sender, RoutedEventArgs eventArgs)
     {
@@ -88,6 +117,7 @@ public partial class SymbolSearchDialog : DialogWindow
         previousCancellation?.Cancel();
 
         var query = SearchBox.Text;
+        var scope = SelectedScope;
         if (string.IsNullOrWhiteSpace(query))
         {
             isSearching = false;
@@ -110,10 +140,10 @@ public partial class SymbolSearchDialog : DialogWindow
             }
 
             var matches = await Task.Run(
-                () => fileIndex.SearchSymbols(query, 200, cancellationToken),
+                () => fileIndex.SearchSymbols(query, 201, cancellationToken, scope),
                 cancellationToken);
             cancellationToken.ThrowIfCancellationRequested();
-            var items = matches.Select(match => new SymbolSearchResultItem(match, projects, query)).ToArray();
+            var items = matches.Take(200).Select(match => new SymbolSearchResultItem(match, projects, query)).ToArray();
             ResultsList.ItemsSource = items;
             ResultsList.SelectedIndex = items.Length > 0 ? 0 : -1;
             EmptyStatePanel.Visibility = items.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
@@ -129,7 +159,8 @@ public partial class SymbolSearchDialog : DialogWindow
             }
 
             var currentSnapshot = fileIndex.GetSnapshot();
-            StatusText.Text = $"{items.Length:N0}개 결과 · {currentSnapshot.SymbolCount:N0}개 심볼" +
+            StatusText.Text = $"{items.Length:N0}개 표시" + (matches.Count > 200 ? " · 추가 결과 있음" : string.Empty) +
+                              $" · {scope.Name} · 전체 등록 위치 {currentSnapshot.SymbolCount:N0}개" +
                               AnalysisStatus(currentSnapshot);
             StatusText.ToolTip = currentSnapshot.AnalysisError;
         }
@@ -166,9 +197,11 @@ public partial class SymbolSearchDialog : DialogWindow
         Justification = "WPF 타이머 이벤트이며 갱신 취소와 예외를 호출 경로에서 처리합니다.")]
     private async void OnStatusTimerTick(object? sender, EventArgs eventArgs)
     {
-        if (isClosed || isSearching) return;
+        if (isClosed) return;
+        var scopeChanged = UpdateScopes();
+        if (isSearching && !scopeChanged) return;
         var snapshot = fileIndex.GetSnapshot();
-        if (snapshot.SymbolCount == observedSymbolCount && snapshot.IsAnalyzing == observedIsAnalyzing &&
+        if (!scopeChanged && snapshot.SymbolCount == observedSymbolCount && snapshot.IsAnalyzing == observedIsAnalyzing &&
             snapshot.AnalysisError == observedAnalysisError)
         {
             return;
@@ -199,7 +232,7 @@ public partial class SymbolSearchDialog : DialogWindow
             EmptyStateDescription.Text = snapshot.AnalysisError ?? "심볼 이름만 검색합니다.";
         }
 
-        StatusText.Text = $"0개 결과 · {snapshot.SymbolCount:N0}개 심볼" +
+        StatusText.Text = $"0개 표시 · {SelectedScope.Name} · 전체 등록 위치 {snapshot.SymbolCount:N0}개" +
                           AnalysisStatus(snapshot);
         StatusText.ToolTip = snapshot.AnalysisError;
     }

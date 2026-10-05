@@ -18,7 +18,7 @@ internal sealed class SymbolSearchSnapshot
                 .ThenBy(s => s.Line).ThenBy(s => s.Column).ToArray())).ToArray();
     }
 
-    public IReadOnlyList<SourceSymbolMatch> Search(string query, int limit, CancellationToken token)
+    public IReadOnlyList<SourceSymbolMatch> Search(string query, int limit, CancellationToken token, Func<string, bool>? includes = null)
     {
         token.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return Array.Empty<SourceSymbolMatch>();
@@ -36,7 +36,8 @@ internal sealed class SymbolSearchSnapshot
             foreach (var location in entry.Locations)
             {
                 token.ThrowIfCancellationRequested();
-                var candidate = new SourceSymbolMatch(location, score);
+                if (includes is not null && !includes(location.Path)) continue;
+                var candidate = new SourceSymbolMatch(location, score, FuzzySymbolSearch.ContainsAllTokens(location.Name, tokens));
                 if (matches.Count == limit && FuzzySymbolSearch.Compare(candidate, matches[matches.Count - 1]) >= 0)
                     break;
                 FuzzySymbolSearch.Insert(matches, candidate, limit);

@@ -6,6 +6,9 @@
     <UseWindowsForms>true</UseWindowsForms>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionSearchRootCollector.cs" Link="SolutionSearchRootCollector.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/UnrealEngineSourceLocator.cs" Link="UnrealEngineSourceLocator.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/SolutionIndexDiscoveryResult.cs" Link="SolutionIndexDiscoveryResult.cs" />
     <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationSession.cs" Link="DocumentNavigationSession.cs" />
     <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationSettings.cs" Link="DocumentNavigationSettings.cs" />
     <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationBar.cs" Link="DocumentNavigationBar.cs" />
@@ -22,9 +25,6 @@
     <Compile Include="../../src/VisualBoost.Package/Completion/CompletionViewListener.cs" Link="CompletionViewListener.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/SearchTextHighlight.cs" Link="SearchTextHighlight.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/FileSearchTextSegment.cs" Link="FileSearchTextSegment.cs" />
-    <Compile Include="../../src/VisualBoost.Package/Services/CppNavigationDirectionReader.cs" Link="CppNavigationDirectionReader.cs" />
-    <Compile Include="../../src/VisualBoost.Package/Services/ISymbolNavigationProvider.cs" Link="ISymbolNavigationProvider.cs" />
-    <Compile Include="../../src/VisualBoost.Package/Services/VisualStudioSymbolNavigationProvider.cs" Link="VisualStudioSymbolNavigationProvider.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/ColoringColorSource.cs" Link="ColoringColorSource.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/SemanticFormatNames.cs" Link="SemanticFormatNames.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/SharedColorPalette.cs" Link="SharedColorPalette.cs" />
@@ -33,9 +33,6 @@
     <Compile Include="../../src/VisualBoost.Package/Coloring/ColoringSettings.cs" Link="ColoringSettings.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/CppColorFormatSession.cs" Link="CppColorFormatSession.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/FittedResultsList.cs" Link="FittedResultsList.cs" />
-    <Compile Include="../../src/VisualBoost.Package/UI/SymbolUsagesControl.xaml.cs" Link="SymbolUsagesControl.xaml.cs" />
-    <Compile Include="../../src/VisualBoost.Package/Services/ISymbolUsageProvider.cs" Link="ISymbolUsageProvider.cs" />
-    <Compile Include="../../src/VisualBoost.Package/Services/SymbolUsageScope.cs" Link="SymbolUsageScope.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>

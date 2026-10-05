@@ -38,11 +38,14 @@ public static class FuzzySymbolSearch
                 continue;
             }
 
-            Insert(matches, new SourceSymbolMatch(symbol, score), maximumResults);
+            Insert(matches, new SourceSymbolMatch(symbol, score, ContainsAllTokens(symbol.Name, tokens)), maximumResults);
         }
 
         return matches;
     }
+
+    internal static bool ContainsAllTokens(string name, IReadOnlyList<string> tokens) =>
+        tokens.All(token => name.IndexOf(token, StringComparison.OrdinalIgnoreCase) >= 0);
 
     internal static int Score(SourceSymbolLocation symbol, IReadOnlyList<string> tokens)
     {
@@ -158,6 +161,8 @@ public static class FuzzySymbolSearch
 
     internal static int Compare(SourceSymbolMatch left, SourceSymbolMatch right)
     {
+        var qualityComparison = right.ContainsAllTokens.CompareTo(left.ContainsAllTokens);
+        if (qualityComparison != 0) return qualityComparison;
         var scoreComparison = right.Score.CompareTo(left.Score);
         if (scoreComparison != 0)
         {

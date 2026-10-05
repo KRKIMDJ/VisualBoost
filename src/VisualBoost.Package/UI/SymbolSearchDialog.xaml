@@ -69,6 +69,7 @@
   <Grid>
     <Grid.RowDefinitions>
       <RowDefinition Height="Auto" />
+      <RowDefinition Height="Auto" />
       <RowDefinition Height="*" />
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
@@ -101,7 +102,16 @@
       </Border>
     </Border>
 
-    <Grid Grid.Row="1">
+    <DockPanel Grid.Row="1" Margin="12,0,12,8">
+      <TextBlock Text="검색 범위" VerticalAlignment="Center" Margin="0,0,8,0" />
+      <ComboBox x:Name="ScopeSelector" Width="260" HorizontalAlignment="Left"
+                Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
+                ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
+                DisplayMemberPath="Name" SelectionChanged="OnScopeSelectionChanged"
+                ToolTip="프로젝트 범위는 등록된 파일 기준입니다. 엔진은 확인된 설치 경로 기준입니다." />
+    </DockPanel>
+
+    <Grid Grid.Row="2">
       <ui:FittedResultsList x:Name="ResultsList"
                BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
                BorderThickness="1"
@@ -184,7 +194,7 @@
       </StackPanel>
     </Grid>
 
-    <Border Grid.Row="2" Padding="8,6"
+    <Border Grid.Row="3" Padding="8,6"
             Background="{DynamicResource {x:Static vsshell:VsBrushes.CommandBarGradientKey}}"
             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
             BorderThickness="0,1,0,0">
