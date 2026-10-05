@@ -47,6 +47,9 @@ public sealed class ClangdNavigatorOptions
     /// <summary>Solution의 C++ 프로젝트와 활성 구성입니다.</summary>
     public IReadOnlyList<MsBuildProjectConfiguration> Projects { get; set; } = Array.Empty<MsBuildProjectConfiguration>();
 
+    /// <summary>폴더 열기 작업 영역의 Ninja 빌드 파일에서 명령을 뽑을 ninja입니다.</summary>
+    public string? NinjaPath { get; set; }
+
     public int MaxEngineCandidates { get; set; } = 3;
 
     public TimeSpan CandidateTimeout { get; set; } = TimeSpan.FromSeconds(45);
@@ -160,7 +163,7 @@ public sealed class ClangdNavigator : IDisposable
 
         var compiler = Path.Combine(Path.GetDirectoryName(options.ClangdPath)!, "clang-cl.exe");
         var context = await Task.Run(() => CompileContextBuilder.Prepare(options.SolutionPath, options.CacheRoot, options.EngineRoot,
-            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, options.MsBuildPath, options.Projects), cancellationToken).ConfigureAwait(false);
+            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, new CompileCommandSources { MsBuildPath = options.MsBuildPath, Projects = options.Projects, NinjaPath = options.NinjaPath }), cancellationToken).ConfigureAwait(false);
         if (!context.IsAvailable)
         {
             throw new SemanticNavigationUnavailableException(context.Reason ?? "컴파일 명령이 없습니다.");

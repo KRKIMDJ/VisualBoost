@@ -1,6 +1,5 @@
 using System;
 using System.Collections.Generic;
-using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Security;
@@ -65,7 +64,7 @@ public sealed class MsBuildCompileCommandResult
 public static class MsBuildCompileCommands
 {
     private static readonly HashSet<string> SourceExtensions = new(StringComparer.OrdinalIgnoreCase) { ".c", ".cc", ".cpp", ".cxx", ".c++" };
-    private static readonly string[] ExtraDropPrefixes = { "/clr", "/ZW", "/FU", "/AI", "/scanDependencies", "/scanModules", "/interface", "/libraryModuleName" };
+    private static readonly string[] ExtraDropPrefixes = { "/showIncludes", "/clr", "/ZW", "/FU", "/AI", "/scanDependencies", "/scanModules", "/interface", "/libraryModuleName" };
     private static readonly string[] ExtraDropWithValue = { "/ifcOutput", "/ifcSearchDir", "/reference", "/headerUnit", "/headerName:quote", "/headerName:angle" };
 
     /// <summary>VS 설치 루트의 MSBuild를 찾습니다. 64비트 MSBuild를 우선합니다.</summary>
@@ -96,8 +95,8 @@ public static class MsBuildCompileCommands
         File.WriteAllText(wrapper, CreateWrapper(solutionPath, projects), new UTF8Encoding(false));
         if (File.Exists(output)) File.Delete(output);
 
-        var error = Run(msbuild, $"\"{wrapper}\" -nologo -nodeReuse:false -m:{Math.Max(1, Math.Min(8, Environment.ProcessorCount / 2))} -v:q -t:Collect " +
-            $"\"-p:VisualBoostOutputFile={Escape(output)}\"", workDirectory, timeout, cancellationToken);
+        var error = ToolProcess.Run("MSBuild", msbuild, $"\"{wrapper}\" -nologo -nodeReuse:false -m:{Math.Max(1, Math.Min(8, Environment.ProcessorCount / 2))} -v:q " +
+            $"-t:Collect \"-p:VisualBoostOutputFile={Escape(output)}\"", workDirectory, timeout, 64 * 1024, cancellationToken).Error;
         if (!File.Exists(output))
         {
             return new MsBuildCompileCommandResult(Array.Empty<CompileCommand>(), projects.Count, 0, error ?? "MSBuild가 결과를 쓰지 않았습니다.");
@@ -233,79 +232,4 @@ public static class MsBuildCompileCommands
             .Select(p => UnrealCompileCommands.Normalize(p).TrimEnd('/'))
             .Distinct(StringComparer.OrdinalIgnoreCase)
             .ToArray();
-
-    /// <summary>MSBuild를 실행하고 실패하면 이유를 돌려줍니다. 시간 초과·취소 시 자신이 시작한 프로세스만 끝냅니다.</summary>
-    private static string? Run(string executable, string arguments, string workDirectory, TimeSpan timeout, CancellationToken cancellationToken)
-    {
-        var info = new ProcessStartInfo(executable, arguments)
-        {
-            UseShellExecute = false,
-            CreateNoWindow = true,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            WorkingDirectory = workDirectory,
-            StandardOutputEncoding = Encoding.UTF8,
-            StandardErrorEncoding = Encoding.UTF8
-        };
-        // 프로젝트 오류·경고는 실패 이유로만 씁니다. 출력이 쌓여 파이프가 막히지 않게 비동기로 비웁니다.
-        var messages = new StringBuilder();
-        using var process = new Process { StartInfo = info };
-        process.OutputDataReceived += (_, e) => Append(messages, e.Data);
-        process.ErrorDataReceived += (_, e) => Append(messages, e.Data);
-        try
-        {
-            process.Start();
-        }
-        catch (System.ComponentModel.Win32Exception exception)
-        {
-            return "MSBuild를 시작하지 못했습니다: " + exception.Message;
-        }
-
-        process.BeginOutputReadLine();
-        process.BeginErrorReadLine();
-        using (cancellationToken.Register(() => Kill(process)))
-        {
-            if (!process.WaitForExit((int)Math.Min(int.MaxValue, timeout.TotalMilliseconds)))
-            {
-                Kill(process);
-                process.WaitForExit();
-                return $"MSBuild가 {timeout.TotalSeconds:N0}초 안에 끝나지 않았습니다.";
-            }
-
-            process.WaitForExit();
-        }
-
-        cancellationToken.ThrowIfCancellationRequested();
-        if (process.ExitCode == 0) return null;
-        lock (messages)
-        {
-            var text = messages.ToString().Trim();
-            return $"MSBuild 종료 코드 {process.ExitCode}" + (text.Length > 0 ? ": " + (text.Length > 500 ? text.Substring(0, 500) + "…" : text) : string.Empty);
-        }
-    }
-
-    private static void Append(StringBuilder messages, string? line)
-    {
-        if (string.IsNullOrEmpty(line)) return;
-        lock (messages)
-        {
-            if (messages.Length < 4000) messages.AppendLine(line);
-        }
-    }
-
-    private static void Kill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited) process.Kill();
-        }
-        catch (InvalidOperationException)
-        {
-            // 이미 끝났습니다.
-        }
-        catch (System.ComponentModel.Win32Exception)
-        {
-            // 끝나는 중입니다.
-        }
-    }
 }

@@ -16,13 +16,6 @@ internal static class VcProjectCollector
     private const string VcProjectKind = "{8BC9CEB8-8B4A-11D0-8D11-00A0C91BC942}";
     private const string SolutionFolderKind = "{66A26720-8FB5-11D2-AA7E-00C04F688DDE}";
 
-    /// <summary>현재 VS 설치의 MSBuild입니다. 프로젝트를 연 VS와 같은 C++ 도구 집합을 쓰기 위해 다른 설치로 대체하지 않습니다.</summary>
-    public static string? FindMsBuild()
-    {
-        var install = ClangdLocator.CurrentInstallDirectory();
-        return install is null ? null : MsBuildCompileCommands.FindMsBuild(install);
-    }
-
     public static async Task<IReadOnlyList<MsBuildProjectConfiguration>> CollectAsync(DTE2 dte, CancellationToken cancellationToken)
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);

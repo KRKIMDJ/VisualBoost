@@ -553,7 +553,8 @@ internal static class SemanticNavigationTests
             var before = Directory.GetFileSystemEntries(root, "*", SearchOption.AllDirectories).OrderBy(p => p, StringComparer.Ordinal).ToArray();
 
             var stopwatch = Stopwatch.StartNew();
-            var context = CompileContextBuilder.Prepare(solution, cacheRoot, null, "clang-cl.exe", CancellationToken.None, msbuild, projects);
+            var context = CompileContextBuilder.Prepare(solution, cacheRoot, null, "clang-cl.exe", CancellationToken.None,
+                new CompileCommandSources { MsBuildPath = msbuild, Projects = projects });
             Console.WriteLine($"  MSBuild 설계 시점 명령 {stopwatch.ElapsedMilliseconds}ms: {context.Summary}");
             Check(context.Kind == CompileContextKind.MsBuild && context.Commands.Count == 4, "설계 시점 명령 4개: " + context.Kind + " " + context.Reason);
             var libCommand = context.Commands.Single(c => c.File.EndsWith("/Lib.cpp", StringComparison.Ordinal));
@@ -597,6 +598,82 @@ internal static class SemanticNavigationTests
         var install = clangd;
         for (var i = 0; i < 6 && install is not null; i++) install = Path.GetDirectoryName(install);
         return install is null ? null : MsBuildCompileCommands.FindMsBuild(install);
+    }
+
+    public static void RunNinjaCommands()
+    {
+        var entries = JsonValue.Parse("[" +
+            "{\"directory\":\"C:\\\\w\\\\out\\\\build\\\\x64-Debug\",\"command\":\"C:\\\\PROGRA~1\\\\VC\\\\bin\\\\cl.exe  /nologo /TP -DX=1 /DWIN32 -MDd /showIncludes /FoCMakeFiles\\\\a.cpp.obj /FdCMakeFiles\\\\ /FS -c \\\"C:\\\\w\\\\src\\\\a b.cpp\\\"\",\"file\":\"C:\\\\w\\\\src\\\\a b.cpp\",\"output\":\"a.obj\"}," +
+            "{\"directory\":\"C:\\\\w\\\\out\\\\build\\\\x64-Debug\",\"command\":\"C:\\\\PROGRA~1\\\\VC\\\\bin\\\\cl.exe /nologo -c C:\\\\w\\\\src\\\\a b.cpp\",\"file\":\"C:\\\\w\\\\src\\\\a b.cpp\"}," +
+            "{\"directory\":\"C:\\\\w\\\\out\\\\build\\\\x64-Debug\",\"command\":\"cmd.exe /C link.exe a.obj\",\"file\":\"a.cpp.obj\"}," +
+            "{\"directory\":\"C:\\\\w\\\\out\\\\build\\\\x64-Debug\",\"command\":\"\",\"file\":\"edit_cache.util\"}," +
+            "{\"directory\":\"/w/b\",\"arguments\":[\"/usr/bin/clang++\",\"-DY=2\",\"-c\",\"../src/c.cpp\"],\"file\":\"../src/c.cpp\"}" +
+            "]");
+        var commands = NinjaCompileCommands.Convert(entries, "clang-cl.exe");
+        Check(commands.Count == 2, "소스 컴파일만, 같은 파일은 처음 것: " + string.Join(",", commands.Select(c => c.File)));
+        var a = commands.Single(c => c.File.EndsWith("a b.cpp", StringComparison.Ordinal));
+        Check(a.Directory == "C:/w/out/build/x64-Debug" && a.Arguments[0] == "clang-cl.exe" && a.Arguments[1] == "--driver-mode=cl", "cl은 clang-cl 드라이버로");
+        Check(a.Arguments.Contains("-DX=1") && a.Arguments.Contains("-MDd") && a.Arguments.Contains("/FS") &&
+              !a.Arguments.Any(x => x.StartsWith("/showIncludes") || x.StartsWith("/Fo") || x.StartsWith("/Fd")), "출력·의존성 옵션 제거: " + string.Join(" ", a.Arguments));
+        var c = commands.Single(x => x.File.EndsWith("c.cpp", StringComparison.Ordinal));
+        Check(c.Arguments[0] == "/usr/bin/clang++" && c.Arguments.Contains("-DY=2"), "gcc 형식 드라이버는 그대로");
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.Ninja 한글." + Guid.NewGuid().ToString("N"));
+        var cacheRoot = Path.Combine(Path.GetTempPath(), "VisualBoost.NinjaCache." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var workspace = Path.Combine(root, "Folder Space");
+            Write(Path.Combine(workspace, "src", "a.cpp"), "int A() { return X; }\n");
+            Write(Path.Combine(workspace, "src", "b.cpp"), "int B() { return Y; }\n");
+            Check(CompileContextBuilder.WorkspaceDirectory(workspace) == workspace && CompileContextBuilder.WorkspaceDirectory(workspace + "\\") == workspace &&
+                  CompileContextBuilder.WorkspaceDirectory(Path.Combine(workspace, "App.sln")) == workspace, "폴더 작업 영역과 Solution 파일의 루트");
+            var release = Path.Combine(workspace, "out", "build", "x64-Release");
+            Write(Path.Combine(release, "build.ninja"), "rule cxx\n  command = cl.exe /DREL -c $in\nbuild a.obj: cxx ../../../src/a.cpp\n");
+            File.SetLastWriteTimeUtc(Path.Combine(release, "build.ninja"), DateTime.UtcNow.AddHours(-1));
+            var debug = Path.Combine(workspace, "out", "build", "x64-Debug");
+            Write(Path.Combine(debug, "build.ninja"),
+                "rule cxx\n  command = C:\\fake\\cl.exe /nologo /TP $defines /showIncludes /Fo$out /FS -c $in\n  deps = msvc\n" +
+                "rule link\n  command = link.exe $in /out:$out\n" +
+                "build a.obj: cxx ../../../src/a.cpp\n  defines = -DX=1\n" +
+                "build b.obj: cxx ../../../src/b.cpp\n  defines = -DY=2\n" +
+                "build app.exe: link a.obj b.obj\n");
+            Check(NinjaCompileCommands.FindBuildDirectory(workspace) == debug, "가장 최근 Ninja 빌드 폴더");
+
+            var ninja = FindNinja();
+            if (ninja is null)
+            {
+                Console.WriteLine("SKIP: ninja 통합 확인은 VS의 C++ CMake 도구가 필요합니다(VISUALBOOST_TEST_NINJA로 지정 가능).");
+                return;
+            }
+
+            var context = CompileContextBuilder.Prepare(workspace, cacheRoot, null, "clang-cl.exe", CancellationToken.None, new CompileCommandSources { NinjaPath = ninja });
+            Check(context.Kind == CompileContextKind.Ninja && context.Commands.Count == 2, "폴더 작업 영역의 Ninja 명령: " + context.Kind + " " + context.Reason);
+            var b = context.Commands.Single(x => x.File.EndsWith("/src/b.cpp", StringComparison.Ordinal));
+            Check(b.Arguments.Contains("-DY=2") && !b.Arguments.Contains("-DX=1") && b.Arguments.Last().EndsWith("b.cpp", StringComparison.Ordinal) &&
+                  b.Directory == UnrealCompileCommandsNormalize(debug), "파일별 정의와 작업 폴더: " + string.Join(" ", b.Arguments));
+            Check(context.Directory.StartsWith(cacheRoot, StringComparison.OrdinalIgnoreCase) && File.Exists(Path.Combine(context.Directory, CompileCommandDatabase.FileName)) &&
+                  !Directory.EnumerateFiles(workspace, CompileCommandDatabase.FileName, SearchOption.AllDirectories).Any(), "database는 캐시에만 기록");
+        }
+        finally
+        {
+            TryDelete(cacheRoot);
+            TryDelete(root);
+        }
+    }
+
+    private static string UnrealCompileCommandsNormalize(string path) => path.Replace('\\', '/');
+
+    private static string? FindNinja()
+    {
+        var configured = Environment.GetEnvironmentVariable("VISUALBOOST_TEST_NINJA");
+        if (!string.IsNullOrWhiteSpace(configured))
+        {
+            return File.Exists(configured) ? configured : null;
+        }
+
+        var install = FindClangd();
+        for (var i = 0; i < 6 && install is not null; i++) install = Path.GetDirectoryName(install);
+        return install is null ? null : NinjaCompileCommands.FindNinja(install);
     }
 
     public static void RunSourceChangeMonitor()

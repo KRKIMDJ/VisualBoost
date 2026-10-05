@@ -188,7 +188,7 @@ internal sealed class SemanticNavigationService : IDisposable
             }
         }
 
-        if (current is null || solution is null || current.Context.Kind is not (CompileContextKind.Unreal or CompileContextKind.MsBuild))
+        if (current is null || solution is null || current.Context.Kind is not (CompileContextKind.Unreal or CompileContextKind.MsBuild or CompileContextKind.Ninja))
         {
             return;
         }
@@ -202,7 +202,7 @@ internal sealed class SemanticNavigationService : IDisposable
                     ? await CollectProjectsAsync(CancellationToken.None).ConfigureAwait(false)
                     : Array.Empty<MsBuildProjectConfiguration>();
                 var context = CompileContextBuilder.Prepare(solution, cacheRoot, current.Context.EngineRoot, File.Exists(compiler) ? compiler : "clang-cl.exe",
-                    CancellationToken.None, VcProjectCollector.FindMsBuild(), projects);
+                    CancellationToken.None, new CompileCommandSources { MsBuildPath = BuildToolLocator.FindMsBuild(), Projects = projects, NinjaPath = BuildToolLocator.FindNinja() });
                 bool restart;
                 lock (gate) restart = context.Changed && observed == generation && ReferenceEquals(navigator, current);
                 if (restart) Restart();
@@ -353,8 +353,9 @@ internal sealed class SemanticNavigationService : IDisposable
             var projects = await CollectProjectsAsync(cancellationToken).ConfigureAwait(false);
             var created = await ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
-                MsBuildPath = VcProjectCollector.FindMsBuild(),
+                MsBuildPath = BuildToolLocator.FindMsBuild(),
                 Projects = projects,
+                NinjaPath = BuildToolLocator.FindNinja(),
                 ClangdPath = executable,
                 CacheRoot = cacheRoot,
                 SolutionPath = solution,
@@ -520,8 +521,8 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private SourceChangeMonitor? CreateMonitor(string solution, int observed)
     {
-        var root = Path.GetDirectoryName(solution);
-        if (root is null || !Directory.Exists(root)) return null;
+        var root = CompileContextBuilder.WorkspaceDirectory(solution);
+        if (!Directory.Exists(root)) return null;
         try
         {
             return new SourceChangeMonitor(root, SourceChangeQuiet, batch => OnSourcesChanged(observed, batch));
@@ -562,7 +563,7 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private static string? FindEngineRoot(string solution)
     {
-        var source = UnrealEngineSourceLocator.Find(Path.GetDirectoryName(solution), Array.Empty<string>()).FirstOrDefault();
+        var source = UnrealEngineSourceLocator.Find(CompileContextBuilder.WorkspaceDirectory(solution), Array.Empty<string>()).FirstOrDefault();
         // 위치 탐색은 Engine/Source를 돌려주므로 두 단계 위가 설치 루트입니다.
         var engine = source is null ? null : Path.GetDirectoryName(source.TrimEnd('\\', '/'));
         return engine is null ? null : Path.GetDirectoryName(engine);

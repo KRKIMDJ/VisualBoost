@@ -42,7 +42,7 @@ public sealed class SourceChangeMonitor : IDisposable
 
     private static readonly string[] IgnoredSegments =
     {
-        "Intermediate", "Binaries", "Saved", "DerivedDataCache", ".vs", ".git", "node_modules"
+        "Intermediate", "Binaries", "Saved", "DerivedDataCache", "CMakeFiles", ".vs", ".git", "node_modules"
     };
 
     private readonly object gate = new();

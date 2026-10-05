@@ -29,6 +29,7 @@ internal static class Program
         Run("결과 줄 미리보기·엔진 정의 후보", SemanticNavigationTests.RunPreviewAndCandidates);
         Run("MSBuild 설계 시점 명령 변환", SemanticNavigationTests.RunMsBuildCommands);
         Run("MSBuild 설계 시점 명령 통합(vcxproj → clangd)", SemanticNavigationTests.RunMsBuildIntegration);
+        Run("Ninja 빌드 파일 명령·폴더 작업 영역", SemanticNavigationTests.RunNinjaCommands);
         Run("편집기 밖 소스 변경 감시", SemanticNavigationTests.RunSourceChangeMonitor);
         Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진 정의·저장·외부 변경 반영)", SemanticNavigationTests.RunNavigatorIntegration);
         Run("독립 문서 색상 스캐너·취소·상한·성능", QuickColorTests.Run);
