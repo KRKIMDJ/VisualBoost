@@ -37,6 +37,9 @@ public sealed class CompileCommandSources
 
     /// <summary>Ninja 빌드 파일에서 명령을 뽑을 ninja입니다.</summary>
     public string? NinjaPath { get; set; }
+
+    /// <summary>VS의 활성 Solution 구성 이름입니다. Unreal 빌드 대상·구성 선택에 씁니다.</summary>
+    public string? SolutionConfiguration { get; set; }
 }
 
 /// <summary>clangd에 넘길 compilation database와 그 출처입니다.</summary>
@@ -135,7 +138,7 @@ public static class CompileContextBuilder
         var project = FindUnrealProject(solutionDirectory);
         if (project is not null)
         {
-            var variant = UnrealCompileCommands.DetectVariant(solutionDirectory);
+            var variant = UnrealCompileCommands.DetectVariant(solutionDirectory, sources?.SolutionConfiguration);
             if (engineRoot is null)
             {
                 unrealReason = "Unreal 엔진 설치 경로를 찾지 못했습니다.";

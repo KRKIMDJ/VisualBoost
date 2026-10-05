@@ -138,8 +138,23 @@ internal static class SemanticNavigationTests
             Write(old, Rsp(Path.Combine(source, "C.cpp")));
             File.SetLastWriteTimeUtc(old, DateTime.UtcNow.AddDays(-3));
 
-            var variant = UnrealCompileCommands.DetectVariant(project);
-            Check(variant is { Target: "UnrealEditor", Configuration: "Development" }, "가장 최근 구성 선택: " + variant);
+            // 공유 PCH 응답 파일만 있는 프로젝트 대상 폴더, 데이터베이스 생성 모드 폴더, 더 최근의 게임 빌드
+            var sharedPch = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "GameEditor", "Development", "UnrealEd", "SharedPCH.UnrealEd.h.obj.rsp");
+            Write(sharedPch, "\"x.h\"\n");
+            var gcd = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditorGCD", "Development", "Game", "A.cpp.obj.rsp");
+            Write(gcd, Rsp(Path.Combine(source, "A.cpp")));
+            File.SetLastWriteTimeUtc(sharedPch, DateTime.UtcNow.AddMinutes(10));
+            File.SetLastWriteTimeUtc(gcd, DateTime.UtcNow.AddMinutes(10));
+            Check(UnrealCompileCommands.DetectVariant(project) is { Target: "UnrealEditor", Configuration: "Development" }, "가장 최근 일반 빌드 구성(공유 PCH·GCD 폴더 제외)");
+            var game = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealGame", "Development", "Game", "A.cpp.obj.rsp");
+            Write(game, Rsp(Path.Combine(source, "A.cpp")));
+            File.SetLastWriteTimeUtc(game, DateTime.UtcNow.AddMinutes(5));
+            Check(UnrealCompileCommands.DetectVariant(project) is { Target: "UnrealGame" }, "구성 정보가 없으면 가장 최근 빌드");
+            var variant = UnrealCompileCommands.DetectVariant(project, "Development Editor");
+            Check(variant is { Target: "UnrealEditor", Configuration: "Development" }, "활성 Solution 구성 우선: " + variant);
+            Check(UnrealCompileCommands.DetectVariant(project, "DebugGame Editor") is { Target: "UnrealEditor", Configuration: "DebugGame" } &&
+                  UnrealCompileCommands.DetectVariant(project, "Development") is { Target: "UnrealGame" } &&
+                  UnrealCompileCommands.DetectVariant(project, "Shipping") is { Target: "UnrealGame" }, "구성 이름 대응과 없는 구성의 대체");
             var result = UnrealCompileCommands.Build(project, engine, variant!, "cl.exe");
             var files = result.Commands.Select(c => Path.GetFileName(c.File)).OrderBy(f => f, StringComparer.Ordinal).ToArray();
             Check(files.SequenceEqual(new[] { "A.cpp", "B.cpp", "F.cpp" }), "파일별·unity·플러그인 TU: " + string.Join(",", files));
@@ -567,7 +582,8 @@ internal static class SemanticNavigationTests
 
             using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
-                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = solution, WorkerCount = 1, MsBuildPath = msbuild, Projects = projects
+                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = solution, WorkerCount = 1,
+                Sources = new CompileCommandSources { MsBuildPath = msbuild, Projects = projects }
             }, CancellationToken.None).Result;
             Check(navigator.Context.Kind == CompileContextKind.MsBuild, "탐색기가 MSBuild 명령으로 시작");
             Check(SpinUntil(() => navigator.Progress.Completed, 60000), "프로젝트 색인 완료");

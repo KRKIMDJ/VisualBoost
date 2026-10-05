@@ -65,7 +65,7 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private readonly object gate = new();
     private readonly SolutionFileIndexService fileIndex;
-    private readonly Func<CancellationToken, Task<IReadOnlyList<MsBuildProjectConfiguration>>>? projectProvider;
+    private readonly Func<CancellationToken, Task<CompileCommandSources>>? sourcesProvider;
     private readonly SerialWorkQueue documentQueue = new();
     private readonly string cacheRoot;
     private SemanticNavigationSettings settings;
@@ -83,13 +83,13 @@ internal sealed class SemanticNavigationService : IDisposable
     private int unexpectedExits;
     private int disposed;
 
-    /// <param name="projectProvider">compile_commands.json이 없을 때 쓸 C++ 프로젝트 목록(활성 구성)을 UI thread에서 모읍니다.</param>
+    /// <param name="sourcesProvider">C++ 프로젝트 목록과 활성 Solution 구성을 UI thread에서 모읍니다.</param>
     public SemanticNavigationService(SolutionFileIndexService fileIndex, SemanticNavigationSettings settings,
-        Func<CancellationToken, Task<IReadOnlyList<MsBuildProjectConfiguration>>>? projectProvider = null)
+        Func<CancellationToken, Task<CompileCommandSources>>? sourcesProvider = null)
     {
         this.fileIndex = fileIndex;
         this.settings = settings;
-        this.projectProvider = projectProvider;
+        this.sourcesProvider = sourcesProvider;
         cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VisualBoost", "Clangd");
     }
 
@@ -212,11 +212,9 @@ internal sealed class SemanticNavigationService : IDisposable
             try
             {
                 var compiler = Path.Combine(Path.GetDirectoryName(clangdPath ?? string.Empty) ?? string.Empty, "clang-cl.exe");
-                var projects = current.Context.Kind == CompileContextKind.MsBuild
-                    ? await CollectProjectsAsync(CancellationToken.None).ConfigureAwait(false)
-                    : Array.Empty<MsBuildProjectConfiguration>();
+                var sources = await CollectSourcesAsync(CancellationToken.None).ConfigureAwait(false);
                 var context = CompileContextBuilder.Prepare(solution, cacheRoot, current.Context.EngineRoot, File.Exists(compiler) ? compiler : "clang-cl.exe",
-                    CancellationToken.None, new CompileCommandSources { MsBuildPath = BuildToolLocator.FindMsBuild(), Projects = projects, NinjaPath = BuildToolLocator.FindNinja() });
+                    CancellationToken.None, sources);
                 bool restart;
                 lock (gate) restart = context.Changed && observed == generation && ReferenceEquals(navigator, current);
                 if (restart) Restart();
@@ -369,12 +367,10 @@ internal sealed class SemanticNavigationService : IDisposable
             }
 
             lock (gate) clangdPath = executable;
-            var projects = await CollectProjectsAsync(cancellationToken).ConfigureAwait(false);
+            var sources = await CollectSourcesAsync(cancellationToken).ConfigureAwait(false);
             var created = await ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
-                MsBuildPath = BuildToolLocator.FindMsBuild(),
-                Projects = projects,
-                NinjaPath = BuildToolLocator.FindNinja(),
+                Sources = sources,
                 ClangdPath = executable,
                 CacheRoot = cacheRoot,
                 SolutionPath = solution,
@@ -556,8 +552,14 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private void RaiseStateChanged() => StateChanged?.Invoke();
 
-    private async Task<IReadOnlyList<MsBuildProjectConfiguration>> CollectProjectsAsync(CancellationToken cancellationToken) =>
-        projectProvider is null ? Array.Empty<MsBuildProjectConfiguration>() : await projectProvider(cancellationToken).ConfigureAwait(false);
+    /// <summary>Solution 정보(UI thread)와 현재 VS의 빌드 도구 경로를 묶습니다.</summary>
+    private async Task<CompileCommandSources> CollectSourcesAsync(CancellationToken cancellationToken)
+    {
+        var sources = sourcesProvider is null ? new CompileCommandSources() : await sourcesProvider(cancellationToken).ConfigureAwait(false);
+        sources.MsBuildPath = BuildToolLocator.FindMsBuild();
+        sources.NinjaPath = BuildToolLocator.FindNinja();
+        return sources;
+    }
 
     private SourceChangeMonitor? CreateMonitor(string solution, int observed)
     {

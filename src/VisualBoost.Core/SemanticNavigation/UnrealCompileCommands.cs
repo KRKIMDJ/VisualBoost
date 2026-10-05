@@ -82,30 +82,57 @@ public static class UnrealCompileCommands
     internal static readonly string[] DropWithValue = { "/experimental:log", "/sourceDependencies" };
     internal static readonly string[] DropPrefixes = { "/Yu", "/Yc", "/Fp", "/Fo", "/Fd", "/Fa", "/analyze", "/errorReport", "/d1", "/d2" };
 
-    /// <summary>프로젝트와 프로젝트 플러그인의 빌드 폴더 중 응답 파일이 가장 최근인 대상·구성을 고릅니다.</summary>
-    public static UnrealBuildVariant? DetectVariant(string projectDirectory, string platform = "Win64", string architecture = "x64")
+    /// <summary>
+    /// 프로젝트와 프로젝트 플러그인의 빌드 폴더에서 명령을 만들 대상·구성을 고릅니다.
+    /// VS의 활성 Solution 구성(예: "Development Editor")과 맞는 것을 우선하고, 없으면 응답 파일이 가장 최근인 것을 고릅니다.
+    /// </summary>
+    /// <remarks>
+    /// 마지막 빌드가 게임 빌드여도 에디터 구성으로 작업 중이면 에디터 모듈 명령이 필요하기 때문입니다.
+    /// 공유 PCH 헤더 응답 파일(*.h.obj.rsp)만 있는 대상 폴더와 데이터베이스 생성 모드의 별도 폴더(*GCD)는 판정에서 뺍니다.
+    /// </remarks>
+    public static UnrealBuildVariant? DetectVariant(string projectDirectory, string? solutionConfiguration = null, string platform = "Win64",
+        string architecture = "x64")
     {
-        var best = default(UnrealBuildVariant);
+        var candidates = new Dictionary<(string Target, string Configuration), DateTime>();
         foreach (var root in BuildRoots(projectDirectory, Path.Combine("Intermediate", "Build", platform, architecture)))
         {
             foreach (var target in SafeDirectories(root))
             {
+                var targetName = Path.GetFileName(target);
+                if (targetName.EndsWith("GCD", StringComparison.OrdinalIgnoreCase)) continue;
                 foreach (var configuration in SafeDirectories(target))
                 {
                     var newest = SafeDirectories(configuration)
                         .SelectMany(module => SafeFiles(module, "*.obj.rsp"))
+                        .Where(file => !file.EndsWith(".h.obj.rsp", StringComparison.OrdinalIgnoreCase))
                         .Select(file => SafeWriteTime(file))
                         .DefaultIfEmpty(DateTime.MinValue)
                         .Max();
-                    if (newest > DateTime.MinValue && (best is null || newest > best.NewestResponseFile))
-                    {
-                        best = new UnrealBuildVariant(platform, architecture, Path.GetFileName(target), Path.GetFileName(configuration), newest);
-                    }
+                    if (newest == DateTime.MinValue) continue;
+                    var key = (targetName, Path.GetFileName(configuration));
+                    candidates[key] = candidates.TryGetValue(key, out var known) && known > newest ? known : newest;
                 }
             }
         }
 
-        return best;
+        var preferred = candidates.Where(c => MatchesSolutionConfiguration(c.Key.Target, c.Key.Configuration, solutionConfiguration)).ToArray();
+        var pool = preferred.Length > 0 ? preferred : candidates.ToArray();
+        if (pool.Length == 0) return null;
+        var best = pool.OrderByDescending(c => c.Value).First();
+        return new UnrealBuildVariant(platform, architecture, best.Key.Target, best.Key.Configuration, best.Value);
+    }
+
+    /// <summary>
+    /// Unreal Solution 구성 이름("Development Editor", "DebugGame", "Development Client")이 빌드 폴더의 대상·구성과 맞는지 봅니다.
+    /// 두 번째 단어가 대상 종류이고, 없으면 게임 대상입니다.
+    /// </summary>
+    public static bool MatchesSolutionConfiguration(string target, string configuration, string? solutionConfiguration)
+    {
+        if (string.IsNullOrWhiteSpace(solutionConfiguration)) return false;
+        var parts = solutionConfiguration!.Split(new[] { ' ' }, StringSplitOptions.RemoveEmptyEntries);
+        if (!string.Equals(parts[0], configuration, StringComparison.OrdinalIgnoreCase)) return false;
+        if (parts.Length > 1) return target.EndsWith(parts[1], StringComparison.OrdinalIgnoreCase);
+        return !new[] { "Editor", "Client", "Server" }.Any(kind => target.EndsWith(kind, StringComparison.OrdinalIgnoreCase));
     }
 
     public static UnrealCompileCommandResult Build(string projectDirectory, string engineRoot, UnrealBuildVariant variant, string compiler,
