@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.38.0")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.38.1")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 // 폴더 열기 작업 영역(CMake 등)은 Solution 존재 상태를 켜지 않으므로 따로 등록합니다.
@@ -83,6 +83,8 @@ public sealed class VisualBoostPackage : AsyncPackage
         projectItemsEvents.ItemRenamed += OnProjectItemRenamed;
         buildEvents = dte.Events.BuildEvents;
         buildEvents.OnBuildDone += OnBuildDone;
+        // 패키지보다 먼저 복원된 문서도 분석 우선순위에 넣습니다. 활성 문서를 마지막에 기록해 가장 앞에 둡니다.
+        foreach (Document document in dte.Documents) fileIndex.RecordRecentFile(document.FullName);
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         MigrateLegacyOptions();
@@ -109,6 +111,17 @@ public sealed class VisualBoostPackage : AsyncPackage
         await GenerateFunctionCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await SemanticNavigationCommand.InitializeAsync(this, navigation, cancellationToken);
     }
+
+    // 참조 결과 창이 열린 채로 다시 시작해도 창 복원이 패키지를 UI thread에서 동기 로드하지 않게 비동기로 만듭니다.
+    public override IVsAsyncToolWindowFactory? GetAsyncToolWindowFactory(Guid toolWindowType) =>
+        toolWindowType == typeof(UI.ReferencesToolWindow).GUID ? this : null;
+
+    protected override string GetToolWindowTitle(Type toolWindowType, int id) =>
+        toolWindowType == typeof(UI.ReferencesToolWindow) ? UI.ReferencesToolWindow.Title : base.GetToolWindowTitle(toolWindowType, id);
+
+    // 창 생성에 넘길 준비 작업이 없으므로 기본 생성자를 쓰게 합니다.
+    protected override Task<object> InitializeToolWindowAsync(Type toolWindowType, int id, CancellationToken cancellationToken) =>
+        toolWindowType == typeof(UI.ReferencesToolWindow) ? Task.FromResult<object>(ToolWindowCreationContext.Unspecified) : base.InitializeToolWindowAsync(toolWindowType, id, cancellationToken);
 
     protected override void Dispose(bool disposing)
     {
@@ -191,6 +204,7 @@ public sealed class VisualBoostPackage : AsyncPackage
     private void OnSolutionClosed()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
+        (FindToolWindow(typeof(UI.ReferencesToolWindow), 0, false) as UI.ReferencesToolWindow)?.Control.Clear();
         discoveryCancellation?.Cancel();
         Completion.CompletionRuntime.GetSnapshot = null;
         fileIndex.Clear();

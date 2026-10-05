@@ -1,5 +1,7 @@
 using System;
+using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.Shell;
+using Microsoft.VisualStudio.Shell.Interop;
 using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.SemanticNavigation;
@@ -7,11 +9,27 @@ namespace VisualBoost.SemanticNavigation;
 /// <summary>정의·참조 결과 위치를 편집기에서 엽니다.</summary>
 internal static class NavigationLocationOpener
 {
-    /// <param name="activate">true이면 편집기로 초점을 옮깁니다. false이면 문서를 보이기만 하고 초점은 옮기지 않습니다.</param>
+    /// <param name="activate">
+    /// true이면 편집기로 초점을 옮깁니다. false이면 미리 보기로, 임시 탭에 문서를 보이기만 하고 초점은 옮기지 않습니다.
+    /// 결과를 훑는 동안 탭이 쌓이지 않게 하려는 것입니다.
+    /// </param>
     public static void Open(IServiceProvider provider, NavigationLocation location, bool activate)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        VsShellUtilities.OpenDocument(provider, location.Path, Guid.Empty, out _, out _, out var frame, out var textView);
+        IVsWindowFrame? frame;
+        Microsoft.VisualStudio.TextManager.Interop.IVsTextView? textView;
+        if (activate)
+        {
+            VsShellUtilities.OpenDocument(provider, location.Path, Guid.Empty, out _, out _, out frame, out textView);
+        }
+        else
+        {
+            using (new NewDocumentStateScope(__VSNEWDOCUMENTSTATE.NDS_Provisional, VSConstants.NewDocumentStateReason.Navigation))
+            {
+                VsShellUtilities.OpenDocument(provider, location.Path, Guid.Empty, out _, out _, out frame, out textView);
+            }
+        }
+
         if (activate) frame?.Show();
         else frame?.ShowNoActivate();
         if (textView is null) return;

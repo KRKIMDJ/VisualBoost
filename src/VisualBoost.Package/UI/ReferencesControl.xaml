@@ -130,7 +130,7 @@
           </Grid>
         </Border>
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-          <CheckBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.CheckBoxStyleKey}}" x:Name="GroupToggle" Content="파일별 묶기" IsChecked="True" VerticalAlignment="Center"
+          <CheckBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.CheckBoxStyleKey}}" x:Name="GroupToggle" Content="파일별 묶기" VerticalAlignment="Center"
                     Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                     Checked="OnGroupToggled" Unchecked="OnGroupToggled" />
           <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="ExpandAllButton" Content="펼치기" Margin="10,0,0,0" Padding="8,1" ToolTip="모든 파일 펼치기" Click="OnExpandAll" />
@@ -151,8 +151,10 @@
              ScrollViewer.HorizontalScrollBarVisibility="Disabled"
              VirtualizingPanel.IsVirtualizing="True"
              VirtualizingPanel.VirtualizationMode="Recycling"
+             IsTextSearchEnabled="False"
              MouseDoubleClick="OnResultDoubleClick"
-             PreviewMouseLeftButtonDown="OnResultMouseDown" />
+             PreviewMouseLeftButtonDown="OnResultMouseDown"
+             PreviewTextInput="OnResultTextInput" />
 
     <TextBlock x:Name="EmptyText" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0.65"
                TextAlignment="Center" Text="C++ 편집기에서 참조 찾기(Shift+Alt+F)를 실행하면 결과가 여기에 표시됩니다." />
@@ -162,7 +164,7 @@
             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
             BorderThickness="0,1,0,0">
       <TextBlock Opacity="0.75" TextTrimming="CharacterEllipsis"
-                 Text="Enter 열기 · Space 창에 머문 채 열기 · ←/→ 파일 접기·펼치기 · 더블클릭 열기" />
+                 Text="Enter 열기 · Space 미리 보기 · ←/→ 파일 접기·펼치기 · 글자 입력으로 좁히기" />
     </Border>
   </Grid>
 </UserControl>

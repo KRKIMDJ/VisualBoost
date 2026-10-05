@@ -93,8 +93,23 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     {
         LastWarning = null;
         cancellationToken.ThrowIfCancellationRequested();
-        var previous = LoadPrevious(solutionPath, cancellationToken);
         var sourceFiles = files.Where(IsCppFile).ToArray();
+        // 열린 파일 → 같은 프로젝트 → 다른 프로젝트 → 보충 파일 → 엔진 순서로 분석하고, 도중에 연 파일은 앞으로 옮깁니다.
+        // 캐시를 읽는 동안 연 파일도 반영되게 대기열을 먼저 공개합니다.
+        var queue = new SourceAnalysisQueue(sourceFiles, priority ?? SourceAnalysisPriority.None, focus);
+        activeQueue = queue;
+        IReadOnlyDictionary<string, CachedSourceAnalysis> previous;
+        try
+        {
+            previous = LoadPrevious(solutionPath, cancellationToken);
+        }
+        catch
+        {
+            // 분석을 시작하지 못하면 대기열을 거둬, 이후 Focus가 끝난 패스를 붙잡지 않게 합니다.
+            if (ReferenceEquals(activeQueue, queue)) activeQueue = null;
+            throw;
+        }
+
         var progressGate = new object();
         var completedFiles = 0;
         var activeFiles = new Dictionary<string, SourceAnalysisStage>(StringComparer.OrdinalIgnoreCase);
@@ -122,6 +137,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         var publicationGate = new object();
         var pendingSymbols = new List<SourceSymbolLocation>();
         var pendingFiles = 0;
+        var pendingBestRank = SourceAnalysisRank.Engine;
         // 최초 분석은 고정 크기 묶음으로 공개하고 검색 인덱스가 묶음을 계층적으로 병합합니다.
         // 사용자가 연 파일과 그 프로젝트는 작은 묶음으로 공개해 검색에 빨리 나타나게 합니다.
         void PublishProgress(CachedSourceAnalysis entry, SourceAnalysisRank rank)
@@ -131,24 +147,32 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             lock (publicationGate)
             {
                 pendingSymbols.AddRange(entry.Analysis.Symbols);
-                if (++pendingFiles < (rank <= SourceAnalysisRank.Related ? 8 : 128)) return;
+                // 묶음 크기는 묶음에 든 가장 앞선 등급으로 정해, 연 파일이 뒤 등급 파일 128개를 기다리지 않게 합니다.
+                // 관련 파일은 최대 수천 개이므로 연 파일보다 큰 묶음으로 병합 횟수를 줄입니다.
+                if (rank < pendingBestRank) pendingBestRank = rank;
+                var threshold = pendingBestRank switch
+                {
+                    SourceAnalysisRank.Focus => 8,
+                    SourceAnalysisRank.Related => 64,
+                    _ => 128,
+                };
+                if (++pendingFiles < threshold) return;
                 symbols.AppendBatch(pendingSymbols, cancellationToken);
                 pendingSymbols.Clear();
                 pendingFiles = 0;
+                pendingBestRank = SourceAnalysisRank.Engine;
                 SymbolsPublished?.Invoke(current.Count);
             }
         }
         // 편집기 응답성을 우선하고 남는 처리량만 초기 분석에 사용합니다.
         var workers = Math.Min(2, Math.Max(1, Environment.ProcessorCount - 1));
         var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = workers };
-        // 열린 파일 → 같은 프로젝트 → 다른 프로젝트 → 보충 파일 → 엔진 순서로 분석하고, 도중에 연 파일은 앞으로 옮깁니다.
-        var queue = new SourceAnalysisQueue(sourceFiles, priority ?? SourceAnalysisPriority.None, focus);
-        activeQueue = queue;
         try
         {
-            Parallel.For(0, workers, parallelOptions, _ =>
+            // 작업자 하나가 예외로 끝나면 다른 작업자도 남은 대기열(엔진 포함)을 계속 비우지 않고 멈춥니다.
+            Parallel.For(0, workers, parallelOptions, (_, loop) =>
             {
-                while (queue.TryTake(out var file, out var rank)) AnalyzeFile(file, rank);
+                while (!loop.ShouldExitCurrentIteration && queue.TryTake(out var file, out var rank)) AnalyzeFile(file, rank);
             });
         }
         finally

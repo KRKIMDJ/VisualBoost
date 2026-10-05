@@ -8,6 +8,7 @@ using System.Windows.Controls;
 using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
+using System.Xml.Linq;
 using VisualBoost.Core.SemanticNavigation;
 using VisualBoost.UI;
 
@@ -18,6 +19,7 @@ internal static class ReferenceResultsTests
     {
         Model();
         History();
+        InitialValuesDoNotRaiseHandlers(root);
         Xaml(root, output);
         Console.WriteLine("PASS: 참조 결과 창의 파일별 묶기·필터·접기·최근 결과와 행 템플릿");
     }
@@ -36,6 +38,7 @@ internal static class ReferenceResultsTests
         Assert(model.Summary == "5개 위치 · 3개 파일 · 색인 진행 중", "요약: " + model.Summary);
         var tick = model.Rows.OfType<ReferenceLineRow>().First(row => row.Line == "8");
         Assert(tick.Container == "Game::Tick" && tick.Match == "Compute" && !tick.ShowFile, "위치 행의 포함 함수·일치 구간");
+        Assert(model.Rows[0].ToString() == "Use.cpp, 3개 위치" && tick.ToString() == "Use.cpp 8줄: Total += FMod::Compute(Delta);", "화면 읽기용 행 이름: " + model.Rows[0] + " / " + tick);
 
         model.Filter = "  tick ";
         Assert(model.Filter == "tick" && model.VisibleCount == 1 && Shape(model) == "F:Use.cpp(1/3) L:8", "포함 함수로 좁히기: " + Shape(model));
@@ -76,6 +79,25 @@ internal static class ReferenceResultsTests
         model.Show(older);
         Assert(model.History[0] == older && model.History.Count(set => set == older) == 1 && model.Filter.Length == 0, "같은 결과를 다시 보이면 맨 앞으로, 필터 지움");
         Assert(older.Title.StartsWith("Symbol5 · 5개 · ", StringComparison.Ordinal), "최근 결과 이름: " + older.Title);
+
+        model.Filter = "use";
+        model.Clear();
+        Assert(model.Current is null && model.History.Count == 0 && model.Rows.Count == 0 && model.Filter.Length == 0 && model.Summary.Length == 0,
+            "Solution을 닫으면 결과·최근 결과·필터 비우기");
+    }
+
+    private static void InitialValuesDoNotRaiseHandlers(string root)
+    {
+        // XAML이 초기값을 넣으며 변경 처리기를 부르면 처리기가 아직 만들지 않은 요소를 건드려 창 생성이 실패합니다(0.38.0 첫 빌드 결함).
+        var pairs = new[] { ("Checked", "IsChecked"), ("Unchecked", "IsChecked"), ("TextChanged", "Text"),
+            ("SelectionChanged", "SelectedIndex"), ("SelectionChanged", "SelectedItem"), ("SelectionChanged", "SelectedValue") };
+        var xml = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "UI", "ReferencesControl.xaml"));
+        foreach (var element in xml.Descendants())
+        {
+            foreach (var (handler, value) in pairs)
+                Assert(element.Attribute(handler) is null || element.Attribute(value) is null,
+                    $"{element.Name.LocalName}: {value} 초기값과 {handler} 처리기를 함께 두지 않음");
+        }
     }
 
     private static void Xaml(string root, string output)

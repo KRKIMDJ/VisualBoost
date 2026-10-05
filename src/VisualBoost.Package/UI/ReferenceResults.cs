@@ -60,6 +60,9 @@ public sealed class ReferenceFileRow
     public bool IsExpanded { get; }
 
     public string Glyph => IsExpanded ? "▾" : "▸";
+
+    /// <summary>화면 읽기 프로그램이 읽는 이름입니다.</summary>
+    public override string ToString() => $"{FileName}, {Count}개 위치";
 }
 
 /// <summary>참조 위치 한 줄입니다. 파일별로 묶지 않을 때는 파일 이름을 함께 보입니다.</summary>
@@ -92,6 +95,9 @@ public sealed class ReferenceLineRow
     public string Code => Item.Code;
 
     public string Container => Item.Container;
+
+    /// <summary>화면 읽기 프로그램이 읽는 이름입니다.</summary>
+    public override string ToString() => $"{FileName} {Line}줄: {Code}";
 }
 
 /// <summary>
@@ -176,6 +182,19 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
         collapsed.Clear();
         if (clearFilter) filter = string.Empty;
         Rebuild();
+        OnPropertyChanged(nameof(Current));
+        OnPropertyChanged(nameof(Filter));
+    }
+
+    /// <summary>현재 결과와 최근 결과를 모두 지웁니다.</summary>
+    public void Clear()
+    {
+        history.Clear();
+        collapsed.Clear();
+        current = null;
+        filter = string.Empty;
+        Rebuild();
+        OnPropertyChanged(nameof(History));
         OnPropertyChanged(nameof(Current));
         OnPropertyChanged(nameof(Filter));
     }

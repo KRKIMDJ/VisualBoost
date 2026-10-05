@@ -699,8 +699,6 @@ internal sealed class SolutionFileIndexService : IDisposable
                     isAnalyzing = currentConfiguration.EnableSourceAnalysis;
                     analysisError = null;
                     var priority = analysisPriority;
-                    // 최근에 연 순서(열린 문서 포함)입니다. 분석 도중 연 파일은 RecordRecentFile이 대기열에 직접 알립니다.
-                    var focus = recentFiles.ToArray();
                     activeAnalysis = currentConfiguration.EnableSourceAnalysis
                         ? Task.Run(
                             () => AnalyzeSourcesAsync(
@@ -709,7 +707,6 @@ internal sealed class SolutionFileIndexService : IDisposable
                                     effectiveRoots,
                                     currentConfiguration.SourceAnalysisDelay,
                                     priority,
-                                    focus,
                                     cancellationToken),
                             cancellationToken)
                         : Task.CompletedTask;
@@ -748,7 +745,6 @@ internal sealed class SolutionFileIndexService : IDisposable
         IReadOnlyList<string> includeRoots,
         TimeSpan delay,
         SourceAnalysisPriority priority,
-        IReadOnlyList<string> focus,
         CancellationToken cancellationToken)
     {
         var entered = false;
@@ -760,6 +756,10 @@ internal sealed class SolutionFileIndexService : IDisposable
             // 캐시 갱신과 대기 중 오류도 이 경계에서 처리합니다.
             ReportProgress(new SourceAnalysisProgress(SourceAnalysisStage.Waiting, 0, 0));
             await Task.Delay(delay, cancellationToken).ConfigureAwait(false);
+            // 최근에 연 순서(열린 문서 포함)입니다. 대기·지연 중에 연 파일도 들어가게 분석 직전에 읽고,
+            // 분석 도중 연 파일은 RecordRecentFile이 대기열에 직접 알립니다.
+            string[] focus;
+            lock (gate) focus = recentFiles.ToArray();
             sourceAnalyzer.Analyze(
                 currentSolutionPath,
                 files,

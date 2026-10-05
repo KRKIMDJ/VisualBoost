@@ -85,7 +85,7 @@ internal static class Program
         XNamespace ui = "clr-namespace:VisualBoost.UI;assembly=VisualBoost.UI.Tests";
         var events = new HashSet<string> { "PreviewKeyDown", "TextChanged", "Click", "GotKeyboardFocus",
             "LostKeyboardFocus", "PreviewMouseRightButtonDown", "ContextMenuOpening", "MouseDoubleClick", "SelectionChanged",
-            "PreviewMouseLeftButtonDown", "Checked", "Unchecked" };
+            "PreviewMouseLeftButtonDown", "Checked", "Unchecked", "PreviewTextInput" };
         foreach (var node in xml.Descendants().ToArray())
         {
             if (node.Name.LocalName == "DialogWindow") node.Name = wpf + "Window";

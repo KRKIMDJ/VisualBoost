@@ -26,6 +26,8 @@ public partial class ReferencesControl : UserControl
 
     public ReferencesControl()
     {
+        // XAML을 읽는 동안 생기는 변경 이벤트는 아직 만들지 않은 요소를 건드리므로 무시합니다. 첫 Refresh가 끝나면 풀립니다.
+        syncing = true;
         InitializeComponent();
         Refresh(null, keepScroll: false);
     }
@@ -42,6 +44,13 @@ public partial class ReferencesControl : UserControl
         model.Show(set);
         Refresh(null, keepScroll: false);
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(FocusSelection));
+    }
+
+    /// <summary>모든 결과를 지웁니다. 닫은 Solution의 위치를 다시 열지 않게 합니다.</summary>
+    internal void Clear()
+    {
+        model.Clear();
+        Refresh(null, keepScroll: false);
     }
 
     /// <summary>선택한 행에 키보드 초점을 둡니다. 선택이 없으면 목록에 둡니다.</summary>
@@ -216,6 +225,16 @@ public partial class ReferencesControl : UserControl
         }
 
         eventArgs.Handled = true;
+    }
+
+    private void OnResultTextInput(object sender, TextCompositionEventArgs eventArgs)
+    {
+        // 목록에서 글자를 치면 필터로 옮겨 이어서 입력합니다.
+        if (model.Current is null || string.IsNullOrEmpty(eventArgs.Text) || char.IsControl(eventArgs.Text[0])) return;
+        eventArgs.Handled = true;
+        FilterBox.Focus();
+        FilterBox.Text += eventArgs.Text;
+        FilterBox.CaretIndex = FilterBox.Text.Length;
     }
 
     private void OnResultMouseDown(object sender, MouseButtonEventArgs eventArgs)
