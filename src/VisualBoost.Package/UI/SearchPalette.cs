@@ -99,6 +99,7 @@ public sealed class SymbolColorConverter : IMultiValueConverter
             SourceSymbolKind.Function => SemanticColorKind.Function,
             SourceSymbolKind.Variable => SemanticColorKind.Variable,
             SourceSymbolKind.Macro => SemanticColorKind.Macro,
+            SourceSymbolKind.Namespace => SemanticColorKind.Namespace,
             _ => null,
         } : null;
         if (!kind.HasValue) return fallback;

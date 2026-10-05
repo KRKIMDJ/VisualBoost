@@ -17,6 +17,7 @@ internal static class Program
 
     private static int Main()
     {
+        Run("독립 문서 색상 스캐너·취소·상한·성능", QuickColorTests.Run);
         Run("일반 C++ 선언·정의 생성", CodeGenerationTests.Run);
         Run("빠른 인클루드 및 주석 파일 링크", EditorToolsTests.Run);
         Run("새 헤더 빠른 인클루드 조회", QuickIncludeLookupTests.Run);

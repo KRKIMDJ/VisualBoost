@@ -8,6 +8,7 @@ internal static class Program
     {
         try
         {
+            VisualBoost.Core.Tests.QuickColorTests.Run();
             Check(SearchPath.TryNormalize("  \"C:\\Samples\\Game\\Main.cpp\"  ", out var normalized) && normalized == @"C:\Samples\Game\Main.cpp", "따옴표를 포함한 파일 경로 정규화");
             Check(SearchPath.DirectoryOf(@"C:\Samples\Game\Main.cpp") == @"C:\Samples\Game", "공용 문서 폴더 확인");
             Check(SearchPath.TryNormalize("file:///C:/Samples/Game/Main.cpp", out var file) && file == @"C:\Samples\Game\Main.cpp", "file URI 정규화");

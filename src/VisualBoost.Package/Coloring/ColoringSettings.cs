@@ -9,15 +9,24 @@ internal sealed class ColoringSettings
     public static event EventHandler? Changed;
     private readonly string[] overrides;
 
-    public ColoringSettings(bool enabled, string[] overrides, ColoringColorSource source = ColoringColorSource.Palette)
+    public ColoringSettings(bool enabled, string[] overrides, ColoringColorSource source = ColoringColorSource.Palette, bool quickColoring = true)
     {
-        if (overrides.Length != 8) throw new ArgumentException("테마별 색상 8개가 필요합니다.", nameof(overrides));
+        if (overrides.Length != 8 && overrides.Length != 12) throw new ArgumentException("테마별 색상 12개가 필요합니다.", nameof(overrides));
         Enabled = enabled;
         Source = source;
-        this.overrides = (string[])overrides.Clone();
+        QuickColoring = quickColoring;
+        this.overrides = new string[12];
+        if (overrides.Length == 8)
+        {
+            // 구 팔레트의 밝은 테마가 새 그룹 슬롯으로 밀려 들어가지 않게 이관합니다.
+            Array.Copy(overrides, 0, this.overrides, 0, 4);
+            Array.Copy(overrides, 4, this.overrides, 6, 4);
+        }
+        else Array.Copy(overrides, this.overrides, 12);
     }
 
     public bool Enabled { get; }
+    public bool QuickColoring { get; }
     public ColoringColorSource Source { get; }
 
     public int GetColor(SemanticColorKind kind, bool dark)
@@ -29,7 +38,7 @@ internal sealed class ColoringSettings
             SemanticColorPalette.TryParse(SemanticColorPalette.Default(kind, dark), out var fallback);
             return fallback;
         }
-        var text = overrides[(dark ? 0 : 4) + (int)kind];
+        var text = overrides[(dark ? 0 : SemanticColorPalette.KindCount) + (int)kind];
         if (!SemanticColorPalette.TryParse(text, out var rgb))
             SemanticColorPalette.TryParse(SemanticColorPalette.Default(kind, dark), out rgb);
         return rgb;

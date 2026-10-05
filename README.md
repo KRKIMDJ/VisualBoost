@@ -21,7 +21,7 @@ VisualBoost는 Visual Studio에서 파일·심볼 탐색과 C++ 편집 작업을
 
 `Tools > Options > VisualBoost`에서 설정할 수 있습니다.
 
-- `Coloring`: C++ 타입·변수·함수·매크로 색상 지정
+- `Coloring`: C++ 타입·변수·매크로·이넘 멤버·함수/메서드·네임스페이스 색상 지정
 - `자동완성`: C++ 이름 자동완성
 
 ## 프로젝트 상태

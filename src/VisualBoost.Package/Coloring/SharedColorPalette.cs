@@ -14,7 +14,7 @@ internal static class SharedColorPalette
     private static IEditorFormatMap? map;
     private static Dispatcher? dispatcher;
     private static DispatcherOperation? pending;
-    private static int?[] colors = new int?[8];
+    private static int?[] colors = new int?[12];
 
     public static void Attach(IEditorFormatMap formatMap)
     {
@@ -32,10 +32,10 @@ internal static class SharedColorPalette
         pending = null;
         map = null;
         dispatcher = null;
-        colors = new int?[8];
+        colors = new int?[12];
     }
 
-    public static int? GetColor(SemanticColorKind kind, bool dark) => colors[(dark ? 0 : 4) + (int)kind];
+    public static int? GetColor(SemanticColorKind kind, bool dark) => colors[(dark ? 0 : SemanticColorPalette.KindCount) + (int)kind];
 
     [SuppressMessage("Usage", "VSTHRD001", Justification = "서식 저장소 변경 이벤트를 비동기로 병합하며 동기 대기를 하지 않습니다.")]
     private static void OnChanged(object? sender, FormatItemsEventArgs e)
@@ -45,16 +45,16 @@ internal static class SharedColorPalette
         if (target is null || target.HasShutdownStarted) return;
         if (!target.CheckAccess()) { _ = target.BeginInvoke(new Action(() => OnChanged(sender, e))); return; }
         if (pending?.Status == DispatcherOperationStatus.Pending) return;
-        pending = target.BeginInvoke(DispatcherPriority.Background, new Action(Refresh));
+        pending = target.BeginInvoke(DispatcherPriority.Loaded, new Action(Refresh));
     }
 
     private static void Refresh()
     {
         if (map is null) return;
-        var replacement = new int?[8];
+        var replacement = new int?[12];
         for (var index = 0; index < replacement.Length; index++)
         {
-            var properties = map.GetProperties(SemanticFormatNames.Get((SemanticColorKind)(index % 4), index < 4));
+            var properties = map.GetProperties(SemanticFormatNames.Get((SemanticColorKind)(index % SemanticColorPalette.KindCount), index < SemanticColorPalette.KindCount));
             var color = properties[EditorFormatDefinition.ForegroundBrushId] is SolidColorBrush brush ? (Color?)brush.Color
                 : properties[EditorFormatDefinition.ForegroundColorId] is Color value ? value : (Color?)null;
             if (color.HasValue && color.Value.A == 255)

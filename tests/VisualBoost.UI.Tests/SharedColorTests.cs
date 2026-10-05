@@ -40,7 +40,8 @@ internal static class SharedColorTests
             Assert(ReferenceEquals(Brushes.White, converter.Convert(values, typeof(Brush), null!, CultureInfo.InvariantCulture)), "선택 행 색상 보존");
             values[1] = false;
             values[0] = SourceSymbolKind.Namespace;
-            Assert(ReferenceEquals(Brushes.White, converter.Convert(values, typeof(Brush), null!, CultureInfo.InvariantCulture)), "분류하지 않은 심볼 색상 보존");
+            result = (SolidColorBrush)converter.Convert(values, typeof(Brush), null!, CultureInfo.InvariantCulture);
+            Assert(result.Color == Color.FromRgb(0x91, 0xB8, 0xD9), "네임스페이스 색상 공유");
 
             map.Items[key] = new ResourceDictionary { [EditorFormatDefinition.ForegroundColorId] = Colors.Aqua };
             var notifications = 0;

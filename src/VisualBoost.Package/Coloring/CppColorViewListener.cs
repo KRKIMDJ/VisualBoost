@@ -68,7 +68,7 @@ internal sealed class CppColorViewListener : IWpfTextViewCreationListener
 
         private void OnFormatChanged(object sender, FormatItemsEventArgs e)
         {
-            if (!session.IsApplying) QueueUpdate();
+            if (!session.IsApplying && (e.ChangedItems.Count == 0 || e.ChangedItems.Any(CppColorFormatSession.IsRelevant))) QueueUpdate();
         }
         private void OnSettingsChanged(object? sender, EventArgs e) => QueueUpdate();
         private void OnThemeChanged(ThemeChangedEventArgs e) => QueueUpdate();
@@ -77,7 +77,7 @@ internal sealed class CppColorViewListener : IWpfTextViewCreationListener
             if (e.PropertyName == nameof(SystemParameters.HighContrast)) QueueUpdate();
         }
 
-        [SuppressMessage("Usage", "VSTHRD001", Justification = "동기 대기가 아닌 테마 갱신 이후의 WPF 작업 병합이며 낮은 우선순위로 실행해야 합니다.")]
+        [SuppressMessage("Usage", "VSTHRD001", Justification = "서식 갱신을 병합하고 Background 대기열보다 우선 적용하며 동기 대기를 하지 않습니다.")]
         private void QueueUpdate()
         {
             if (!dispatcher.CheckAccess())
@@ -86,10 +86,12 @@ internal sealed class CppColorViewListener : IWpfTextViewCreationListener
                 return;
             }
             if (disposed || views.Count == 0 || pending?.Status == DispatcherOperationStatus.Pending) return;
-            var view = views.First();
-            pending = dispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() =>
+            pending = dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(() =>
             {
-                if (disposed || view.IsClosed) return;
+                pending = null;
+                if (disposed) return;
+                var view = views.FirstOrDefault(item => !item.IsClosed);
+                if (view is null) return;
                 var background = (view.Background as SolidColorBrush)?.Color ?? Colors.White;
                 session.Update(ColoringSettings.Current,
                     SemanticColorPalette.IsDark(background.R, background.G, background.B), SystemParameters.HighContrast);

@@ -8,6 +8,26 @@ namespace VisualBoost.Coloring;
 
 internal static class SemanticClassificationTypes
 {
+    [Export, Name("VisualBoost.Dark.EnumMember"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition DarkEnumMember = null!;
+    [Export, Name("VisualBoost.Light.EnumMember"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition LightEnumMember = null!;
+    [Export, Name("VisualBoost.Dark.Namespace"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition DarkNamespace = null!;
+    [Export, Name("VisualBoost.Light.Namespace"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition LightNamespace = null!;
+    [Export, Name("VisualBoost.Fast.Type"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition FastType = null!;
+    [Export, Name("VisualBoost.Fast.Variable"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition FastVariable = null!;
+    [Export, Name("VisualBoost.Fast.Function"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition FastFunction = null!;
+    [Export, Name("VisualBoost.Fast.Macro"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition FastMacro = null!;
+    [Export, Name("VisualBoost.Fast.EnumMember"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition FastEnumMember = null!;
+    [Export, Name("VisualBoost.Fast.Namespace"), BaseDefinition("identifier")]
+    internal static ClassificationTypeDefinition FastNamespace = null!;
     [Export, Name("VisualBoost.Dark.Type"), BaseDefinition("identifier")]
     internal static ClassificationTypeDefinition DarkType = null!;
     [Export, Name("VisualBoost.Dark.Variable"), BaseDefinition("identifier")]

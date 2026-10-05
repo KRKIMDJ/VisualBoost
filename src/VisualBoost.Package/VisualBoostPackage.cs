@@ -16,7 +16,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.32.0")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.33.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
@@ -52,6 +52,11 @@ public sealed class VisualBoostPackage : AsyncPackage
         IProgress<ServiceProgressData> progress)
     {
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
+        // 문서 색상은 DTE 프로젝트 이벤트 연결이나 파일 인덱스 초기화를 기다리지 않습니다.
+        var components = await GetServiceAsync(typeof(SComponentModel)) as IComponentModel;
+        Assumes.Present(components);
+        Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
+        Coloring.ColoringSettings.Publish(((ColoringOptionsPage)GetDialogPage(typeof(ColoringOptionsPage))).CreateSettings());
         var dte = await GetServiceAsync(typeof(SDTE)) as DTE2;
         Assumes.Present(dte);
 
@@ -72,10 +77,6 @@ public sealed class VisualBoostPackage : AsyncPackage
         MigrateLegacyOptions();
         ((CompletionOptionsPage)GetDialogPage(typeof(CompletionOptionsPage))).Publish();
         ((DocumentNavigationOptionsPage)GetDialogPage(typeof(DocumentNavigationOptionsPage))).Publish();
-        var components = await GetServiceAsync(typeof(SComponentModel)) as IComponentModel;
-        Assumes.Present(components);
-        Coloring.SharedColorPalette.Attach(components.GetService<IEditorFormatMapService>().GetEditorFormatMap("text"));
-        Coloring.ColoringSettings.Publish(((ColoringOptionsPage)GetDialogPage(typeof(ColoringOptionsPage))).CreateSettings());
         var statusBar = await GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar);

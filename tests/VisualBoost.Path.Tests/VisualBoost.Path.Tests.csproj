@@ -4,6 +4,7 @@
     <TargetFramework>net472</TargetFramework>
   </PropertyGroup>
   <ItemGroup>
+    <Compile Include="../VisualBoost.Core.Tests/QuickColorTests.cs" Link="QuickColorTests.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileCatalog.cs" Link="SolutionFileCatalog.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexService.cs" Link="SolutionFileIndexService.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexSnapshot.cs" Link="SolutionFileIndexSnapshot.cs" />

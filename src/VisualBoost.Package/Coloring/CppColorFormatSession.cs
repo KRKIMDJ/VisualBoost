@@ -8,7 +8,7 @@ using VisualBoost.Core.Coloring;
 
 namespace VisualBoost.Coloring;
 
-// VS C++가 제공하는 의미 분류의 표시 속성만 변경합니다. 소스 토큰은 재분석하지 않습니다.
+// VS C++ 의미 분류와 문서 색상 힌트의 표시 속성만 변경합니다. 이 세션은 소스를 분석하지 않습니다.
 internal sealed class CppColorFormatSession
 {
     private static readonly (string Name, SemanticColorKind Kind)[] Formats =
@@ -16,7 +16,9 @@ internal sealed class CppColorFormatSession
         ("CppTypeSemanticTokenFormat", SemanticColorKind.Type),
         ("CppRefTypeSemanticTokenFormat", SemanticColorKind.Type),
         ("CppValueTypeSemanticTokenFormat", SemanticColorKind.Type),
-        ("CppEnumSemanticTokenFormat", SemanticColorKind.Type),
+        // VS의 cppEnumerator 분류입니다. enum 타입은 cppType 분류와 구분합니다.
+        ("CppEnumSemanticTokenFormat", SemanticColorKind.EnumMember),
+        ("CppNamespaceSemanticTokenFormat", SemanticColorKind.Namespace),
         ("CppClassTemplateSemanticTokenFormat", SemanticColorKind.Type),
         ("CppGenericTypeSemanticTokenFormat", SemanticColorKind.Type),
         ("CppGlobalVariableSemanticTokenFormat", SemanticColorKind.Variable),
@@ -31,6 +33,12 @@ internal sealed class CppColorFormatSession
         ("CppStaticMemberFunctionSemanticTokenFormat", SemanticColorKind.Function),
         ("CppFunctionTemplateSemanticTokenFormat", SemanticColorKind.Function),
         ("CppMacroSemanticTokenFormat", SemanticColorKind.Macro),
+        ("VisualBoost.Fast.Type", SemanticColorKind.Type),
+        ("VisualBoost.Fast.Variable", SemanticColorKind.Variable),
+        ("VisualBoost.Fast.Function", SemanticColorKind.Function),
+        ("VisualBoost.Fast.Macro", SemanticColorKind.Macro),
+        ("VisualBoost.Fast.EnumMember", SemanticColorKind.EnumMember),
+        ("VisualBoost.Fast.Namespace", SemanticColorKind.Namespace),
     };
     private static readonly string[] ForegroundKeys =
         { EditorFormatDefinition.ForegroundColorId, EditorFormatDefinition.ForegroundBrushId };
@@ -41,6 +49,7 @@ internal sealed class CppColorFormatSession
     public CppColorFormatSession(IEditorFormatMap map) => this.map = map;
     public bool IsApplying { get; private set; }
     public int AppliedCount => applied.Count;
+    internal static bool IsRelevant(string name) => Array.Exists(Formats, format => format.Name == name);
 
     public void Update(ColoringSettings settings, bool dark, bool highContrast)
     {

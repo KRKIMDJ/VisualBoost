@@ -44,7 +44,11 @@ internal static class ColorFormatTests
         Assert(map.Items[TypeKey][Foreground].Equals(Colors.Purple), "새 외부 색상을 이전 색상으로 덮어쓰지 않음");
 
         foreach (var (key, kind) in new[] { ("CppLocalVariableSemanticTokenFormat", SemanticColorKind.Variable),
-            ("CppMemberFunctionSemanticTokenFormat", SemanticColorKind.Function), ("CppMacroSemanticTokenFormat", SemanticColorKind.Macro) })
+            ("CppMemberFunctionSemanticTokenFormat", SemanticColorKind.Function), ("CppMacroSemanticTokenFormat", SemanticColorKind.Macro),
+            ("CppEnumSemanticTokenFormat", SemanticColorKind.EnumMember), ("CppNamespaceSemanticTokenFormat", SemanticColorKind.Namespace),
+            ("VisualBoost.Fast.Type", SemanticColorKind.Type), ("VisualBoost.Fast.Variable", SemanticColorKind.Variable),
+            ("VisualBoost.Fast.Function", SemanticColorKind.Function), ("VisualBoost.Fast.Macro", SemanticColorKind.Macro),
+            ("VisualBoost.Fast.EnumMember", SemanticColorKind.EnumMember), ("VisualBoost.Fast.Namespace", SemanticColorKind.Namespace) })
         {
             map.Items[key] = new ResourceDictionary { [Foreground] = Colors.Gray };
             session.Update(enabled, true, false);
@@ -52,6 +56,24 @@ internal static class ColorFormatTests
             Assert(map.Items[key][Foreground].Equals(Color.FromRgb((byte)(rgb >> 16), (byte)(rgb >> 8), (byte)rgb)), "분류별 색상 연결");
         }
         session.Restore();
+        Assert(CppColorFormatSession.IsRelevant("CppEnumSemanticTokenFormat") &&
+            !CppColorFormatSession.IsRelevant("UnrelatedExtension.Format"), "관련 서식 이벤트만 재적용");
+        var legacy = new ColoringSettings(true, new[] { "#010101", "#020202", "#030303", "#040404", "#050505", "#060606", "#070707", "#080808" });
+        for (var i = 0; i < 4; i++)
+        {
+            Assert(legacy.GetColor((SemanticColorKind)i, true) == (i + 1) * 0x010101, "기존 어두운 색상 슬롯 유지");
+            Assert(legacy.GetColor((SemanticColorKind)i, false) == (i + 5) * 0x010101, "기존 밝은 색상 슬롯 이동");
+        }
+        var values = new string[12];
+        for (var i = 0; i < values.Length; i++) values[i] = "#" + ((i + 1) * 0x010101).ToString("X6");
+        var expanded = new ColoringSettings(true, values, ColoringColorSource.Palette, false);
+        values[0] = "#FFFFFF";
+        for (var i = 0; i < 6; i++)
+        {
+            Assert(expanded.GetColor((SemanticColorKind)i, true) == (i + 1) * 0x010101, "6개 어두운 그룹 독립 저장 및 복사");
+            Assert(expanded.GetColor((SemanticColorKind)i, false) == (i + 7) * 0x010101, "6개 밝은 그룹 독립 저장");
+        }
+        Assert(legacy.QuickColoring && !expanded.QuickColoring, "빠른 색상 기본값 및 비활성 설정");
         Console.WriteLine("PASS: C++ 색상 분류, 옵션·테마 전환, 고대비, 외부 변경 보존, 복원 및 100회 멱등 갱신");
     }
 
