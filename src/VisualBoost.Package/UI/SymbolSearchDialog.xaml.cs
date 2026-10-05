@@ -20,7 +20,7 @@ namespace VisualBoost.UI;
 
 public partial class SymbolSearchDialog : DialogWindow
 {
-    // 마지막으로 고른 범위는 같은 Solution 안에서만 VS를 닫을 때까지 기억합니다. 프로젝트 범위 ID가
+    // 사용자가 직접 고른 마지막 범위는 같은 Solution(파일 기준) 안에서만 VS를 닫을 때까지 기억합니다. 프로젝트 범위 ID가
     // Solution마다 다르므로 다른 Solution에서는 쓰지 않고, 영구 저장도 하지 않습니다. UI thread에서만 씁니다.
     private static string? rememberedSolution;
     private static string? rememberedScopeId;
@@ -28,7 +28,7 @@ public partial class SymbolSearchDialog : DialogWindow
 
     private readonly SolutionFileIndexService fileIndex;
     private readonly IReadOnlyList<SolutionProjectInfo> projects;
-    private readonly string? solutionRoot;
+    private readonly string? solutionKey;
     private readonly DispatcherTimer statusTimer;
     private CancellationTokenSource? searchCancellation;
     private bool isSearching;
@@ -38,22 +38,20 @@ public partial class SymbolSearchDialog : DialogWindow
     private string? observedAnalysisError;
     private IReadOnlyList<SymbolSearchScope>? observedScopes;
     private bool updatingScopes;
-    // 사용자가 바라는 범위입니다. 아직 게시되지 않았으면(파일 수집 중) 화면은 '전체'이고 이 값과 다릅니다.
-    private string preferredScopeId;
-    private string preferredScopeName;
+    private readonly SymbolScopeChoice scopeChoice;
 
     internal SymbolSearchDialog(
         SolutionFileIndexService fileIndex,
         IReadOnlyList<SolutionProjectInfo> projects,
-        string? solutionRoot = null,
+        string? solutionKey = null,
         string? initialQuery = null)
     {
         this.fileIndex = fileIndex ?? throw new ArgumentNullException(nameof(fileIndex));
         this.projects = projects ?? throw new ArgumentNullException(nameof(projects));
-        this.solutionRoot = solutionRoot;
-        var remembered = rememberedScopeId is not null && SameSolution(rememberedSolution, solutionRoot);
-        preferredScopeId = remembered ? rememberedScopeId! : SymbolSearchScope.All.Id;
-        preferredScopeName = remembered ? rememberedScopeName ?? string.Empty : SymbolSearchScope.All.Name;
+        this.solutionKey = solutionKey;
+        scopeChoice = SameSolution(rememberedSolution, solutionKey)
+            ? new SymbolScopeChoice(rememberedScopeId, rememberedScopeName)
+            : new SymbolScopeChoice(null, null);
         InitializeComponent();
         UpdateScopes();
         // 로드 전 TextChanged는 무시되고, 첫 검색은 OnLoaded에서 이 검색어로 실행합니다.
@@ -86,8 +84,9 @@ public partial class SymbolSearchDialog : DialogWindow
         try
         {
             ScopeSelector.ItemsSource = scopes;
-            // 고른 범위가 아직 게시되지 않았거나(파일 수집 중) 사라졌으면 전체를 보이고, 다시 게시되면 고른 범위로 돌아갑니다.
-            ScopeSelector.SelectedItem = scopes.FirstOrDefault(s => s.Id == preferredScopeId) ?? SymbolSearchScope.All;
+            // 바라던 범위가 아직 게시되지 않았으면 '전체'를 보이고, 게시되면 그 범위로 바꿉니다. 소속 목록이 게시되었는데도
+            // 없으면 이번 창은 '전체'로 확정합니다(SymbolScopeChoice). 상태 줄은 다음 갱신에서 다시 그립니다.
+            ScopeSelector.SelectedItem = scopeChoice.Choose(scopes);
         }
         finally { updatingScopes = false; }
         return true;
@@ -97,8 +96,7 @@ public partial class SymbolSearchDialog : DialogWindow
     private async void OnScopeSelectionChanged(object sender, SelectionChangedEventArgs args)
     {
         if (updatingScopes || isClosed) return;
-        preferredScopeId = SelectedScope.Id;
-        preferredScopeName = SelectedScope.Name;
+        scopeChoice.UserSelected(SelectedScope);
         if (!IsLoaded) return;
         await RefreshResultsAsync(useDebounce: false);
     }
@@ -128,28 +126,22 @@ public partial class SymbolSearchDialog : DialogWindow
         statusTimer.Tick -= OnStatusTimerTick;
         searchCancellation?.Cancel();
         searchCancellation = null;
-        rememberedSolution = solutionRoot;
-        rememberedScopeId = preferredScopeId;
-        rememberedScopeName = preferredScopeName;
+        rememberedSolution = solutionKey;
+        rememberedScopeId = scopeChoice.NextId;
+        rememberedScopeName = scopeChoice.NextName;
     }
-
-    /// <summary>기억한 범위가 아직 게시되지 않아 다른 범위(전체)를 보이는 중인지입니다.</summary>
-    private bool IsScopePending => SelectedScope.Id != preferredScopeId;
 
     /// <summary>
     /// 사용자가 지금 범위로 입력·이동을 시작하면 늦게 게시되는 이전 범위로 바꾸지 않습니다. 보던 결과가 저절로
-    /// 바뀌지 않게 하려는 것입니다.
+    /// 바뀌지 않게 하려는 것이며, 이번 창에만 적용하고 다음 열기의 기억은 그대로 둡니다.
     /// </summary>
     private void SettleScope()
     {
-        if (!IsScopePending) return;
         var note = PendingScopeNote();
-        preferredScopeId = SelectedScope.Id;
-        preferredScopeName = SelectedScope.Name;
-        StatusText.Text = StatusText.Text.Replace(note, string.Empty);
+        if (scopeChoice.Settle(SelectedScope)) StatusText.Text = StatusText.Text.Replace(note, string.Empty);
     }
 
-    private string PendingScopeNote() => IsScopePending ? $" · 마지막 범위 '{preferredScopeName}' 준비 중" : string.Empty;
+    private string PendingScopeNote() => scopeChoice.PendingNote(SelectedScope);
 
     [SuppressMessage(
         "Usage",

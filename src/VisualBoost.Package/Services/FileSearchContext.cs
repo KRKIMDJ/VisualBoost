@@ -13,11 +13,13 @@ internal sealed class FileSearchContext
     private FileSearchContext(
         string? preferredRoot,
         string? solutionRoot,
+        string? solutionPath,
         IReadOnlyCollection<string> openFiles,
         IReadOnlyList<SolutionProjectInfo> projects)
     {
         PreferredRoot = preferredRoot;
         SolutionRoot = solutionRoot;
+        SolutionPath = solutionPath;
         OpenFiles = openFiles;
         Projects = projects;
     }
@@ -25,6 +27,12 @@ internal sealed class FileSearchContext
     public string? PreferredRoot { get; }
 
     public string? SolutionRoot { get; }
+
+    /// <summary>열린 Solution 파일 경로입니다. 폴더로 연 작업 영역처럼 Solution 파일이 없으면 null입니다.</summary>
+    public string? SolutionPath { get; }
+
+    /// <summary>같은 Solution인지 가리는 키입니다. 같은 폴더에 여러 .sln이 있을 수 있어 파일 경로를 우선합니다.</summary>
+    public string? SolutionKey => SolutionPath ?? SolutionRoot;
 
     public IReadOnlyCollection<string> OpenFiles { get; }
 
@@ -34,9 +42,11 @@ internal sealed class FileSearchContext
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         var preferredRoot = GetActiveProjectDirectory(dte);
+        var solutionPath = GetSolutionPath(dte);
         return new FileSearchContext(
             preferredRoot,
-            GetSolutionDirectory(dte),
+            SearchPath.DirectoryOf(solutionPath),
+            solutionPath,
             GetOpenDocumentPaths(dte),
             SolutionProjectCatalog.Collect(dte, preferredRoot));
     }
@@ -74,12 +84,13 @@ internal sealed class FileSearchContext
         }
     }
 
-    private static string? GetSolutionDirectory(DTE2 dte)
+    private static string? GetSolutionPath(DTE2 dte)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         try
         {
-            return SearchPath.DirectoryOf(dte.Solution.FullName);
+            var path = dte.Solution.FullName;
+            return string.IsNullOrWhiteSpace(path) ? null : path;
         }
         catch (COMException)
         {

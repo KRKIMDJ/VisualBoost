@@ -56,6 +56,7 @@ internal static class Program
             ProjectCollectionTests.Run();
             SearchHighlightTests.Run();
             SearchKeyboardTests.Run(root);
+            SymbolScopeChoiceTests.Run();
             NavigationResultTests.Run();
             ReferenceResultsTests.Run(root, output);
             CompletionInteractionTests.Run(root);

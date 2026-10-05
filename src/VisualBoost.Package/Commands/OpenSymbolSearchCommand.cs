@@ -81,7 +81,7 @@ internal sealed class OpenSymbolSearchCommand
         var dialog = new SymbolSearchDialog(
             fileIndex,
             context.Projects,
-            context.SolutionRoot,
+            context.SolutionKey,
             SearchQuerySeed.ForSymbolSearch(FileSearchContext.GetSelectedText(dte)));
         WindowPlacement.Apply(dialog, WindowPlacementStore.Load(package, PlacementName));
         var accepted = dialog.ShowModal() == true;

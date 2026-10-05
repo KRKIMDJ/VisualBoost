@@ -37,6 +37,7 @@
     <Compile Include="../../src/VisualBoost.Package/UI/ReferenceResults.cs" Link="ReferenceResults.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/ResultListKeys.cs" Link="ResultListKeys.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/WindowPlacement.cs" Link="WindowPlacement.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/SymbolScopeChoice.cs" Link="SymbolScopeChoice.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>

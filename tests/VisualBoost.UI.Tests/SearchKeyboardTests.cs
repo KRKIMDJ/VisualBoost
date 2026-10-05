@@ -3,6 +3,7 @@ using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
+using VisualBoost.Core.Indexing;
 using VisualBoost.UI;
 
 /// <summary>검색 창 공통 조작: 목록 이동 키, 범위 전환 키, 창 위치 복원 규칙과 XAML의 안내·우클릭 메뉴.</summary>
@@ -92,6 +93,44 @@ internal static class SearchKeyboardTests
     private static void Move(Key key, ModifierKeys modifiers, int current, int count, int page, int expected, string message)
     {
         Check(ResultListKeys.TryMove(key, modifiers, current, count, page, out var target) && target == expected, $"{message}: {target}");
+    }
+
+    private static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
+}
+
+/// <summary>심볼 탐색 범위 기억: 이번 창의 자동 전환과 다음 열기의 기억을 따로 다룬다.</summary>
+internal static class SymbolScopeChoiceTests
+{
+    public static void Run()
+    {
+        var collecting = new[] { SymbolSearchScope.All };
+        var catalog = SymbolSearchScope.CreateCatalog(Array.Empty<SymbolSearchScope>(), new[] { @"C:\Game\A.cpp" }, new[] { @"C:\UE\Engine" });
+        var engine = catalog.Single(scope => scope.Id == "engine");
+
+        var fresh = new SymbolScopeChoice(null, null);
+        Check(fresh.Choose(collecting) == SymbolSearchScope.All && !fresh.IsPending(SymbolSearchScope.All) && fresh.NextId == "all", "기억 없음은 전체");
+
+        var waiting = new SymbolScopeChoice("engine", "엔진");
+        var shown = waiting.Choose(collecting);
+        Check(shown == SymbolSearchScope.All && waiting.IsPending(shown) && waiting.PendingNote(shown).Contains("'엔진' 준비 중"), "게시 전에는 전체와 준비 중 안내");
+        Check(waiting.Choose(catalog) == engine && !waiting.IsPending(engine) && waiting.PendingNote(engine).Length == 0, "게시되면 기억한 범위로 전환");
+
+        var typed = new SymbolScopeChoice("engine", "엔진");
+        shown = typed.Choose(collecting);
+        Check(typed.Settle(shown) && !typed.IsPending(shown), "입력·이동을 시작하면 이번 창은 지금 범위로 확정");
+        Check(typed.Choose(catalog) == SymbolSearchScope.All, "확정한 뒤 늦게 게시되어도 자동 전환하지 않음");
+        Check(typed.NextId == "engine" && typed.NextName == "엔진", "이번 창의 확정은 다음 열기의 기억을 지우지 않음");
+
+        var removed = new SymbolScopeChoice(@"project:C:\Gone.vcxproj","프로젝트: Gone");
+        shown = removed.Choose(catalog);
+        Check(shown == SymbolSearchScope.All && !removed.IsPending(shown) && removed.PendingNote(shown).Length == 0,
+            "소속 목록이 게시되었는데도 없으면 전체로 확정하고 안내를 거둠");
+        Check(removed.NextId == @"project:C:\Gone.vcxproj","다시 로드될 수 있으므로 기억은 유지");
+
+        removed.UserSelected(engine);
+        Check(removed.PreferredId == "engine" && removed.NextId == "engine" && removed.NextName == "엔진", "직접 고른 범위는 이번 창과 다음 열기에 모두 반영");
+        Check(!removed.Settle(engine), "기다리는 중이 아니면 확정할 것이 없음");
+        Console.WriteLine("PASS: 심볼 탐색 범위의 자동 전환·확정과 다음 열기 기억 분리");
     }
 
     private static void Check(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
