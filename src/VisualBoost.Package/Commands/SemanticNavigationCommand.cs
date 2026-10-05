@@ -4,11 +4,11 @@ using System.ComponentModel.Design;
 using System.IO;
 using System.Linq;
 using System.Media;
-using System.Runtime.InteropServices;
 using System.Threading;
 using System.Threading.Tasks;
 using EnvDTE80;
 using Microsoft;
+using Microsoft.VisualStudio;
 using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Editor;
 using Microsoft.VisualStudio.Shell;
@@ -235,18 +235,20 @@ internal sealed class SemanticNavigationCommand
             return;
         }
 
-        var dte = await package.GetServiceAsync(typeof(Microsoft.VisualStudio.Shell.Interop.SDTE)) as DTE2;
-        Assumes.Present(dte);
-        try
+        // DTE 명령 이름으로 실행하면 인수를 요구하는 대화상자가 뜨는 버전이 있어, 단축키와 같은 경로인
+        // 표준 명령 ID를 셸에 게시합니다. 이 명령이 끝난 뒤 활성 편집기 문맥에서 실행됩니다.
+        var shell = await package.GetServiceAsync(typeof(SVsUIShell)) as IVsUIShell;
+        Assumes.Present(shell);
+        var group = VSConstants.GUID_VSStandardCommandSet97;
+        object? argument = null;
+        var command = kind == Kind.Definition ? VSConstants.VSStd97CmdID.GotoDefn : VSConstants.VSStd97CmdID.FindReferences;
+        if (ErrorHandler.Failed(shell.PostExecCommand(ref group, (uint)command, 0, ref argument)))
         {
-            dte.ExecuteCommand(kind == Kind.Definition ? "Edit.GoToDefinition" : "Edit.FindAllReferences");
-            if (reason is not null) await SetStatusAsync(reason + " Visual Studio 기본 탐색을 실행했습니다.");
-        }
-        catch (COMException)
-        {
-            // 현재 문맥에서 기본 명령을 쓸 수 없는 경우입니다(예: 코드 편집기가 아님).
             await NotifyAsync(reason ?? "현재 위치에서는 탐색할 수 없습니다.");
+            return;
         }
+
+        if (reason is not null) await SetStatusAsync(reason + " Visual Studio 기본 탐색을 실행했습니다.");
     }
 
     private static IWpfTextView? ActiveView(IVsTextManager manager, IVsEditorAdaptersFactoryService adapters)

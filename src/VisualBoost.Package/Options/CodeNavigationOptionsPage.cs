@@ -19,7 +19,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     public bool StartOnSolutionOpen { get; set; } = true;
 
     [Category("정의·참조 탐색"), DisplayName("clangd 경로"), DefaultValue("")]
-    [Description("비워 두면 Visual Studio의 C++ Clang 도구에 포함된 clangd를 사용합니다.")]
+    [Description("비워 두면 현재 Visual Studio, 다른 Visual Studio의 C++ Clang 도구, LLVM 설치 순서로 clangd를 찾습니다.")]
     public string ClangdPath { get; set; } = string.Empty;
 
     [Category("정의·참조 탐색"), DisplayName("색인 작업 수"), DefaultValue(0)]
