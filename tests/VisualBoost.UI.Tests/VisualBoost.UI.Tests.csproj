@@ -33,6 +33,7 @@
     <Compile Include="../../src/VisualBoost.Package/Coloring/ColoringSettings.cs" Link="ColoringSettings.cs" />
     <Compile Include="../../src/VisualBoost.Package/Coloring/CppColorFormatSession.cs" Link="CppColorFormatSession.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/FittedResultsList.cs" Link="FittedResultsList.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/NavigationResultItem.cs" Link="NavigationResultItem.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>

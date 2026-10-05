@@ -9,4 +9,6 @@ internal static class CommandIds
     public const int OpenSymbolSearch = 0x0104;
     public const int OpenDocumentMembers = 0x0107;
     public const int GenerateFunction = 0x0108;
+    public const int GoToDefinition = 0x0109;
+    public const int FindReferences = 0x010A;
 }

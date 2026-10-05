@@ -11,12 +11,13 @@ using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using VisualBoost.Commands;
 using VisualBoost.Options;
+using VisualBoost.SemanticNavigation;
 using VisualBoost.Services;
 
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.34.0")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.35.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 [ProvideOptionPage(typeof(GeneralOptionsPage), "VisualBoost", "General", 0, 0, true)]
@@ -35,13 +36,17 @@ namespace VisualBoost;
 [ProvideProfile(typeof(CodeGenerationOptionsPage), "VisualBoost", "코드 생성", 0, 0, true)]
 [ProvideOptionPage(typeof(EditorToolsOptionsPage), "VisualBoost", "편집 도구", 0, 0, true)]
 [ProvideProfile(typeof(EditorToolsOptionsPage), "VisualBoost", "편집 도구", 0, 0, true)]
+[ProvideOptionPage(typeof(CodeNavigationOptionsPage), "VisualBoost", "정의·참조 탐색", 0, 0, true)]
+[ProvideProfile(typeof(CodeNavigationOptionsPage), "VisualBoost", "정의·참조 탐색", 0, 0, true)]
 [Guid(PackageGuidString)]
 public sealed class VisualBoostPackage : AsyncPackage
 {
     public const string PackageGuidString = "d54a4377-4869-4f58-a583-5318b38d77f2";
 
     private readonly SolutionFileIndexService fileIndex = new();
+    private SemanticNavigationService? navigation;
     private SolutionEvents? solutionEvents;
+    private BuildEvents? buildEvents;
     private DocumentEvents? documentEvents;
     private ProjectItemsEvents? projectItemsEvents;
     private CancellationTokenSource? discoveryCancellation;
@@ -72,6 +77,8 @@ public sealed class VisualBoostPackage : AsyncPackage
         projectItemsEvents.ItemAdded += OnProjectItemChanged;
         projectItemsEvents.ItemRemoved += OnProjectItemChanged;
         projectItemsEvents.ItemRenamed += OnProjectItemRenamed;
+        buildEvents = dte.Events.BuildEvents;
+        buildEvents.OnBuildDone += OnBuildDone;
         fileIndex.RecordRecentFile(dte.ActiveDocument?.FullName);
 
         MigrateLegacyOptions();
@@ -79,8 +86,13 @@ public sealed class VisualBoostPackage : AsyncPackage
         ((DocumentNavigationOptionsPage)GetDialogPage(typeof(DocumentNavigationOptionsPage))).Publish();
         var statusBar = await GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
-        if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar);
+        // 정의·참조 탐색은 Solution 이벤트보다 먼저 만들어 이미 열린 Solution도 처리합니다.
+        navigation = new SemanticNavigationService(fileIndex, ((CodeNavigationOptionsPage)GetDialogPage(typeof(CodeNavigationOptionsPage))).CreateSettings());
+        SemanticNavigationRuntime.Service = navigation;
+        var currentNavigation = navigation;
+        if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar, () => currentNavigation.StatusText);
         StartFileIndex(dte);
+        if (!string.IsNullOrEmpty(dte.Solution?.FullName)) navigation.SolutionOpened(dte.Solution!.FullName);
         CommentLinks.CommentLinkRuntime.Enabled = ((EditorToolsOptionsPage)GetDialogPage(typeof(EditorToolsOptionsPage))).CommentLinksEnabled;
         CommentLinks.CommentLinkRuntime.Index = fileIndex;
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
@@ -90,6 +102,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await OpenSymbolSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
         await GenerateFunctionCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await SemanticNavigationCommand.InitializeAsync(this, navigation, cancellationToken);
     }
 
     protected override void Dispose(bool disposing)
@@ -105,9 +118,11 @@ public sealed class VisualBoostPackage : AsyncPackage
                 analysisStatus = null;
                 Completion.CompletionRuntime.GetSnapshot = null;
                 CommentLinks.CommentLinkRuntime.Index = null;
+                SemanticNavigationRuntime.Service = null;
                 Coloring.ColoringSettings.Publish(new Coloring.ColoringSettings(false, new string[8]));
                 Coloring.SharedColorPalette.Detach();
             });
+            navigation?.Dispose();
             fileIndex.Dispose();
             solutionEvents = null;
             documentEvents = null;
@@ -139,6 +154,10 @@ public sealed class VisualBoostPackage : AsyncPackage
             projectItemsEvents.ItemRemoved -= OnProjectItemChanged;
             projectItemsEvents.ItemRenamed -= OnProjectItemRenamed;
         }
+        if (buildEvents is not null)
+        {
+            buildEvents.OnBuildDone -= OnBuildDone;
+        }
     }
 
     internal bool IsQuickIncludeEnabled() => ((EditorToolsOptionsPage)GetDialogPage(typeof(EditorToolsOptionsPage))).QuickIncludeEnabled;
@@ -159,6 +178,7 @@ public sealed class VisualBoostPackage : AsyncPackage
             if (dte is not null)
             {
                 StartFileIndex(dte);
+                navigation?.SolutionOpened(dte.Solution.FullName ?? string.Empty);
             }
         }).FileAndForget("VisualBoost/StartFileIndex");
     }
@@ -169,6 +189,14 @@ public sealed class VisualBoostPackage : AsyncPackage
         discoveryCancellation?.Cancel();
         Completion.CompletionRuntime.GetSnapshot = null;
         fileIndex.Clear();
+        navigation?.SolutionClosed();
+    }
+
+    private void OnBuildDone(vsBuildScope scope, vsBuildAction action)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        // 빌드가 응답 파일을 새로 썼을 수 있습니다. 명령이 바뀌었을 때만 clangd를 다시 시작합니다.
+        if (action != vsBuildAction.vsBuildActionClean) navigation?.BuildCompleted();
     }
 
     private void OnProjectChanged(Project project)

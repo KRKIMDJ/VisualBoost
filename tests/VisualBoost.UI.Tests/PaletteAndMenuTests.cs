@@ -44,7 +44,8 @@ internal static class PaletteAndMenuTests
             Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
         }
         var expected = new[] { "GenerateFunctionCommand|GUID_TextEditorFactory|Shift Alt|Q", "OpenDocumentMembersCommand|GUID_TextEditorFactory|ALT|M", "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
-            "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S" };
+            "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S", "GoToDefinitionCommand|GUID_TextEditorFactory|ALT|G",
+            "FindReferencesCommand|GUID_TextEditorFactory|Shift Alt|F" };
         var actual = xml.Root.Element(ns + "KeyBindings")!.Elements(ns + "KeyBinding").Select(k =>
             string.Join("|", new[] { "id", "editor", "mod1", "key1" }.Select(name => (string?)k.Attribute(name))));
         Assert(actual.SequenceEqual(expected), "기존 단축키와 적용 범위 유지");
@@ -55,7 +56,7 @@ internal static class PaletteAndMenuTests
         Assert(navigationView.Descendants().Any(node => (string?)node.Attribute(x + "Name") == "Search"), "상단 줄과 별개로 숨김 모드 검색란 유지");
         var navigationOptions = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Options", "DocumentNavigationOptionsPage.cs"));
         Assert(navigationOptions.Contains("ShowBar") && navigationOptions.Contains("NameOrder"), "상단 줄 표시·정렬 설정 유지");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 7, "미구현 명령을 제외한 사용자 명령 일곱 개 유지");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 9, "정의·참조 탐색을 포함한 사용자 명령 아홉 개 유지");
         var placement = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement").Single();
         Assert((string?)placement.Attribute("id") == "GenerateFunctionCommand" && (string?)placement.Element(ns + "Parent")!.Attribute("id") == "VisualBoostGenerationContextGroup", "코드 편집기 메뉴가 같은 생성 명령을 재사용");
         var generationCommand = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Commands", "GenerateFunctionCommand.cs"));

@@ -75,6 +75,20 @@
           <CanonicalName>VisualBoost.OpenDocumentMembers</CanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidVisualBoostCommandSet" id="GoToDefinitionCommand" priority="0x0110" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>정의로 이동</ButtonText>
+          <CanonicalName>VisualBoost.GoToDefinition</CanonicalName>
+        </Strings>
+      </Button>
+      <Button guid="guidVisualBoostCommandSet" id="FindReferencesCommand" priority="0x0120" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
+        <Strings>
+          <ButtonText>참조 찾기...</ButtonText>
+          <CanonicalName>VisualBoost.FindReferences</CanonicalName>
+        </Strings>
+      </Button>
       <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0100" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
@@ -124,6 +138,8 @@
     <KeyBinding guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" editor="guidVSStd97" mod1="ALT" key1="O" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="O" />
     <KeyBinding guid="guidVisualBoostCommandSet" id="OpenSymbolSearchCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="S" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="GoToDefinitionCommand" editor="GUID_TextEditorFactory" mod1="ALT" key1="G" />
+    <KeyBinding guid="guidVisualBoostCommandSet" id="FindReferencesCommand" editor="GUID_TextEditorFactory" mod1="Shift Alt" key1="F" />
   </KeyBindings>
 
   <Symbols>
@@ -149,6 +165,8 @@
       <IDSymbol name="OpenSymbolSearchCommand" value="0x0104" />
       <IDSymbol name="OpenDocumentMembersCommand" value="0x0107" />
       <IDSymbol name="GenerateFunctionCommand" value="0x0108" />
+      <IDSymbol name="GoToDefinitionCommand" value="0x0109" />
+      <IDSymbol name="FindReferencesCommand" value="0x010A" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

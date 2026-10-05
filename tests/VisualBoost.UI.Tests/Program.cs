@@ -47,7 +47,7 @@ internal static class Program
             { GenerationInteractionTests.Run(output); return 0; }
             if (args.Skip(1).Contains("--document-navigation"))
             { DocumentNavigationInteractionTests.Run(root); return 0; }
-            foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog" })
+            foreach (var name in new[] { "FileSearchDialog", "SymbolSearchDialog", "NavigationResultsDialog" })
                 Validate(root, output, name);
             ColorFormatTests.Run();
             PaletteAndMenuTests.Run(root);
@@ -55,6 +55,7 @@ internal static class Program
             SharedColorTests.Run();
             ProjectCollectionTests.Run();
             SearchHighlightTests.Run();
+            NavigationResultTests.Run();
             CompletionInteractionTests.Run(root);
             DocumentNavigationInteractionTests.Run(root);
             Console.WriteLine("PASS: 실제 검색 XAML의 행 표시, 비율 조절, 창 크기 변경, 재개방 검증");
@@ -180,6 +181,16 @@ internal static class Program
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
             Pump();
         }
+        if (name == "NavigationResultsDialog")
+        {
+            var headers = ((GridView)((ListView)items).View).Columns.Select(c => c.Header.ToString()).ToArray();
+            Assert(headers.SequenceEqual(new[] { "파일", "줄", "코드", "폴더" }), "결과 창 열 순서");
+            var code = Descendants<TextBlock>(items).FirstOrDefault(t => t.Inlines.OfType<Run>().Count() == 3);
+            Assert(code is not null, "코드 셀 구간 구성");
+            var runs = code!.Inlines.OfType<Run>().ToArray();
+            Assert(string.Concat(runs.Select(r => r.Text)) == "return SetMovementMode();" && runs[1].FontWeight == FontWeights.Bold &&
+                   runs[0].FontWeight != FontWeights.Bold, "코드 셀은 일치 구간만 굵게");
+        }
         var surface = (FrameworkElement)window.Content;
         var image = new RenderTargetBitmap((int)surface.ActualWidth, (int)surface.ActualHeight, 96, 96, PixelFormats.Pbgra32);
         var drawing = new DrawingVisual();
@@ -236,5 +247,10 @@ internal static class Program
         public string IconText => "C++";
         public object[] FileNameSegments => new object[] { new { Text = FileName, IsMatch = true } };
         public object[] PathSegments => new object[] { new { Text = DirectoryPath, IsMatch = false } };
+        public string Before => "return ";
+        public string Match => Name;
+        public string After => "();";
+        public string Code => Before + Match + After;
+        public string Folder => DirectoryPath;
     }
 }

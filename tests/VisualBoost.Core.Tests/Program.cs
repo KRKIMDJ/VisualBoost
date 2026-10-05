@@ -18,6 +18,16 @@ internal static class Program
     private static int Main()
     {
         Run("주석 심볼 링크", CommentSymbolLinkTests.Run);
+        Run("의미 탐색 JSON", SemanticNavigationTests.RunJson);
+        Run("의미 탐색 명령줄 분리", SemanticNavigationTests.RunCommandLine);
+        Run("의미 탐색 URI·위치 변환", SemanticNavigationTests.RunUri);
+        Run("LSP 연결 요청·통지·취소·끊김", SemanticNavigationTests.RunConnection);
+        Run("Unreal 응답 파일 compilation database", SemanticNavigationTests.RunUnrealCommands);
+        Run("clangd 세션 통합", SemanticNavigationTests.RunClangdIntegration);
+        Run("clangd 문서 집합 임대·리비전·용량", SemanticNavigationTests.RunDocumentSet);
+        Run("컴파일 문맥 준비", SemanticNavigationTests.RunCompileContext);
+        Run("결과 줄 미리보기·엔진 정의 후보", SemanticNavigationTests.RunPreviewAndCandidates);
+        Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진 정의·저장 반영)", SemanticNavigationTests.RunNavigatorIntegration);
         Run("독립 문서 색상 스캐너·취소·상한·성능", QuickColorTests.Run);
         Run("일반 C++ 선언·정의 생성", CodeGenerationTests.Run);
         Run("빠른 인클루드 및 주석 파일 링크", EditorToolsTests.Run);

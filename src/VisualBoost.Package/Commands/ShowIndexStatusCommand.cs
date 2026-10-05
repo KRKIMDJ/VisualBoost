@@ -5,6 +5,7 @@ using System.Threading.Tasks;
 using Microsoft;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using VisualBoost.SemanticNavigation;
 using VisualBoost.Services;
 
 namespace VisualBoost.Commands;
@@ -62,6 +63,11 @@ internal sealed class ShowIndexStatusCommand
         if (!string.IsNullOrWhiteSpace(snapshot.AnalysisError))
         {
             message += $"\n\n최근 분석 오류: {snapshot.AnalysisError}";
+        }
+
+        if (SemanticNavigationRuntime.Service is { } navigation)
+        {
+            message += "\n\n[정의·참조 탐색]\n" + navigation.Describe();
         }
 
         VsShellUtilities.ShowMessageBox(

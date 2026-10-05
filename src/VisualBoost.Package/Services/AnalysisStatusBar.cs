@@ -14,14 +14,16 @@ internal sealed class AnalysisStatusBar : IDisposable
     private readonly SolutionFileIndexService index;
     private readonly IVsStatusbar status;
     private readonly DispatcherTimer timer;
+    private readonly Func<string?>? secondary;
     private string? written;
     private string? observed;
     private DateTime externalUntil;
 
-    internal AnalysisStatusBar(SolutionFileIndexService index, IVsStatusbar status)
+    /// <param name="secondary">파일 인덱스가 조용할 때 보여 줄 다른 진행 상태(정의·참조 색인 등).</param>
+    internal AnalysisStatusBar(SolutionFileIndexService index, IVsStatusbar status, Func<string?>? secondary = null)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        this.index = index; this.status = status;
+        this.index = index; this.status = status; this.secondary = secondary;
         timer = new DispatcherTimer(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(250) };
         timer.Tick += OnTick;
         timer.Start();
@@ -33,7 +35,7 @@ internal sealed class AnalysisStatusBar : IDisposable
         try
         {
             var snapshot = index.GetSnapshot();
-            var text = Format(snapshot);
+            var text = Format(snapshot) ?? secondary?.Invoke();
             status.IsFrozen(out var frozen);
             if (frozen != 0) return;
             status.GetText(out var current);
