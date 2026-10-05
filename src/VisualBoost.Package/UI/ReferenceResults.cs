@@ -96,6 +96,9 @@ public sealed class ReferenceLineRow
 
     public string Container => Item.Container;
 
+    /// <summary>일치 구간이 가리키는 심볼의 종류입니다. 모르면 null입니다.</summary>
+    public VisualBoost.Core.Analysis.SourceSymbolKind? SymbolKind => Item.SymbolKind;
+
     /// <summary>화면 읽기 프로그램이 읽는 이름입니다.</summary>
     public override string ToString() => $"{FileName} {Line}줄: {Code}";
 }

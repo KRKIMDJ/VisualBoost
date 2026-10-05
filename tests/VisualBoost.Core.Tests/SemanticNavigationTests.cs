@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using VisualBoost.Core.Analysis;
 using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.Core.Tests;
@@ -443,6 +444,10 @@ internal static class SemanticNavigationTests
             var references = navigator.ReferencesAsync(query, timeout.Token).Result;
             Check(references.Symbol is { Name: "Compute", ContainerName: "FMod" } &&
                   references.Locations.Any(l => l.Path == other) && references.Locations.Any(l => l.Path == header), "참조·선언과 심볼 정보");
+            Check(references.SymbolKind == SourceSymbolKind.Function, "참조 결과의 심볼 종류(정적 멤버 함수): " + references.SymbolKind);
+            Check(ClangdSession.SymbolKindOf(23) == SourceSymbolKind.Struct && ClangdSession.SymbolKindOf(15) == SourceSymbolKind.Macro &&
+                  ClangdSession.SymbolKindOf(8) == SourceSymbolKind.Variable && ClangdSession.SymbolKindOf(1) is null && ClangdSession.SymbolKindOf(null) is null,
+                "LSP 심볼 종류 대응");
             Check(references.Locations.Any(l => l.Path == other && l.Container == "Other") && references.Locations.Any(l => l.Path == use && l.Container == "Use"),
                 "참조마다 포함 함수 이름: " + string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path) + "=" + l.Container)));
 

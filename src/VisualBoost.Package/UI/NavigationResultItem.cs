@@ -3,6 +3,7 @@ using System.IO;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using VisualBoost.Core.Analysis;
 using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.UI;
@@ -13,8 +14,9 @@ internal sealed class NavigationResultItem
     private const int MaxBefore = 80;
     private const int MaxAfter = 200;
 
-    public NavigationResultItem(NavigationLocation location, string lineText, string? solutionDirectory)
+    public NavigationResultItem(NavigationLocation location, string lineText, string? solutionDirectory, SourceSymbolKind? symbolKind = null)
     {
+        SymbolKind = symbolKind;
         Location = location;
         FullPath = location.Path;
         FileName = Path.GetFileName(location.Path);
@@ -51,6 +53,9 @@ internal sealed class NavigationResultItem
 
     /// <summary>참조가 들어 있는 함수·클래스 이름입니다. 모르면 빈 문자열입니다.</summary>
     public string Container { get; }
+
+    /// <summary>일치 구간(<see cref="Match"/>)이 가리키는 심볼의 종류입니다. 이름 색칠에 쓰며 clangd가 판정하지 못하면 null입니다.</summary>
+    public SourceSymbolKind? SymbolKind { get; }
 
     public bool Matches(string query) =>
         FileName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||

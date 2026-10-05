@@ -74,12 +74,14 @@ public sealed class NavigationQuery
 
 public sealed class NavigationResult
 {
-    public NavigationResult(IReadOnlyList<NavigationLocation> locations, SemanticSymbol? symbol, BackgroundIndexProgress progress, bool resolvedOnDemand)
+    public NavigationResult(IReadOnlyList<NavigationLocation> locations, SemanticSymbol? symbol, BackgroundIndexProgress progress, bool resolvedOnDemand,
+        SourceSymbolKind? symbolKind = null)
     {
         Locations = locations;
         Symbol = symbol;
         Progress = progress;
         ResolvedOnDemand = resolvedOnDemand;
+        SymbolKind = symbolKind;
     }
 
     public IReadOnlyList<NavigationLocation> Locations { get; }
@@ -91,6 +93,9 @@ public sealed class NavigationResult
 
     /// <summary>색인하지 않은 엔진 cpp를 요청 시점에 열어 정의를 확정했습니다.</summary>
     public bool ResolvedOnDemand { get; }
+
+    /// <summary>결과 목록에서 이름을 색칠할 심볼 종류입니다. 목록을 보이지 않는 결과(정의 하나)나 판정하지 못하면 null입니다.</summary>
+    public SourceSymbolKind? SymbolKind { get; }
 }
 
 /// <summary>
@@ -231,7 +236,15 @@ public sealed class ClangdNavigator : IDisposable
                 }
             }
 
-            return new NavigationResult(locations, symbol, Progress, resolved);
+            var kind = default(SourceSymbolKind?);
+            if (locations.Count > 1)
+            {
+                // 후보 목록을 보일 때만 종류를 찾습니다. 하나면 바로 이동하므로 추가 요청을 하지 않습니다.
+                symbol ??= await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
+                kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
+            }
+
+            return new NavigationResult(locations, symbol, Progress, resolved, kind);
         }
         finally
         {
@@ -247,11 +260,26 @@ public sealed class ClangdNavigator : IDisposable
         {
             var locations = await session.ReferencesAsync(query.Path, query.Line, query.Character, true, cancellationToken).ConfigureAwait(false);
             var symbol = await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
-            return new NavigationResult(locations, symbol, Progress, false);
+            var kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
+            return new NavigationResult(locations, symbol, Progress, false, kind);
         }
         finally
         {
             documents.Release(query.Path);
+        }
+    }
+
+    /// <summary>결과 색칠용 종류입니다. 표시 보조일 뿐이므로 clangd가 이 요청만 거절하면 종류 없이 결과를 돌려줍니다.</summary>
+    private async Task<SourceSymbolKind?> SymbolKindAsync(SemanticSymbol? symbol, IReadOnlyList<NavigationLocation> locations, CancellationToken cancellationToken)
+    {
+        if (symbol is null) return null;
+        try
+        {
+            return await session.SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
+        }
+        catch (LspRequestException)
+        {
+            return null;
         }
     }
 

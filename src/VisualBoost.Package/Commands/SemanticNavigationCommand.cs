@@ -131,7 +131,7 @@ internal sealed class SemanticNavigationCommand
                         ? await navigator.DefinitionAsync(query, progress, timeout.Token).ConfigureAwait(false)
                         : await navigator.ReferencesAsync(query, timeout.Token).ConfigureAwait(false);
                     var ordered = Order(found.Locations, path);
-                    found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand);
+                    found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind);
                     // 결과가 하나인 정의 이동은 미리보기가 필요 없습니다.
                     var preview = kind == Kind.References || ordered.Count > 1
                         ? SourceLinePreview.LoadLines(ordered, p => openTexts.TryGetValue(p, out var open) ? open.Text : null, timeout.Token)
@@ -190,7 +190,7 @@ internal sealed class SemanticNavigationCommand
         Assumes.Present(dte);
         var solutionPath = dte.Solution?.FullName;
         var solutionDirectory = string.IsNullOrEmpty(solutionPath) ? null : Path.GetDirectoryName(solutionPath);
-        var items = result.Locations.Select((location, index) => new NavigationResultItem(location, lines[index], solutionDirectory)).ToArray();
+        var items = result.Locations.Select((location, index) => new NavigationResultItem(location, lines[index], solutionDirectory, result.SymbolKind)).ToArray();
         await SetStatusAsync(string.Empty);
         if (kind == Kind.References)
         {

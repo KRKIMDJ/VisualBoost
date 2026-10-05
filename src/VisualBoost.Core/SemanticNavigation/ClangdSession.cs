@@ -7,6 +7,7 @@ using System.Linq;
 using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Core.SemanticNavigation;
 
@@ -298,6 +299,42 @@ public sealed class ClangdSession : IDisposable
         var container = (first["containerName"].AsString() ?? string.Empty).TrimEnd(':');
         return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty);
     }
+
+    /// <summary>
+    /// 심볼 종류를 clangd 색인(<c>workspace/symbol</c>)에서 찾습니다. 같은 이름의 다른 심볼·오버로드와 섞이지 않게,
+    /// 이 심볼의 선언·정의로 이미 받은 위치(<paramref name="known"/>)와 위치가 같은 항목만 씁니다.
+    /// 색인에 없는 지역 변수·매개변수·템플릿 인수이거나 일치하는 항목이 없으면 null입니다.
+    /// </summary>
+    public async Task<SourceSymbolKind?> SymbolKindAsync(SemanticSymbol symbol, IReadOnlyCollection<NavigationLocation> known, CancellationToken cancellationToken)
+    {
+        if (known.Count == 0) return null;
+        var result = await connection.RequestAsync("workspace/symbol", JsonValue.Object(("query", symbol.QualifiedName)), cancellationToken).ConfigureAwait(false);
+        var positions = new HashSet<NavigationLocation>(known);
+        foreach (var item in result.Items)
+        {
+            var location = NavigationLocation.FromLsp(item["location"]);
+            if (location.Count == 1 && positions.Contains(location[0])) return SymbolKindOf(item["kind"].AsInt32());
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// LSP SymbolKind를 VisualBoost 색상 분류로 바꿉니다. clangd는 매크로를 String(15), 공용체·별칭을 Class(5)로 보냅니다.
+    /// 색을 정할 수 없는 종류(File·Module 등)는 null입니다.
+    /// </summary>
+    public static SourceSymbolKind? SymbolKindOf(int? lspKind) => lspKind switch
+    {
+        3 or 4 => SourceSymbolKind.Namespace,
+        5 or 11 => SourceSymbolKind.Class,
+        6 or 9 or 12 or 25 => SourceSymbolKind.Function,
+        7 or 8 or 13 or 14 or 22 => SourceSymbolKind.Variable,
+        10 => SourceSymbolKind.Enum,
+        15 => SourceSymbolKind.Macro,
+        23 => SourceSymbolKind.Struct,
+        26 => SourceSymbolKind.Type,
+        _ => null,
+    };
 
     /// <summary>정상 종료를 요청하고, 시간 안에 끝나지 않으면 이 세션이 띄운 프로세스만 종료합니다.</summary>
     public async Task ShutdownAsync(TimeSpan timeout)
