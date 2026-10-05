@@ -13,6 +13,7 @@ using System.Windows.Media;
 using System.Windows.Threading;
 using VisualBoost.Core.Analysis;
 using VisualBoost.Core.DocumentNavigation;
+using VisualBoost.UI;
 
 namespace VisualBoost.DocumentNavigation;
 
@@ -151,6 +152,11 @@ public partial class DocumentNavigationControl : Popup, IDisposable
             }
             e.Handled = true;
         }
+        else if (e.Key is Key.PageDown or Key.PageUp && Search.IsKeyboardFocusWithin)
+        {
+            MovePage(e.Key == Key.PageDown);
+            e.Handled = true;
+        }
     }
     private void OnDoubleClick(object sender, MouseButtonEventArgs e)
     {
@@ -164,6 +170,14 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     {
         if (Results.Items.Count == 0) return;
         Results.SelectedIndex = Math.Max(0, Math.Min(Results.Items.Count - 1, Results.SelectedIndex + delta));
+        Results.ScrollIntoView(Results.SelectedItem);
+    }
+    /// <summary>PgUp/PgDn: 다른 검색 창과 같이 지금 보이는 줄 수만큼 움직입니다.</summary>
+    internal void MovePage(bool down)
+    {
+        if (!ResultListKeys.TryMove(down ? Key.PageDown : Key.PageUp, ModifierKeys.None, Results.SelectedIndex, Results.Items.Count,
+                ResultListKeys.PageSize(Results, 24), out var target) || target < 0) return;
+        Results.SelectedIndex = target;
         Results.ScrollIntoView(Results.SelectedItem);
     }
     internal void ToggleFocus() { if (Search.IsKeyboardFocusWithin) Results.Focus(); else Search.Focus(); }

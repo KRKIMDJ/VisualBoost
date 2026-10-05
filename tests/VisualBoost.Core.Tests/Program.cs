@@ -39,6 +39,7 @@ internal static class Program
         Run("현재 문서 함수 범위·검색·취소·성능", DocumentNavigationTests.Run);
         Run("심볼 상세 정보 및 입력 보조", SymbolAssistanceTests.Run);
         Run("검색 창 입력 해석(파일:줄, 선택 검색어)", SearchInputTests.Run);
+        Run("코드 미리보기 한 줄 색 구간", CodePreviewClassifierTests.Run);
         Run("같은 디렉터리의 구현 파일을 가장 먼저 선택한다", SameDirectoryWins);
         Run("include와 src 디렉터리를 대응시킨다", IncludeAndSrcArePaired);
         Run("파일명은 대소문자를 구분하지 않는다", FileNameMatchingIsCaseInsensitive);

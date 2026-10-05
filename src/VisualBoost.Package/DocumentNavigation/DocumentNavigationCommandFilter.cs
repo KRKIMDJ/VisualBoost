@@ -70,8 +70,8 @@ internal sealed class DocumentNavigationCommandFilter : IOleCommandTarget
             case VSConstants.VSStd2KCmdID.TAB: case VSConstants.VSStd2KCmdID.BACKTAB: control.ToggleFocus(); break;
             case VSConstants.VSStd2KCmdID.UP: control.MoveSelection(-1); break;
             case VSConstants.VSStd2KCmdID.DOWN: control.MoveSelection(1); break;
-            case VSConstants.VSStd2KCmdID.PAGEUP: control.MoveSelection(-12); break;
-            case VSConstants.VSStd2KCmdID.PAGEDN: control.MoveSelection(12); break;
+            case VSConstants.VSStd2KCmdID.PAGEUP: control.MovePage(false); break;
+            case VSConstants.VSStd2KCmdID.PAGEDN: control.MovePage(true); break;
             case VSConstants.VSStd2KCmdID.LEFT: if (!control.MoveTree(false)) Execute(EditingCommands.MoveLeftByCharacter, search); break;
             case VSConstants.VSStd2KCmdID.RIGHT: if (!control.MoveTree(true)) Execute(EditingCommands.MoveRightByCharacter, search); break;
             case VSConstants.VSStd2KCmdID.LEFT_EXT: Execute(EditingCommands.SelectLeftByCharacter, search); break;

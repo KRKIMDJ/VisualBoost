@@ -111,6 +111,8 @@ internal static class Program
                 else if (attribute.IsNamespaceDeclaration && attribute.Name.LocalName == "ui") attribute.Value = ui.NamespaceName;
                 else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsResourceKeys."))
                     attribute.Value = "{x:Null}";
+                else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsFonts."))
+                    attribute.Remove();
                 else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsBrushes."))
                     attribute.Value = attribute.Value.Contains("HighlightText") ? "#FFFFFF"
                         : attribute.Value.Contains("Highlight") ? "#6154CB"
@@ -199,11 +201,7 @@ internal static class Program
         {
             var headers = ((GridView)((ListView)items).View).Columns.Select(c => c.Header.ToString()).ToArray();
             Assert(headers.SequenceEqual(new[] { "파일", "줄", "코드", "폴더" }), "결과 창 열 순서");
-            var code = Descendants<TextBlock>(items).FirstOrDefault(t => t.Inlines.OfType<Run>().Count() == 3);
-            Assert(code is not null, "코드 셀 구간 구성");
-            var runs = code!.Inlines.OfType<Run>().ToArray();
-            Assert(string.Concat(runs.Select(r => r.Text)) == "return SetMovementMode();" && runs[1].FontWeight == FontWeights.Bold &&
-                   runs[0].FontWeight != FontWeights.Bold, "코드 셀은 일치 구간만 굵게");
+            CodePreviewTests.Run(items);
         }
         var surface = (FrameworkElement)window.Content;
         var image = new RenderTargetBitmap((int)surface.ActualWidth, (int)surface.ActualHeight, 96, 96, PixelFormats.Pbgra32);
@@ -264,6 +262,7 @@ internal static class Program
         public string Before => "return ";
         public string Match => Name;
         public string After => "();";
+        public SourceSymbolKind? SymbolKind => SourceSymbolKind.Function;
         public string Code => Before + Match + After;
         public string Folder => DirectoryPath;
     }

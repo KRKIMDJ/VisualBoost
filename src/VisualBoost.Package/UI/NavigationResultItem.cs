@@ -1,9 +1,12 @@
 using System;
 using System.IO;
+using System.Text;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Documents;
+using System.Windows.Media;
 using VisualBoost.Core.Analysis;
+using VisualBoost.Core.Coloring;
 using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.UI;
@@ -77,7 +80,11 @@ internal sealed class NavigationResultItem
     }
 }
 
-/// <summary>코드 미리보기를 앞·일치·뒤 구간으로 그립니다. 일치 구간만 굵게 하고 색상은 행에서 상속합니다.</summary>
+/// <summary>
+/// 코드 미리보기를 그립니다. 앞·일치·뒤 구간 중 일치 구간만 굵게 하고, 줄을 <see cref="CppLinePreviewClassifier"/>로 나눠
+/// 텍스트 편집기와 같은 계열의 색을 입힙니다. 글꼴은 텍스트 편집기 글꼴 패밀리이며 크기는 목록 글꼴을 따릅니다.
+/// 선택 행(<see cref="PlainProperty"/>)과 고대비 모드에서는 색을 빼고 행 전경색을 상속합니다.
+/// </summary>
 public static class CodeSegments
 {
     public static readonly DependencyProperty BeforeProperty = DependencyProperty.RegisterAttached(
@@ -87,19 +94,90 @@ public static class CodeSegments
     public static readonly DependencyProperty AfterProperty = DependencyProperty.RegisterAttached(
         "After", typeof(string), typeof(CodeSegments), new PropertyMetadata(string.Empty, Refresh));
 
+    /// <summary>일치 구간(탐색 대상 심볼)의 종류입니다. null이면 일치 구간은 행 전경색입니다.</summary>
+    public static readonly DependencyProperty MatchKindProperty = DependencyProperty.RegisterAttached(
+        "MatchKind", typeof(SourceSymbolKind?), typeof(CodeSegments), new PropertyMetadata(null, Refresh));
+
+    /// <summary>true이면 색을 입히지 않습니다. 선택 행의 강조 글자색이 읽히도록 행의 IsSelected를 연결합니다.</summary>
+    public static readonly DependencyProperty PlainProperty = DependencyProperty.RegisterAttached(
+        "Plain", typeof(bool), typeof(CodeSegments), new PropertyMetadata(false, Refresh));
+
+    /// <summary>목록 배경입니다. 의미 기반 색상의 어두운/밝은 테마 값을 고르는 데 씁니다.</summary>
+    public static readonly DependencyProperty SurfaceProperty = DependencyProperty.RegisterAttached(
+        "Surface", typeof(Brush), typeof(CodeSegments), new PropertyMetadata(null, Refresh));
+
+    /// <summary>색 설정·편집기 서식이 바뀌면 증가하는 값(<see cref="SearchPalette.RevisionProperty"/>)을 연결해 다시 그립니다.</summary>
+    public static readonly DependencyProperty RevisionProperty = DependencyProperty.RegisterAttached(
+        "Revision", typeof(int), typeof(CodeSegments), new PropertyMetadata(0, Refresh));
+
     public static string GetBefore(DependencyObject target) => (string)target.GetValue(BeforeProperty);
     public static void SetBefore(DependencyObject target, string value) => target.SetValue(BeforeProperty, value);
     public static string GetMatch(DependencyObject target) => (string)target.GetValue(MatchProperty);
     public static void SetMatch(DependencyObject target, string value) => target.SetValue(MatchProperty, value);
     public static string GetAfter(DependencyObject target) => (string)target.GetValue(AfterProperty);
     public static void SetAfter(DependencyObject target, string value) => target.SetValue(AfterProperty, value);
+    public static SourceSymbolKind? GetMatchKind(DependencyObject target) => (SourceSymbolKind?)target.GetValue(MatchKindProperty);
+    public static void SetMatchKind(DependencyObject target, SourceSymbolKind? value) => target.SetValue(MatchKindProperty, value);
+    public static bool GetPlain(DependencyObject target) => (bool)target.GetValue(PlainProperty);
+    public static void SetPlain(DependencyObject target, bool value) => target.SetValue(PlainProperty, value);
+    public static Brush? GetSurface(DependencyObject target) => (Brush?)target.GetValue(SurfaceProperty);
+    public static void SetSurface(DependencyObject target, Brush? value) => target.SetValue(SurfaceProperty, value);
+    public static int GetRevision(DependencyObject target) => (int)target.GetValue(RevisionProperty);
+    public static void SetRevision(DependencyObject target, int value) => target.SetValue(RevisionProperty, value);
 
     private static void Refresh(DependencyObject target, DependencyPropertyChangedEventArgs args)
     {
         if (target is not TextBlock textBlock) return;
+        var before = GetBefore(target) ?? string.Empty;
+        var match = GetMatch(target) ?? string.Empty;
+        var after = GetAfter(target) ?? string.Empty;
+        var code = before + match + after;
+        var matchEnd = before.Length + match.Length;
+        textBlock.FontFamily = CodePreviewStyle.FontFamily;
         textBlock.Inlines.Clear();
-        textBlock.Inlines.Add(new Run(GetBefore(target) ?? string.Empty));
-        textBlock.Inlines.Add(new Run(GetMatch(target) ?? string.Empty) { FontWeight = FontWeights.Bold });
-        textBlock.Inlines.Add(new Run(GetAfter(target) ?? string.Empty));
+
+        var colored = !GetPlain(target);
+        var dark = GetSurface(target) is not SolidColorBrush surface || SemanticColorPalette.IsDark(surface.Color.R, surface.Color.G, surface.Color.B);
+        var spans = colored ? CppLinePreviewClassifier.Classify(code) : Array.Empty<CodePreviewSpan>();
+        var matchBrush = colored && GetMatchKind(target) is { } kind ? CodePreviewStyle.BrushFor(kind, dark) : null;
+
+        // 구간 경계와 일치 구간 경계로 나눈 조각마다 굵기·색을 정하고, 같은 모양의 이웃 조각은 하나의 Run으로 합칩니다.
+        var position = 0;
+        var spanIndex = 0;
+        var pending = new StringBuilder();
+        var pendingBold = false;
+        Brush? pendingBrush = null;
+        while (position < code.Length)
+        {
+            while (spanIndex < spans.Count && spans[spanIndex].Start + spans[spanIndex].Length <= position) spanIndex++;
+            var inSpan = spanIndex < spans.Count && spans[spanIndex].Start <= position;
+            var bold = position >= before.Length && position < matchEnd;
+            var next = code.Length;
+            if (position < before.Length) next = before.Length;
+            else if (bold) next = matchEnd;
+            if (inSpan) next = Math.Min(next, spans[spanIndex].Start + spans[spanIndex].Length);
+            else if (spanIndex < spans.Count) next = Math.Min(next, spans[spanIndex].Start);
+            var brush = bold ? matchBrush : inSpan ? CodePreviewStyle.BrushFor(spans[spanIndex].Kind, dark) : null;
+            if (pending.Length > 0 && (bold != pendingBold || !ReferenceEquals(brush, pendingBrush)))
+            {
+                textBlock.Inlines.Add(CreateRun(pending.ToString(), pendingBold, pendingBrush));
+                pending.Clear();
+            }
+
+            pending.Append(code, position, next - position);
+            pendingBold = bold;
+            pendingBrush = brush;
+            position = next;
+        }
+
+        if (pending.Length > 0) textBlock.Inlines.Add(CreateRun(pending.ToString(), pendingBold, pendingBrush));
+    }
+
+    private static Run CreateRun(string text, bool bold, Brush? brush)
+    {
+        var run = new Run(text);
+        if (bold) run.FontWeight = FontWeights.Bold;
+        if (brush is not null) run.Foreground = brush;
+        return run;
     }
 }

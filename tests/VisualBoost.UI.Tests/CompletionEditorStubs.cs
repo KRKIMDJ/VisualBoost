@@ -38,6 +38,15 @@ namespace Microsoft.VisualStudio.Shell
         public static object ToolWindowBackgroundKey => SystemColors.WindowBrushKey;
         public static object ToolWindowTextKey => SystemColors.WindowTextBrushKey;
         public static object ToolWindowBorderKey => SystemColors.ActiveBorderBrushKey;
+        public static object SearchBoxBackgroundKey => SystemColors.ControlLightBrushKey;
+        public static object HighlightKey => SystemColors.HighlightBrushKey;
+        public static object HighlightTextKey => SystemColors.HighlightTextBrushKey;
+    }
+    internal static class VsFonts
+    {
+        public static object EnvironmentFontFamilyKey => SystemFonts.MessageFontFamilyKey;
+        public static object EnvironmentFontSizeKey => SystemFonts.MessageFontSizeKey;
+        public static object Environment90PercentFontSizeKey => SystemFonts.SmallCaptionFontSizeKey;
     }
     internal static class VsResourceKeys
     {

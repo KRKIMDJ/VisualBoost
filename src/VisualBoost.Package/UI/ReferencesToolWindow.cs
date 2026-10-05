@@ -23,7 +23,10 @@ public sealed class ReferencesToolWindow : ToolWindowPane
     public ReferencesToolWindow()
         : base(null)
     {
+        // VS는 도구 창을 UI thread에서 만듭니다.
+        ThreadHelper.ThrowIfNotOnUIThread();
         Caption = Title;
+        EditorCodeStyleSource.EnsureStarted();
         control = new ReferencesControl { OpenLocation = Open };
         Content = control;
     }

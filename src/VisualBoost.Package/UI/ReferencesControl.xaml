@@ -5,7 +5,9 @@
              xmlns:vsshell="clr-namespace:Microsoft.VisualStudio.Shell;assembly=Microsoft.VisualStudio.Shell.15.0"
              Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}"
              Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
-             FontSize="12"
+             FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+             FontSize="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontSizeKey}}"
+             ui:SearchPalette.Track="True"
              PreviewKeyDown="OnPreviewKeyDown">
   <UserControl.Resources>
     <Style x:Key="RowStyle" TargetType="ListBoxItem">
@@ -17,7 +19,7 @@
       <Setter Property="Template">
         <Setter.Value>
           <ControlTemplate TargetType="ListBoxItem">
-            <Border x:Name="RowBorder" Background="{TemplateBinding Background}" Padding="4,0">
+            <Border x:Name="RowBorder" Background="{TemplateBinding Background}" Padding="4,1">
               <ContentPresenter VerticalAlignment="Center" />
             </Border>
             <ControlTemplate.Triggers>
@@ -37,9 +39,9 @@
       </Setter>
     </Style>
 
-    <!-- 파일 머리 행: 펼침 표시 · 파일 이름 · 폴더 · 위치 수 -->
+    <!-- 파일 머리 행: 펼침 표시 · 파일 이름 · 폴더 · 위치 수. 한 화면에 위치를 많이 보이도록 행은 글자 높이에 맞춰 촘촘하게 둡니다. -->
     <DataTemplate DataType="{x:Type ui:ReferenceFileRow}">
-      <Grid Height="24" ToolTip="{Binding FullPath}">
+      <Grid MinHeight="20" ToolTip="{Binding FullPath}">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="18" />
           <ColumnDefinition Width="Auto" />
@@ -52,14 +54,14 @@
         <TextBlock Grid.Column="2" Text="{Binding Folder}" Opacity="0.65" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
         <Border Grid.Column="3" Margin="8,0,4,0" Padding="6,0" CornerRadius="8" VerticalAlignment="Center"
                 Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
-          <TextBlock Text="{Binding Count}" FontSize="11" />
+          <TextBlock Text="{Binding Count}" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment90PercentFontSizeKey}}" />
         </Border>
       </Grid>
     </DataTemplate>
 
     <!-- 위치 행: (묶지 않을 때 파일) · 줄 · 코드 미리보기 · 포함 함수 -->
     <DataTemplate DataType="{x:Type ui:ReferenceLineRow}">
-      <Grid MinHeight="22" ToolTip="{Binding FullPath}">
+      <Grid MinHeight="16" ToolTip="{Binding FullPath}">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="52" />
@@ -70,10 +72,14 @@
         <TextBlock x:Name="FileColumn" Grid.Column="0" Width="220" Visibility="Collapsed" Margin="4,0,0,0"
                    Text="{Binding FileName}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
         <TextBlock Grid.Column="1" Text="{Binding Line}" Opacity="0.7" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0" />
-        <TextBlock Grid.Column="2" FontFamily="Consolas" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+        <TextBlock x:Name="CodeText" Grid.Column="2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                    ui:CodeSegments.Before="{Binding Before}"
                    ui:CodeSegments.Match="{Binding Match}"
                    ui:CodeSegments.After="{Binding After}"
+                   ui:CodeSegments.MatchKind="{Binding SymbolKind}"
+                   ui:CodeSegments.Plain="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
+                   ui:CodeSegments.Surface="{Binding Background, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                   ui:CodeSegments.Revision="{Binding (ui:SearchPalette.Revision), RelativeSource={RelativeSource AncestorType=UserControl}}"
                    ToolTip="{Binding Code}" />
         <TextBlock x:Name="ContainerText" Grid.Column="3" Text="{Binding Container}" Opacity="0.65" MaxWidth="280" Margin="12,0,4,0"
                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Container}" />
@@ -108,7 +114,7 @@
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-          <TextBlock x:Name="SymbolText" FontSize="13" FontWeight="SemiBold" MaxWidth="360" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+          <TextBlock x:Name="SymbolText" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment111PercentFontSizeKey}}" FontWeight="SemiBold" MaxWidth="360" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
           <TextBlock x:Name="SummaryText" Margin="10,0,0,0" Opacity="0.75" MaxWidth="420" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
         </StackPanel>
         <Border Grid.Column="1" MinWidth="160" MaxWidth="420" HorizontalAlignment="Stretch"

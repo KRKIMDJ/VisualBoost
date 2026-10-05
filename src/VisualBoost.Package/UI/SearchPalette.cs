@@ -51,6 +51,7 @@ public static class SearchPalette
             if (attached) return;
             attached = true;
             ColoringSettings.Changed += OnChanged;
+            CodePreviewStyle.Changed += OnChanged;
             SystemParameters.StaticPropertyChanged += OnSystemChanged;
             Refresh();
         }
@@ -58,6 +59,7 @@ public static class SearchPalette
         {
             attached = false;
             ColoringSettings.Changed -= OnChanged;
+            CodePreviewStyle.Changed -= OnChanged;
             SystemParameters.StaticPropertyChanged -= OnSystemChanged;
         }
         private void OnChanged(object? sender, EventArgs e) => Refresh();
@@ -92,16 +94,7 @@ public sealed class SymbolColorConverter : IMultiValueConverter
         var fallback = values.Length > 2 && values[2] is Brush foreground ? foreground : SystemColors.ControlTextBrush;
         if (values.Length < 5 || values[1] is true || !ColoringSettings.Current.Enabled || SystemParameters.HighContrast)
             return fallback;
-        var kind = values[0] is SourceSymbolKind sourceKind ? sourceKind switch
-        {
-            SourceSymbolKind.Type or SourceSymbolKind.Class or SourceSymbolKind.Struct or
-                SourceSymbolKind.Union or SourceSymbolKind.Enum => (SemanticColorKind?)SemanticColorKind.Type,
-            SourceSymbolKind.Function => SemanticColorKind.Function,
-            SourceSymbolKind.Variable => SemanticColorKind.Variable,
-            SourceSymbolKind.Macro => SemanticColorKind.Macro,
-            SourceSymbolKind.Namespace => SemanticColorKind.Namespace,
-            _ => null,
-        } : null;
+        var kind = values[0] is SourceSymbolKind sourceKind ? ColorKindOf(sourceKind) : null;
         if (!kind.HasValue) return fallback;
         var background = values[3] is SolidColorBrush brush ? brush.Color : Colors.White;
         var rgb = ColoringSettings.Current.GetColor(kind.Value, SemanticColorPalette.IsDark(background.R, background.G, background.B));
@@ -112,4 +105,16 @@ public sealed class SymbolColorConverter : IMultiValueConverter
 
     public object[] ConvertBack(object value, Type[] targetTypes, object parameter, CultureInfo culture) =>
         throw new NotSupportedException();
+
+    /// <summary>심볼 종류가 속하는 의미 기반 색상 그룹입니다. 대응하는 그룹이 없으면 null입니다.</summary>
+    internal static SemanticColorKind? ColorKindOf(SourceSymbolKind kind) => kind switch
+    {
+        SourceSymbolKind.Type or SourceSymbolKind.Class or SourceSymbolKind.Struct or
+            SourceSymbolKind.Union or SourceSymbolKind.Enum => SemanticColorKind.Type,
+        SourceSymbolKind.Function => SemanticColorKind.Function,
+        SourceSymbolKind.Variable => SemanticColorKind.Variable,
+        SourceSymbolKind.Macro => SemanticColorKind.Macro,
+        SourceSymbolKind.Namespace => SemanticColorKind.Namespace,
+        _ => null,
+    };
 }

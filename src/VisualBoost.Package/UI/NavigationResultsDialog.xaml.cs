@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
+using System.ComponentModel;
 using System.IO;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
 using System.Windows.Input;
 using Microsoft.VisualStudio.PlatformUI;
+using Microsoft.VisualStudio.Shell;
 using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.UI;
@@ -13,6 +15,9 @@ namespace VisualBoost.UI;
 /// <summary>정의 후보를 보여 주고 하나를 고르게 합니다. 참조 결과는 도킹 창(<see cref="ReferencesToolWindow"/>)에 보입니다.</summary>
 public partial class NavigationResultsDialog : DialogWindow
 {
+    /// <summary>창 크기·위치를 저장하는 이름입니다(<see cref="WindowPlacementStore"/>).</summary>
+    private const string PlacementName = "NavigationResults";
+
     private readonly IReadOnlyList<NavigationResultItem> items;
     private readonly string status;
 
@@ -20,10 +25,16 @@ public partial class NavigationResultsDialog : DialogWindow
     {
         this.items = items ?? throw new ArgumentNullException(nameof(items));
         this.status = status;
+        ThreadHelper.ThrowIfNotOnUIThread();
+        EditorCodeStyleSource.EnsureStarted();
         InitializeComponent();
         Title = title;
         HeaderText.Text = header;
         HeaderText.ToolTip = header;
+        KeyboardHintText.ToolTip = ResultListKeys.MoveKeysDescription;
+        // 다른 검색 창처럼 사용자가 맞춘 크기·위치로 다시 엽니다. 여는 명령마다 반복하지 않도록 창이 직접 읽고 씁니다.
+        WindowPlacement.Apply(this, WindowPlacementStore.Load(ServiceProvider.GlobalProvider, PlacementName));
+        Closing += OnClosing;
         ApplyFilter();
         Loaded += (_, _) =>
         {
@@ -76,6 +87,12 @@ public partial class NavigationResultsDialog : DialogWindow
         }
 
         eventArgs.Handled = true;
+    }
+
+    private void OnClosing(object? sender, CancelEventArgs eventArgs)
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        WindowPlacementStore.Save(ServiceProvider.GlobalProvider, PlacementName, WindowPlacement.Capture(this));
     }
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs eventArgs)

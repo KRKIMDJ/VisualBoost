@@ -126,8 +126,16 @@ internal static class ReferenceResultsTests
         var texts = Program.Descendants<TextBlock>(list).Where(text => text.IsVisible).ToArray();
         Assert(texts.Any(text => text.Text == "Use.cpp" && text.FontWeight == FontWeights.SemiBold) && texts.Any(text => text.Text == "3"), "파일 머리 행: 이름·위치 수");
         Assert(texts.Any(text => text.Text == "Game::Tick"), "위치 행: 포함 함수");
-        var code = texts.First(text => text.Inlines.OfType<Run>().Count() == 3 && text.Inlines.OfType<Run>().ElementAt(1).Text == "Compute");
-        Assert(code.Inlines.OfType<Run>().ElementAt(1).FontWeight == FontWeights.Bold, "코드 미리보기 일치 구간 굵게");
+        var codes = texts.Where(text => text.Name == "CodeText").ToArray();
+        var code = codes.First(text => Joined(text) == "return FMod::Compute(1);");
+        Assert(Bold(code) == "Compute", "코드 미리보기 일치 구간만 굵게");
+        Assert(codes.All(text => Bold(text) == "Compute"), "모든 위치 행의 일치 구간 굵게");
+        // 한 화면에 위치를 많이 보이도록 행은 글자 높이에 위아래 1 DIP 여백만 둡니다(이전에는 위치 행 최소 22, 파일 행 24 DIP).
+        var lineItems = items.Where(item => item.DataContext is ReferenceLineRow).ToArray();
+        Assert(lineItems.All(item => item.ActualHeight < 22 &&
+                                     item.ActualHeight <= Program.Descendants<TextBlock>(item).Max(text => text.ActualHeight) + 2.5),
+            "위치 행 높이: " + string.Join(",", lineItems.Select(item => item.ActualHeight)));
+        Assert(items.Where(item => item.DataContext is ReferenceFileRow).All(item => item.ActualHeight < 24), "파일 머리 행 높이");
         var noContainer = items.First(item => item.DataContext is ReferenceLineRow { Container: "" });
         Assert(Program.Descendants<TextBlock>(noContainer).All(text => text.Name != "ContainerText" || !text.IsVisible), "포함 함수가 없으면 숨김");
         Assert(Program.Descendants<TextBlock>(items[1]).Any(text => text.Name == "FileColumn" && !text.IsVisible), "묶을 때는 위치 행에 파일 이름 숨김");
@@ -142,6 +150,11 @@ internal static class ReferenceResultsTests
         window.Close();
         Program.Pump();
     }
+
+    private static string Joined(TextBlock text) => string.Concat(text.Inlines.OfType<Run>().Select(run => run.Text));
+
+    private static string Bold(TextBlock text) =>
+        string.Concat(text.Inlines.OfType<Run>().Where(run => run.FontWeight == FontWeights.Bold).Select(run => run.Text));
 
     private static ReferenceResultSet Sample(string symbol)
     {

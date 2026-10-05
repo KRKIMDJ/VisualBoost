@@ -7,6 +7,7 @@ using System.Windows.Automation;
 using System.Windows.Controls;
 using System.Windows.Controls.Primitives;
 using System.Windows.Input;
+using System.Windows.Media;
 using System.Windows.Threading;
 using Microsoft.VisualStudio.Language.Intellisense;
 using Microsoft.VisualStudio.Language.Intellisense.AsyncCompletion;
@@ -69,21 +70,23 @@ internal sealed class CompletionViewListener : IWpfTextViewCreationListener
             this.view = view; this.legacy = legacy; this.modern = modern; this.classifier = classifier;
             this.undo = undo; this.operations = operations;
             list = new ListBox { Focusable = false, IsTabStop = false, MaxHeight = 200, MinWidth = 320, MaxWidth = 620,
-                BorderThickness = new Thickness(0), DisplayMemberPath = "Description", FontSize = 12 };
+                BorderThickness = new Thickness(0), DisplayMemberPath = "Description" };
             list.SetResourceReference(Control.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
             list.SetResourceReference(Control.ForegroundProperty, VsBrushes.ToolWindowTextKey);
-            list.ItemContainerStyle = new Style(typeof(ListBoxItem));
-            list.ItemContainerStyle.Setters.Add(new Setter(Control.PaddingProperty, new Thickness(6, 2, 6, 2)));
-            list.ItemContainerStyle.Setters.Add(new Setter(UIElement.FocusableProperty, false));
+            list.ItemContainerStyle = CreateItemStyle();
             AutomationProperties.SetName(list, "VisualBoost 인덱스 이름 제안");
             var panel = new StackPanel();
             panel.Children.Add(list);
-            var hint = new TextBlock { Text = "VisualBoost · 이름 제안    ↓ 선택 · Tab 삽입 · Esc 닫기", Margin = new Thickness(6), FontSize = 11 };
+            var hint = new TextBlock { Text = "VisualBoost · 이름 제안    ↓ 선택 · Tab 삽입 · Esc 닫기", Margin = new Thickness(6) };
             hint.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
+            hint.SetResourceReference(TextBlock.FontSizeProperty, VsFonts.Environment90PercentFontSizeKey);
             panel.Children.Add(hint);
             var border = new Border { Child = panel, BorderThickness = new Thickness(1) };
             border.SetResourceReference(Border.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
             border.SetResourceReference(Border.BorderBrushProperty, VsBrushes.ToolWindowBorderKey);
+            // 부모 없는 Popup은 편집기 글꼴을 물려받지 않으므로 다른 VisualBoost 창과 같은 환경 글꼴을 직접 지정합니다.
+            border.SetResourceReference(System.Windows.Documents.TextElement.FontFamilyProperty, VsFonts.EnvironmentFontFamilyKey);
+            border.SetResourceReference(System.Windows.Documents.TextElement.FontSizeProperty, VsFonts.EnvironmentFontSizeKey);
             popup = new Popup { Child = border, PlacementTarget = view.VisualElement, Placement = PlacementMode.Relative,
                 StaysOpen = true, Focusable = false, AllowsTransparency = false };
             delay.Tick += OnDelay;
@@ -238,6 +241,31 @@ internal sealed class CompletionViewListener : IWpfTextViewCreationListener
             list.PreviewMouseLeftButtonDown -= OnPick;
             (classifier as IDisposable)?.Dispose();
             requestedSnapshot = null;
+        }
+
+        /// <summary>
+        /// 제안 행 모양입니다. 목록이 초점을 받지 않으므로 기본 ListBoxItem은 테마와 무관한 비활성 선택색으로 그려집니다.
+        /// 다른 VisualBoost 목록과 같이 VS 강조색으로 선택 행을, 검색 상자 배경색으로 마우스 위치를 표시합니다.
+        /// </summary>
+        private static Style CreateItemStyle()
+        {
+            var surface = new FrameworkElementFactory(typeof(Border), "RowSurface");
+            surface.SetValue(Border.BackgroundProperty, Brushes.Transparent);
+            surface.SetValue(Border.PaddingProperty, new Thickness(6, 2, 6, 2));
+            surface.AppendChild(new FrameworkElementFactory(typeof(ContentPresenter)));
+            var template = new ControlTemplate(typeof(ListBoxItem)) { VisualTree = surface };
+            var hover = new Trigger { Property = UIElement.IsMouseOverProperty, Value = true };
+            hover.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension(VsBrushes.SearchBoxBackgroundKey), "RowSurface"));
+            // 선택 트리거를 뒤에 두어 선택 행 위에 마우스가 있어도 강조색이 이깁니다.
+            var selected = new Trigger { Property = ListBoxItem.IsSelectedProperty, Value = true };
+            selected.Setters.Add(new Setter(Border.BackgroundProperty, new DynamicResourceExtension(VsBrushes.HighlightKey), "RowSurface"));
+            selected.Setters.Add(new Setter(Control.ForegroundProperty, new DynamicResourceExtension(VsBrushes.HighlightTextKey)));
+            template.Triggers.Add(hover);
+            template.Triggers.Add(selected);
+            var style = new Style(typeof(ListBoxItem));
+            style.Setters.Add(new Setter(UIElement.FocusableProperty, false));
+            style.Setters.Add(new Setter(Control.TemplateProperty, template));
+            return style;
         }
     }
 }

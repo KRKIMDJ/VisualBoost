@@ -19,7 +19,8 @@
    <Border x:Name="PopupSurface" BorderThickness="1" Padding="0" Width="720"
            Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
            BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}"
-           TextElement.Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}" PreviewKeyDown="OnPopupKeyDown">
+           TextElement.Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"
+           TextElement.FontFamily="{DynamicResource {x:Static vs:VsFonts.EnvironmentFontFamilyKey}}" TextElement.FontSize="{DynamicResource {x:Static vs:VsFonts.EnvironmentFontSizeKey}}" PreviewKeyDown="OnPopupKeyDown">
     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <TextBox x:Name="Search" Margin="0,0,0,7" Height="26" Padding="7,2" TextChanged="OnSearchChanged"
        ToolTip="함수 이름 검색 · 공백으로 AND 검색" AutomationProperties.Name="문서 함수 이름 검색"
@@ -58,7 +59,7 @@
        <GridViewColumn Header="함수" Width="510"><GridViewColumn.CellTemplate><DataTemplate>
         <DockPanel Margin="{Binding Indent}">
          <Button Style="{DynamicResource {x:Static vs:VsResourceKeys.ButtonStyleKey}}" DockPanel.Dock="Left" Width="18" Height="20" Padding="0" BorderThickness="0" Background="Transparent"
-                 Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListViewItem}}" FontSize="11"
+                 Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListViewItem}}" FontSize="{DynamicResource {x:Static vs:VsFonts.Environment90PercentFontSizeKey}}"
                  Content="{Binding ExpanderText}" Visibility="{Binding ExpanderVisibility}" Click="OnExpanderClick"
                  Focusable="False" ToolTip="접기/펼치기" AutomationProperties.Name="{Binding Name}">
          </Button>

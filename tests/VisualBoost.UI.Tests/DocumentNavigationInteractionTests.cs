@@ -38,6 +38,7 @@ namespace VisualBoost.DocumentNavigation
             {
                 if (attr.Name == x + "Class" || handlers.Contains(attr.Name.LocalName)) attr.Remove();
                 else if (attr.Value.Contains("DynamicResource {x:Static vs:VsResourceKeys.")) attr.Value = "{x:Null}";
+                else if (attr.Value.Contains("DynamicResource {x:Static vs:VsFonts.")) attr.Remove();
                 else if (attr.Value.Contains("DynamicResource {x:Static vs:VsBrushes."))
                     attr.Value = attr.Value.Contains("HighlightTextKey") ? "#FFFFFF" : attr.Value.Contains("HighlightKey") ? "#6154CB"
                         : attr.Value.Contains("TextKey") ? "#E5E5E5" : attr.Value.Contains("BorderKey") ? "#45454B"

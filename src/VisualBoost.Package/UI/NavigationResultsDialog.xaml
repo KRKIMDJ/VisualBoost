@@ -14,6 +14,8 @@
                        WindowStartupLocation="CenterOwner"
                        Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
+                       FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+                       FontSize="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontSizeKey}}"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
     <Style x:Key="ResultItemStyle" TargetType="ListBoxItem">
@@ -54,7 +56,6 @@
     <Style TargetType="GridViewColumnHeader">
       <Setter Property="Height" Value="28" />
       <Setter Property="HorizontalContentAlignment" Value="Left" />
-      <Setter Property="FontSize" Value="12" />
       <Setter Property="ToolTip" Value="열 경계를 끌어 너비 비율 조절" />
       <Setter Property="Padding" Value="7,0" />
       <Setter Property="Background" Value="{DynamicResource {x:Static vsshell:VsBrushes.GridHeadingBackgroundKey}}" />
@@ -74,7 +75,7 @@
             Background="{DynamicResource {x:Static vsshell:VsBrushes.CommandBarGradientKey}}">
       <DockPanel>
         <TextBlock x:Name="HeaderText" DockPanel.Dock="Left" VerticalAlignment="Center" Margin="0,0,12,0"
-                   FontSize="14" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="420" />
+                   FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="420" />
         <Border BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
                 BorderThickness="1" CornerRadius="3"
                 Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
@@ -83,9 +84,9 @@
               <ColumnDefinition Width="30" />
               <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="14" Text="⌕" />
+            <TextBlock Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" Text="⌕" />
             <Grid Grid.Column="1">
-              <TextBox x:Name="FilterBox" Padding="0,6" FontSize="13" BorderThickness="0"
+              <TextBox x:Name="FilterBox" Padding="0,6" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment111PercentFontSizeKey}}" BorderThickness="0"
                        Background="Transparent"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        TextChanged="OnFilterTextChanged" />
@@ -128,10 +129,14 @@
           <GridViewColumn Header="코드" Width="500">
             <GridViewColumn.CellTemplate>
               <DataTemplate>
-                <TextBlock Margin="6,0" VerticalAlignment="Center" FontFamily="Consolas"
+                <TextBlock Margin="6,0" VerticalAlignment="Center"
                            ui:CodeSegments.Before="{Binding Before}"
                            ui:CodeSegments.Match="{Binding Match}"
                            ui:CodeSegments.After="{Binding After}"
+                           ui:CodeSegments.MatchKind="{Binding SymbolKind}"
+                           ui:CodeSegments.Plain="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
+                           ui:CodeSegments.Surface="{Binding Background, RelativeSource={RelativeSource AncestorType=Window}}"
+                           ui:CodeSegments.Revision="{Binding (ui:SearchPalette.Revision), RelativeSource={RelativeSource AncestorType=Window}}"
                            TextTrimming="CharacterEllipsis" ToolTip="{Binding Code}" />
               </DataTemplate>
             </GridViewColumn.CellTemplate>
@@ -154,7 +159,7 @@
             BorderThickness="0,1,0,0">
       <Grid>
         <TextBlock x:Name="StatusText" HorizontalAlignment="Left" Margin="0,0,260,0" TextTrimming="CharacterEllipsis" />
-        <TextBlock HorizontalAlignment="Right" Text="↑↓ 선택   Enter 열기   Esc 닫기" />
+        <TextBlock x:Name="KeyboardHintText" HorizontalAlignment="Right" Text="↑↓ 선택   Enter 열기   Esc 닫기" />
       </Grid>
     </Border>
   </Grid>
