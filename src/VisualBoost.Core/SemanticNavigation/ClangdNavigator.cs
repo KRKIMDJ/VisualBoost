@@ -392,7 +392,9 @@ public sealed class ClangdNavigator : IDisposable
         IProgress<string>? progress, CancellationToken cancellationToken)
     {
         var symbols = options.FindSymbols?.Invoke(symbol.Name) ?? Array.Empty<SourceSymbolLocation>();
-        var stems = options.FindByStem?.Invoke(Path.GetFileNameWithoutExtension(header)) ?? Array.Empty<string>();
+        // 이름 인덱스는 Solution을 연 직후 비어 있을 수 있으므로 소속 모듈 폴더의 같은 이름 cpp를 함께 봅니다.
+        var stems = (options.FindByStem?.Invoke(Path.GetFileNameWithoutExtension(header)) ?? Array.Empty<string>())
+            .Concat(SameNameSourcesInModule(header));
         var candidates = DefinitionCandidates.Select(symbol.Name, symbol.ContainerName, header, symbols, stems, options.MaxEngineCandidates)
             .Where(c => IsUnder(c, Context.EngineRoot!))
             .ToArray();
@@ -495,6 +497,23 @@ public sealed class ClangdNavigator : IDisposable
 
                 return;
             }
+        }
+    }
+
+    private static IReadOnlyList<string> SameNameSourcesInModule(string header)
+    {
+        if (UnrealCompileCommands.OwningModule(header) is not (string directory, _))
+        {
+            return Array.Empty<string>();
+        }
+
+        try
+        {
+            return Directory.EnumerateFiles(directory, Path.GetFileNameWithoutExtension(header) + ".cpp", SearchOption.AllDirectories).Take(8).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            return Array.Empty<string>();
         }
     }
 

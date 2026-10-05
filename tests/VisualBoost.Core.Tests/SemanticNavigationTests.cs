@@ -401,10 +401,8 @@ internal static class SemanticNavigationTests
             var cacheRoot = Path.Combine(root, "cache");
             using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
-                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1,
-                FindSymbols = name => name == "Compute"
-                    ? new[] { new Analysis.SourceSymbolLocation("Compute", engineSource, 2, 11, Analysis.SourceSymbolKind.Function, "FMod") }
-                    : Array.Empty<Analysis.SourceSymbolLocation>()
+                // 이름 인덱스가 아직 비어 있는 상황: 소속 모듈 폴더의 같은 이름 cpp만으로 후보를 찾아야 합니다.
+                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1
             }, CancellationToken.None).Result;
             Check(navigator.Context.Kind == CompileContextKind.Unreal && navigator.Context.Commands.Count == 2, "응답 파일에서 프로젝트 명령 준비");
             Check(SpinUntil(() => navigator.Progress.Completed, 60000), "프로젝트 색인 완료");
