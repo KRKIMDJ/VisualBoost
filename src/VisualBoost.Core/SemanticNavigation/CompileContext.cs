@@ -46,7 +46,7 @@ public sealed class CompileCommandSources
 public sealed class CompileContext
 {
     public CompileContext(CompileContextKind kind, string directory, IReadOnlyList<CompileCommand> commands, string summary, string? reason,
-        string? engineRoot, bool changed)
+        string? engineRoot, bool changed, PathAliases? paths = null)
     {
         Kind = kind;
         Directory = directory;
@@ -55,6 +55,7 @@ public sealed class CompileContext
         Reason = reason;
         EngineRoot = engineRoot;
         Changed = changed;
+        Paths = paths ?? PathAliases.None;
     }
 
     public CompileContextKind Kind { get; }
@@ -73,6 +74,12 @@ public sealed class CompileContext
 
     /// <summary>이번 준비에서 compile_commands.json 내용이 바뀌었습니다.</summary>
     public bool Changed { get; }
+
+    /// <summary>
+    /// 링크를 거쳐 연 작업 영역·엔진 루트의 실제 경로 대응입니다. compile_commands.json에는 실제 경로로 썼고,
+    /// <see cref="Commands"/>는 연 경로 그대로입니다. clangd와 주고받는 경로는 이 대응으로 바꿉니다.
+    /// </summary>
+    public PathAliases Paths { get; }
 
     /// <summary>엔진 파일 근사 명령의 모듈 매크로 재정의 헤더 폴더입니다.</summary>
     public string OverrideDirectory => Path.Combine(Directory, "modules");
@@ -134,6 +141,8 @@ public static class CompileContextBuilder
     {
         var solutionDirectory = WorkspaceDirectory(solutionPath);
         var directory = CacheDirectory(cacheRoot, solutionPath);
+        // 링크를 거쳐 연 작업 영역이면 clangd에는 실제 경로를 줍니다(PathAliases 참고).
+        var paths = PathAliases.ForRoots(new[] { solutionDirectory, engineRoot });
         string? unrealReason = null;
         var project = FindUnrealProject(solutionDirectory);
         if (project is not null)
@@ -152,9 +161,9 @@ public static class CompileContextBuilder
                 var result = UnrealCompileCommands.Build(solutionDirectory, engineRoot, variant, compiler, cancellationToken);
                 if (result.Commands.Count > 0)
                 {
-                    var changed = CompileCommandDatabase.WriteIfChanged(directory, result.Commands);
+                    var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(result.Commands));
                     var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0})";
-                    return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed);
+                    return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths);
                 }
 
                 unrealReason = $"Unreal 빌드 응답 파일({variant})에서 컴파일 명령을 만들지 못했습니다.";
@@ -167,9 +176,9 @@ public static class CompileContextBuilder
             var commands = CompileCommandDatabase.Read(database);
             if (commands.Count > 0)
             {
-                var changed = CompileCommandDatabase.WriteIfChanged(directory, commands);
+                var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(commands));
                 return new CompileContext(CompileContextKind.Database, directory, commands, $"{database} · 컴파일 명령 {commands.Count:N0}개", null,
-                    engineRoot, changed);
+                    engineRoot, changed, paths);
             }
         }
 
@@ -181,9 +190,9 @@ public static class CompileContextBuilder
             var (ninjaCommands, error) = NinjaCompileCommands.Query(sources!.NinjaPath!, buildDirectory, compiler, TimeSpan.FromMinutes(1), cancellationToken);
             if (ninjaCommands.Count > 0)
             {
-                var changed = CompileCommandDatabase.WriteIfChanged(directory, ninjaCommands);
+                var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(ninjaCommands));
                 var summary = $"Ninja 빌드 파일({buildDirectory}) · 컴파일 명령 {ninjaCommands.Count:N0}개";
-                return new CompileContext(CompileContextKind.Ninja, directory, ninjaCommands, summary, null, engineRoot, changed);
+                return new CompileContext(CompileContextKind.Ninja, directory, ninjaCommands, summary, null, engineRoot, changed, paths);
             }
 
             toolReason = "Ninja 빌드 파일에서 컴파일 명령을 얻지 못했습니다" + (error is null ? "." : ": " + error);
@@ -195,9 +204,9 @@ public static class CompileContextBuilder
                 TimeSpan.FromMinutes(3), cancellationToken);
             if (result.Commands.Count > 0)
             {
-                var changed = CompileCommandDatabase.WriteIfChanged(directory, result.Commands);
+                var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(result.Commands));
                 var summary = $"C++ 프로젝트 {result.AnsweredProjects:N0}/{result.Projects:N0}개의 MSBuild 설계 시점 명령 · 컴파일 명령 {result.Commands.Count:N0}개";
-                return new CompileContext(CompileContextKind.MsBuild, directory, result.Commands, summary, null, engineRoot, changed);
+                return new CompileContext(CompileContextKind.MsBuild, directory, result.Commands, summary, null, engineRoot, changed, paths);
             }
 
             toolReason = "C++ 프로젝트에서 컴파일 명령을 얻지 못했습니다" + (result.Error is null ? "." : ": " + result.Error);

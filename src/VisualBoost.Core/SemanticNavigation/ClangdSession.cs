@@ -27,6 +27,9 @@ public sealed class ClangdLaunchOptions
     /// <summary>clangd stderr를 남길 파일. null이면 버립니다.</summary>
     public string? LogFilePath { get; set; }
 
+    /// <summary>문서 URI·명령은 실제 경로로 보내고 받은 위치·진단은 연 경로로 되돌리는 대응입니다.</summary>
+    public PathAliases Paths { get; set; } = PathAliases.None;
+
     public static int ResolveWorkerCount(int requested) =>
         requested > 0 ? requested : Math.Max(1, Environment.ProcessorCount / 4);
 }
@@ -220,22 +223,22 @@ public sealed class ClangdSession : IDisposable
 
     public void OpenDocument(string path, string text, int version) =>
         connection.Notify("textDocument/didOpen", JsonValue.Object(("textDocument", JsonValue.Object(
-            ("uri", DocumentUri.FromPath(path)), ("languageId", LanguageOf(path)), ("version", version), ("text", text)))));
+            ("uri", ToUri(path)), ("languageId", LanguageOf(path)), ("version", version), ("text", text)))));
 
     /// <summary>전체 내용 동기화입니다. 증분 범위 계산 오류로 서버 상태가 어긋나는 위험을 피합니다.</summary>
     public void ChangeDocument(string path, string text, int version) =>
         connection.Notify("textDocument/didChange", JsonValue.Object(
-            ("textDocument", JsonValue.Object(("uri", DocumentUri.FromPath(path)), ("version", version))),
+            ("textDocument", JsonValue.Object(("uri", ToUri(path)), ("version", version))),
             ("contentChanges", JsonValue.Array(JsonValue.Object(("text", text)))),
             ("wantDiagnostics", true)));
 
     public void SaveDocument(string path) =>
-        connection.Notify("textDocument/didSave", JsonValue.Object(("textDocument", JsonValue.Object(("uri", DocumentUri.FromPath(path))))));
+        connection.Notify("textDocument/didSave", JsonValue.Object(("textDocument", JsonValue.Object(("uri", ToUri(path))))));
 
     public void CloseDocument(string path)
     {
         lock (stateLock) diagnosticsVersions.Remove(path);
-        connection.Notify("textDocument/didClose", JsonValue.Object(("textDocument", JsonValue.Object(("uri", DocumentUri.FromPath(path))))));
+        connection.Notify("textDocument/didClose", JsonValue.Object(("textDocument", JsonValue.Object(("uri", ToUri(path))))));
     }
 
     /// <summary>
@@ -244,7 +247,7 @@ public sealed class ClangdSession : IDisposable
     /// </summary>
     public void UpdateCompileCommands(IEnumerable<CompileCommand> commands) =>
         connection.Notify("workspace/didChangeConfiguration", JsonValue.Object(("settings", JsonValue.Object(
-            ("compilationDatabaseChanges", JsonValue.Object(commands.Select(c => new KeyValuePair<string, JsonValue>(c.File,
+            ("compilationDatabaseChanges", JsonValue.Object(options.Paths.ToReal(commands.ToArray()).Select(c => new KeyValuePair<string, JsonValue>(c.File,
                 JsonValue.Object(("workingDirectory", c.Directory), ("compilationCommand", JsonValue.Array(c.Arguments.Select(a => (JsonValue)a))))))))))));
 
     /// <summary>해당 문서의 진단(= AST 준비)이 <paramref name="minimumVersion"/> 이상으로 도착할 때까지 기다립니다.</summary>
@@ -273,18 +276,18 @@ public sealed class ClangdSession : IDisposable
     }
 
     public async Task<IReadOnlyList<NavigationLocation>> DefinitionAsync(string path, int line, int character, CancellationToken cancellationToken) =>
-        NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/definition", Position(path, line, character), cancellationToken).ConfigureAwait(false));
+        options.Paths.ToGiven(NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/definition", Position(path, line, character), cancellationToken).ConfigureAwait(false)));
 
     public async Task<IReadOnlyList<NavigationLocation>> DeclarationAsync(string path, int line, int character, CancellationToken cancellationToken) =>
-        NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/declaration", Position(path, line, character), cancellationToken).ConfigureAwait(false));
+        options.Paths.ToGiven(NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/declaration", Position(path, line, character), cancellationToken).ConfigureAwait(false)));
 
     public async Task<IReadOnlyList<NavigationLocation>> ReferencesAsync(string path, int line, int character, bool includeDeclaration, CancellationToken cancellationToken)
     {
         var parameters = JsonValue.Object(
-            ("textDocument", JsonValue.Object(("uri", DocumentUri.FromPath(path)))),
+            ("textDocument", JsonValue.Object(("uri", ToUri(path)))),
             ("position", JsonValue.Object(("line", line), ("character", character))),
             ("context", JsonValue.Object(("includeDeclaration", includeDeclaration))));
-        return NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/references", parameters, cancellationToken).ConfigureAwait(false));
+        return options.Paths.ToGiven(NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/references", parameters, cancellationToken).ConfigureAwait(false)));
     }
 
     public async Task<SemanticSymbol?> SymbolInfoAsync(string path, int line, int character, CancellationToken cancellationToken)
@@ -312,7 +315,7 @@ public sealed class ClangdSession : IDisposable
         var positions = new HashSet<NavigationLocation>(known);
         foreach (var item in result.Items)
         {
-            var location = NavigationLocation.FromLsp(item["location"]);
+            var location = options.Paths.ToGiven(NavigationLocation.FromLsp(item["location"]));
             if (location.Count == 1 && positions.Contains(location[0])) return SymbolKindOf(item["kind"].AsInt32());
         }
 
@@ -405,8 +408,11 @@ public sealed class ClangdSession : IDisposable
         return current.Id;
     }
 
-    private static JsonValue Position(string path, int line, int character) => JsonValue.Object(
-        ("textDocument", JsonValue.Object(("uri", DocumentUri.FromPath(path)))),
+    /// <summary>clangd에 보내는 문서 URI입니다. 링크를 거쳐 연 작업 영역이면 실제 경로로 바꿉니다(<see cref="PathAliases"/>).</summary>
+    private string ToUri(string path) => DocumentUri.FromPath(options.Paths.ToReal(path));
+
+    private JsonValue Position(string path, int line, int character) => JsonValue.Object(
+        ("textDocument", JsonValue.Object(("uri", ToUri(path)))),
         ("position", JsonValue.Object(("line", line), ("character", character))));
 
     private static string LanguageOf(string path) =>
@@ -469,8 +475,10 @@ public sealed class ClangdSession : IDisposable
             return;
         }
 
-        if (method == "textDocument/publishDiagnostics" && DocumentUri.ToPath(parameters["uri"].AsString() ?? string.Empty) is string path)
+        if (method == "textDocument/publishDiagnostics" && DocumentUri.ToPath(parameters["uri"].AsString() ?? string.Empty) is string received)
         {
+            // 문서는 실제 경로로 열었으므로 대기자와 같은 연 경로로 되돌려 비교합니다.
+            var path = options.Paths.ToGiven(received);
             // 버전 없는 진단은 열린 문서가 아니므로 0으로 취급합니다.
             var version = parameters["version"].AsInt32() ?? 0;
             List<DiagnosticsWaiter> ready;

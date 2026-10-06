@@ -58,6 +58,77 @@ internal static class SemanticNavigationTests
         Check(NavigationLocation.Normalize(locations.Concat(locations)).Count == 2, "중복 위치 병합");
     }
 
+    public static void RunPathAliases()
+    {
+        // clangd에는 실제 경로를 보내고, 받은 경로는 연 경로로 되돌립니다. 같아진 위치는 처음 것만 남깁니다.
+        var real = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            [@"J:\Smoke"] = @"C:\Real\Smoke",
+            [@"J:\Smoke\Plugins\Shared"] = @"D:\Shared",
+            [@"P:\"] = @"C:\Work\Proj",
+        };
+        string? Resolve(string path) => real.TryGetValue(path, out var found) ? found : path;
+        var aliases = PathAliases.ForRoots(new[] { @"J:\Smoke\", @"J:\Smoke\Plugins\Shared", @"C:\Plain", null, @"P:\" }, Resolve);
+        Check(aliases.Count == 3 && PathAliases.ForRoots(new[] { @"C:\Plain" }, Resolve) == PathAliases.None, "링크를 거친 루트만 대응");
+        Check(aliases.ToGiven(@"C:\Real\Smoke\App\Main.cpp") == @"J:\Smoke\App\Main.cpp" && aliases.ToGiven(@"c:\real\smoke") == @"J:\Smoke" &&
+              aliases.ToGiven(@"D:\Shared\Lib.h") == @"J:\Smoke\Plugins\Shared\Lib.h", "실제 경로 → 연 경로(대소문자 무시·가장 긴 루트)");
+        Check(aliases.ToReal(@"J:\Smoke\App\Main.cpp") == @"C:\Real\Smoke\App\Main.cpp" && aliases.ToReal(@"J:\Smoke\Plugins\Shared\Lib.h") == @"D:\Shared\Lib.h" &&
+              aliases.ToReal("J:/Smoke/App/Main.cpp") == "C:/Real/Smoke/App/Main.cpp", "연 경로 → 실제 경로('/' 구분자 유지)");
+        Check(aliases.ToReal(@"P:\Source\A.cpp") == @"C:\Work\Proj\Source\A.cpp" && aliases.ToGiven(@"C:\Work\Proj\Source\A.cpp") == @"P:\Source\A.cpp",
+            "subst 드라이브 루트 왕복");
+        Check(aliases.ToGiven(@"C:\Real\Smoke2\a.cpp") == @"C:\Real\Smoke2\a.cpp" && aliases.ToReal(@"J:\Smoke2\a.cpp") == @"J:\Smoke2\a.cpp" &&
+              aliases.ToReal(@"C:\Other\a.cpp") == @"C:\Other\a.cpp", "폴더 이름 일부만 같은 경로는 그대로");
+        var commands = aliases.ToReal(new[] { new CompileCommand("J:/Smoke/App", "J:/Smoke/App/Main.cpp", new[] { "clang-cl.exe", "/IJ:/Smoke/inc" }) });
+        Check(commands[0].Directory == "C:/Real/Smoke/App" && commands[0].File == "C:/Real/Smoke/App/Main.cpp" && commands[0].Arguments[1] == "/IJ:/Smoke/inc",
+            "compilation database 명령은 파일·작업 폴더만 실제 경로");
+        var mapped = aliases.ToGiven(new[]
+        {
+            new NavigationLocation(@"J:\Smoke\App\Main.cpp", 3, 50, 3, 56),
+            new NavigationLocation(@"C:\Real\Smoke\App\Main.cpp", 3, 50, 3, 56, "main"),
+            new NavigationLocation(@"C:\Real\Smoke\Tool\Tool.cpp", 1, 24, 1, 30, "ToolMain"),
+        });
+        Check(mapped.Count == 2 && mapped[0].Path == @"J:\Smoke\App\Main.cpp" && mapped[1].Path == @"J:\Smoke\Tool\Tool.cpp" &&
+              mapped[1].Container == "ToolMain" && mapped[1].EndCharacter == 30, "같아진 위치 병합과 순서 유지");
+        var plain = new[] { new NavigationLocation(@"C:\Work\a.cpp", 0, 0, 0, 1) };
+        Check(ReferenceEquals(PathAliases.None.ToGiven(plain), plain) && PathAliases.None.ToReal(@"J:\Smoke\a.cpp") == @"J:\Smoke\a.cpp",
+            "링크가 없으면 경로를 바꾸지 않음");
+
+        // 실제 junction에서 Windows 최종 경로 조회와 compile_commands.json 기록을 확인합니다. 테스트 전용 임시 폴더만 만들고 지웁니다.
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.PathAliases." + Guid.NewGuid().ToString("N"));
+        var target = Path.Combine(root, "real");
+        var link = Path.Combine(root, "link");
+        Directory.CreateDirectory(Path.Combine(target, "App"));
+        try
+        {
+            using (var mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{link}\" \"{target}\"") { CreateNoWindow = true, UseShellExecute = false }))
+            {
+                mklink!.WaitForExit();
+                Check(mklink.ExitCode == 0 && Directory.Exists(Path.Combine(link, "App")), "테스트 junction 생성");
+            }
+
+            var system = PathAliases.ForRoots(new[] { Path.Combine(link, "App"), target, Path.Combine(root, "missing") });
+            Check(system.Count == 1 && system.ToGiven(Path.Combine(target, "App", "Main.cpp")) == Path.Combine(link, "App", "Main.cpp") &&
+                  system.ToReal(Path.Combine(link, "App", "Main.cpp")) == Path.Combine(target, "App", "Main.cpp"),
+                "junction 실제 경로 조회(없는 폴더·링크 아닌 폴더 제외): " + system.ToGiven(Path.Combine(target, "App", "Main.cpp")));
+
+            File.WriteAllText(Path.Combine(target, "App.sln"), string.Empty);
+            var source = Path.Combine(link, "App", "Main.cpp").Replace('\\', '/');
+            File.WriteAllText(Path.Combine(target, CompileCommandDatabase.FileName),
+                new CompileCommand(Path.Combine(link, "App").Replace('\\', '/'), source, new[] { "clang-cl.exe", "/c", source }).ToJson().ToJson().Insert(0, "[") + "]");
+            var context = CompileContextBuilder.Prepare(Path.Combine(link, "App.sln"), Path.Combine(root, "cache"), null, "clang-cl.exe");
+            var written = CompileCommandDatabase.Read(Path.Combine(context.Directory, CompileCommandDatabase.FileName));
+            var realSource = Path.Combine(target, "App", "Main.cpp").Replace('\\', '/');
+            Check(context.Paths.Count == 1 && context.Commands[0].File == source && written.Count == 1 && written[0].File == realSource &&
+                  written[0].Arguments[2] == source, "링크를 거쳐 연 Solution의 compile_commands.json은 실제 파일 경로: " + written[0].File);
+        }
+        finally
+        {
+            // junction은 링크만 지우고(대상 유지) 나머지를 지웁니다.
+            if (Directory.Exists(link)) Directory.Delete(link);
+            if (Directory.Exists(root)) Directory.Delete(root, true);
+        }
+    }
+
     public static void RunConnection()
     {
         using var server = new FakeServer();

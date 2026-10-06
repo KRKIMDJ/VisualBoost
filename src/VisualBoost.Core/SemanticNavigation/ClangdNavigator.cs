@@ -179,7 +179,8 @@ public sealed class ClangdNavigator : IDisposable
                 ExecutablePath = options.ClangdPath,
                 CompileCommandsDirectory = context.Directory,
                 WorkerCount = options.WorkerCount,
-                LogFilePath = Path.Combine(context.Directory, "clangd.log")
+                LogFilePath = Path.Combine(context.Directory, "clangd.log"),
+                Paths = context.Paths
             });
         }
         catch (Exception exception) when (exception is IOException || exception is System.ComponentModel.Win32Exception)
