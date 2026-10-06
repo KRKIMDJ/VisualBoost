@@ -37,6 +37,9 @@ public static class CppLinePreviewClassifier
         "short signed sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typeid typename union " +
         "unsigned using virtual void volatile wchar_t while xor xor_eq").Split(' '), StringComparer.Ordinal);
 
+    // 템플릿 인수 목록에는 올 수 없는 논리·비트 연산 대체 단어입니다.
+    private static readonly HashSet<string> AlternativeOperators = new("and and_eq bitand bitor compl not not_eq or or_eq xor xor_eq".Split(' '), StringComparer.Ordinal);
+
     /// <param name="line">분류할 코드 한 줄입니다.</param>
     /// <param name="resolveName">
     /// 식별자 이름의 종류를 알려 주는 판정입니다. 확실하지 않으면 null을 돌려줘야 합니다. 키워드가 아닌 식별자마다 부르므로
@@ -177,22 +180,35 @@ public static class CppLinePreviewClassifier
 
     /// <summary>
     /// 키워드가 아닌 식별자의 종류입니다. 줄 형태로 확정한 종류(선언·<c>#define</c>·네임스페이스·열거자)가 가장 확실하고 이름 판정이 다음입니다.
-    /// 호출 형태(<c>Name(</c>)로 추정한 함수는 생성자 호출이나 함수형 매크로일 수 있어 이름 판정이 있으면 그것을 따릅니다.
+    /// 호출 형태(<c>Name(</c>, <c>Name&lt;...&gt;(</c>)로 추정한 함수는 생성자 호출이나 함수형 매크로일 수 있어 이름 판정이 있으면 그것을 따릅니다.
+    /// 이름 판정은 줄 위치를 모르므로 두 경우에는 쓰지 않습니다. 이름 색인에 지역 변수가 없어 같은 이름의 함수로 칠할 수 있으므로
+    /// 판정이 함수이면 호출 형태에서만 받고, 멤버 접근(<c>.</c>, <c>-&gt;</c>) 뒤의 이름은 다른 곳의 같은 이름과 무관하므로 판정을 묻지 않습니다.
     /// </summary>
     private static CodePreviewKind? IdentifierKind(string text, int start, int end, string word, Dictionary<int, SemanticColorKind> hints,
         Func<string, CodePreviewKind?>? resolveName)
     {
         var shaped = hints.TryGetValue(start, out var hint) ? ToPreviewKind(hint) : null;
         if (shaped is not null and not CodePreviewKind.Function) return shaped;
-        if (resolveName?.Invoke(word) is { } named) return named;
-        if (shaped is not null) return shaped;
         // 편집기 빠른 색상 보조와 같이 대문자만인 이름은 매크로일 수 있어 호출 형태여도 함수로 칠하지 않습니다.
-        return !IsUpperName(word) && IsTemplateCall(text, end) ? CodePreviewKind.Function : null;
+        var call = shaped is not null || (!IsUpperName(word) && IsTemplateCall(text, end));
+        var named = IsMemberAccess(text, start) ? null : resolveName?.Invoke(word);
+        if (named is { } kind && (kind != CodePreviewKind.Function || call)) return kind;
+        return call ? CodePreviewKind.Function : null;
+    }
+
+    /// <summary>이름 바로 앞이 멤버 접근 연산자(<c>.</c>, <c>-&gt;</c>)인지 봅니다. <c>::</c> 한정 이름은 멤버 접근이 아닙니다.</summary>
+    private static bool IsMemberAccess(string text, int start)
+    {
+        var i = start - 1;
+        while (i >= 0 && text[i] is ' ' or '\t') i--;
+        if (i < 0) return false;
+        return text[i] == '.' || (text[i] == '>' && i > 0 && text[i - 1] == '-');
     }
 
     /// <summary>
     /// 이름 바로 뒤가 템플릿 인수 목록과 여는 괄호(<c>Cast&lt;T&gt;(</c>)이면 호출 형태로 봅니다. 비교식(<c>a &lt; b &amp;&amp; c &gt; (d)</c>)을
     /// 거르도록 인수 목록에는 이름·숫자·<c>::</c>·포인터·참조·쉼표·공백만 허용하고, <c>&amp;&amp;</c>는 인수 끝(<c>T&amp;&amp;&gt;</c>)에서만 받습니다.
+    /// 논리 연산 대체 단어(<c>and</c>, <c>or</c> 등)가 있어도 비교식으로 봅니다.
     /// </summary>
     private static bool IsTemplateCall(string text, int index)
     {
@@ -214,6 +230,13 @@ public static class CppLinePreviewClassifier
                 var next = SkipSpaces(text, index + 2);
                 if (next >= text.Length || text[next] is not ('>' or ',')) return false;
                 index++;
+            }
+            else if ((char.IsLetter(c) || c == '_') && (index == 0 || !IsIdentifierPart(text[index - 1])))
+            {
+                var wordEnd = index + 1;
+                while (wordEnd < text.Length && IsIdentifierPart(text[wordEnd])) wordEnd++;
+                if (AlternativeOperators.Contains(text.Substring(index, wordEnd - index))) return false;
+                index = wordEnd - 1;
             }
             else if (!IsIdentifierPart(c) && c is not (' ' or '\t' or ':' or '*' or '&' or ',')) return false;
         }

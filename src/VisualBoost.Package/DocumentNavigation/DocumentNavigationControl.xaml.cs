@@ -52,6 +52,7 @@ public partial class DocumentNavigationControl : Popup, IDisposable
         if (disposed || EditorAnchor is null) return;
         var anchor = BarAnchor is { IsVisible: true } ? BarAnchor : EditorAnchor;
         Menu.PlacementTarget = anchor;
+        PopupTextFormatting.Apply(PopupSurface, anchor);
         Menu.Placement = System.Windows.Controls.Primitives.PlacementMode.Relative;
         PopupSurface.Width = Math.Max(360, Math.Min(960, anchor.ActualWidth));
         Search.Text = string.Empty;

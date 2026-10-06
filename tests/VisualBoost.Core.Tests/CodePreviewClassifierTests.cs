@@ -34,6 +34,8 @@ internal static class CodePreviewClassifierTests
         Expect("if (Index < Count && Limit > (Max)) {}", "if:Keyword", "비교식은 템플릿 호출로 보지 않음");
         Expect("TArray<FString> Names;", string.Empty, "괄호가 없는 템플릿 타입은 호출이 아님");
         Expect("CHECK_T<int>(Value);", "int:Keyword", "대문자 이름은 템플릿 호출 형태여도 함수로 칠하지 않음");
+        Expect("if (Low < Mid or High > (Max)) {}", "if:Keyword or:Keyword", "대체 단어 or가 있는 비교식");
+        Expect("return Owner->Find<UWidget>(Name);", "return:Keyword Find:Function", "멤버 템플릿 호출");
 
         // 이름 판정은 형태 추정이 칠하지 못한 이름을 채우고, 호출 형태로 추정한 함수보다 앞섭니다. 선언 형태로 확정한 종류는 그대로입니다.
         var names = new Dictionary<string, CodePreviewKind>(StringComparer.Ordinal)
@@ -52,6 +54,13 @@ internal static class CodePreviewClassifierTests
         Expect("check(Value);", "check:Macro", "함수형 매크로", Resolve);
         Expect("TArray<int32>(Source);", "TArray:Type", "템플릿 호출 형태보다 이름 판정", Resolve);
         Expect("int Count = 0;", "int:Keyword Count:Variable 0:Number", "선언 형태로 확정한 변수는 이름 판정보다 앞섬", Resolve);
+        // 이름 판정의 함수는 호출 형태에서만 받습니다. 색인에 없는 지역 변수가 같은 이름의 함수로 칠해지지 않아야 합니다.
+        Expect("Total = Count + 1;", "1:Number", "호출이 아닌 자리의 함수 이름", Resolve);
+        // 멤버 접근 뒤 이름은 이름 판정을 쓰지 않고 호출 형태만 봅니다.
+        Expect("Mode = Settings->FVector;", string.Empty, "멤버 이름은 같은 이름의 타입으로 칠하지 않음", Resolve);
+        Expect("Origin.FVector(1);", "FVector:Function 1:Number", "멤버 호출은 이름 판정 대신 함수", Resolve);
+        Expect("Points.TArray<int32>(Source);", "TArray:Function", "멤버 템플릿 호출도 이름 판정 대신 함수", Resolve);
+        Expect("FMod::FVector(0);", "FVector:Type 0:Number", ":: 한정 이름은 멤버 접근이 아님", Resolve);
 
         // 같은 이름의 심볼 종류들은 확실한 경우만 한 종류로 줄입니다.
         Kinds("Class Function", CodePreviewKind.Type, "타입과 생성자");

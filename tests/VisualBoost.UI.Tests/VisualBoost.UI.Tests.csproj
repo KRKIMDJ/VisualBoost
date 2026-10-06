@@ -40,6 +40,7 @@
     <Compile Include="../../src/VisualBoost.Package/UI/SymbolScopeChoice.cs" Link="SymbolScopeChoice.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/CodePreviewStyle.cs" Link="CodePreviewStyle.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/ResultListFont.cs" Link="ResultListFont.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/PopupTextFormatting.cs" Link="PopupTextFormatting.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>

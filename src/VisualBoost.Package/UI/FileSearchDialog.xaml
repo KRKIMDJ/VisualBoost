@@ -100,7 +100,8 @@
     </Style>
 
     <Style TargetType="GridViewColumnHeader">
-      <Setter Property="Height" Value="22" />
+      <!-- 최소 높이라 큰 환경 글꼴에서는 글자 높이만큼 늘어납니다. -->
+      <Setter Property="MinHeight" Value="22" />
       <Setter Property="HorizontalContentAlignment" Value="Left" />
       <Setter Property="ToolTip" Value="열 경계를 끌어 너비 비율 조절" />
       <Setter Property="Padding" Value="7,0" />

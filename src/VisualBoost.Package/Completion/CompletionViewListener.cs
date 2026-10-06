@@ -83,10 +83,10 @@ internal sealed class CompletionViewListener : IWpfTextViewCreationListener
             var border = new Border { Child = panel, BorderThickness = new Thickness(1) };
             border.SetResourceReference(Border.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
             border.SetResourceReference(Border.BorderBrushProperty, VsBrushes.ToolWindowBorderKey);
-            // 부모 없는 Popup은 글꼴·글자 렌더링을 물려받지 않으므로 결과 목록 창과 같은 환경 글꼴·목록 글씨 크기 하나를 직접 지정합니다.
+            // 부모 없는 Popup은 글꼴을 물려받지 않으므로 결과 목록 창과 같은 환경 글꼴·목록 글씨 크기 하나를 직접 지정합니다.
+            // 글자 렌더링은 열 때 편집기 확대를 보고 정합니다(PopupTextFormatting).
             border.SetResourceReference(System.Windows.Documents.TextElement.FontFamilyProperty, VsFonts.EnvironmentFontFamilyKey);
             border.SetResourceReference(System.Windows.Documents.TextElement.FontSizeProperty, UI.ResultListFont.SizeKey);
-            TextOptions.SetTextFormattingMode(border, TextFormattingMode.Display);
             popup = new Popup { Child = border, PlacementTarget = view.VisualElement, Placement = PlacementMode.Relative,
                 StaysOpen = true, Focusable = false, AllowsTransparency = false };
             delay.Tick += OnDelay;
@@ -153,6 +153,7 @@ internal sealed class CompletionViewListener : IWpfTextViewCreationListener
             var caret = view.Caret;
             popup.HorizontalOffset = Math.Max(0, caret.Left - view.ViewportLeft);
             popup.VerticalOffset = caret.Bottom - view.ViewportTop;
+            UI.PopupTextFormatting.Apply(popup.Child, view.VisualElement);
             popup.IsOpen = true;
             guard.Start();
         }

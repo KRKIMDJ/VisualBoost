@@ -90,6 +90,20 @@ internal static class DocumentNavigationInteractionTests
             control.Open();
             Until(() => control.Results.Items.Count == 30);
             Check(control.Menu.PlacementTarget == bar && bar.ActualHeight == 27, "27 DIP 상단 줄 위치에서 검색 열기");
+            // 편집기 확대가 없으면 VS UI와 같은 Display, 확대 중이면 팝업 내용도 확대되므로 WPF 기본(Ideal) 렌더링입니다.
+            Check(TextOptions.GetTextFormattingMode(control.PopupSurface) == TextFormattingMode.Display, "확대 없는 기준 요소는 Display 렌더링");
+            var zoomed = new Border();
+            editor.Child = zoomed;
+            editor.LayoutTransform = new ScaleTransform(1.5, 1.5);
+            window.UpdateLayout();
+            Check(!PopupTextFormatting.IsUnscaled(zoomed) && !PopupTextFormatting.IsUnscaled(editor) && PopupTextFormatting.IsUnscaled(bar), "편집기 확대 판정");
+            var probe = new Border();
+            PopupTextFormatting.Apply(probe, editor);
+            Check(TextOptions.GetTextFormattingMode(probe) == TextFormattingMode.Ideal, "확대 중인 기준 요소는 Ideal 렌더링");
+            editor.LayoutTransform = Transform.Identity;
+            editor.Child = null;
+            window.UpdateLayout();
+            Check(PopupTextFormatting.IsUnscaled(editor) && PopupTextFormatting.IsUnscaled(null), "확대 해제와 기준 없음");
             Render(bar, Path.Combine(root, "artifacts", "ui-validation", "DocumentNavigationBar.png"));
             Check(((DocumentMemberRow)control.Results.SelectedItem).Name == "UpdateMovementMode12", "현재 함수 초기 선택");
             long receivedVersion = -1; DocumentMember? navigated = null;

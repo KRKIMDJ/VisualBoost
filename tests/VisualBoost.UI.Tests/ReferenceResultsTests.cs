@@ -230,19 +230,31 @@ internal static class ReferenceResultsTests
                 name + ": 요소별 크기 지정 없음: " + string.Join(",", sized.Where(element => element != document.Root).Select(element => element.Name.LocalName)));
             Assert(sized.All(element => (string?)element.Attribute("FontSize") == key), name + ": 우클릭 메뉴도 같은 크기");
             Assert(sized.All(element => (string?)element.Attribute("TextOptions.TextFormattingMode") == "Display"), name + ": 창과 우클릭 메뉴는 VS UI 글자 렌더링");
+            FixedHeights(document, name);
         }
 
-        // 문서 함수 트리(Alt+M) 팝업도 표면 하나에서 같은 크기·렌더링을 정하고, 행·머리글은 결과 목록 창과 같은 높이입니다.
+        // 문서 함수 트리(Alt+M) 팝업도 표면 하나에서 같은 크기를 정합니다. 글자 렌더링은 열 때 편집기 확대를 보고 정하므로 고정하지 않습니다.
         var popup = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "DocumentNavigation", "DocumentNavigationControl.xaml"));
         var surface = popup.Descendants().Single(element => (string?)element.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml")) == "PopupSurface");
-        Assert((string?)surface.Attribute("TextElement.FontSize") == key && (string?)surface.Attribute("TextOptions.TextFormattingMode") == "Display",
-            "Alt+M 팝업: 목록 글씨 크기와 VS UI 글자 렌더링");
+        Assert((string?)surface.Attribute("TextElement.FontSize") == key && surface.Attribute("TextOptions.TextFormattingMode") is null,
+            "Alt+M 팝업: 목록 글씨 크기, 렌더링은 열 때 결정");
         Assert(popup.Descendants().All(element => element.Attribute("FontSize") is null), "Alt+M 팝업: 요소별 크기 지정 없음");
         string? Setter(string target, string property) => (string?)popup.Descendants()
             .Where(element => element.Name.LocalName == "Style" && (string?)element.Attribute("TargetType") == target)
             .SelectMany(style => style.Elements()).FirstOrDefault(element => element.Name.LocalName == "Setter" && (string?)element.Attribute("Property") == property)
             ?.Attribute("Value");
-        Assert(Setter("ListViewItem", "Height") == "20" && Setter("GridViewColumnHeader", "Height") == "22", "Alt+M 팝업: 행 20·머리글 22");
+        Assert(Setter("ListViewItem", "MinHeight") == "20" && Setter("GridViewColumnHeader", "MinHeight") == "22", "Alt+M 팝업: 행 최소 20·머리글 최소 22");
+        FixedHeights(popup, "Alt+M 팝업");
+    }
+
+    /// <summary>행·열 머리글은 최소 높이만 둡니다. 고정 높이는 큰 환경 글꼴에서 글자를 자릅니다.</summary>
+    private static void FixedHeights(XDocument document, string name)
+    {
+        var fixedRows = document.Descendants()
+            .Where(element => element.Name.LocalName == "Style" && (string?)element.Attribute("TargetType") is "ListViewItem" or "ListBoxItem" or "GridViewColumnHeader")
+            .SelectMany(style => style.Elements())
+            .Where(element => element.Name.LocalName == "Setter" && (string?)element.Attribute("Property") == "Height").ToArray();
+        Assert(fixedRows.Length == 0, name + ": 행·머리글 고정 높이 없음");
     }
 
     private static void Xaml(string root, string output)
