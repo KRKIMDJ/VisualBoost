@@ -15,11 +15,12 @@
                        Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
-                       FontSize="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontSizeKey}}"
+                       FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
     <Style x:Key="ResultItemStyle" TargetType="ListBoxItem">
-      <Setter Property="MinHeight" Value="24" />
+      <!-- 결과 목록은 내용 높이(18 DIP 아이콘 또는 글자)에 위아래 1 DIP만 두어 한 화면에 많이 보입니다. -->
+      <Setter Property="MinHeight" Value="20" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Background" Value="Transparent" />
@@ -54,7 +55,7 @@
     </Style>
 
     <Style TargetType="GridViewColumnHeader">
-      <Setter Property="Height" Value="28" />
+      <Setter Property="Height" Value="22" />
       <Setter Property="HorizontalContentAlignment" Value="Left" />
       <Setter Property="ToolTip" Value="열 경계를 끌어 너비 비율 조절" />
       <Setter Property="Padding" Value="7,0" />
@@ -75,7 +76,7 @@
             Background="{DynamicResource {x:Static vsshell:VsBrushes.CommandBarGradientKey}}">
       <DockPanel>
         <TextBlock x:Name="HeaderText" DockPanel.Dock="Left" VerticalAlignment="Center" Margin="0,0,12,0"
-                   FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="420" />
+                   FontWeight="SemiBold" TextTrimming="CharacterEllipsis" MaxWidth="420" />
         <Border BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
                 BorderThickness="1" CornerRadius="3"
                 Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
@@ -84,9 +85,9 @@
               <ColumnDefinition Width="30" />
               <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
-            <TextBlock Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" Text="⌕" />
+            <TextBlock Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" Text="⌕" />
             <Grid Grid.Column="1">
-              <TextBox x:Name="FilterBox" Padding="0,6" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment111PercentFontSizeKey}}" BorderThickness="0"
+              <TextBox x:Name="FilterBox" Padding="0,6" BorderThickness="0"
                        Background="Transparent"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        TextChanged="OnFilterTextChanged" />

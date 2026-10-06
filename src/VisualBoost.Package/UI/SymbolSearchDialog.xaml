@@ -22,7 +22,8 @@
 
 
     <Style x:Key="ResultItemStyle" TargetType="ListBoxItem">
-      <Setter Property="MinHeight" Value="24" />
+      <!-- 결과 목록은 내용 높이(18 DIP 아이콘 또는 글자)에 위아래 1 DIP만 두어 한 화면에 많이 보입니다. -->
+      <Setter Property="MinHeight" Value="20" />
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <Setter Property="Padding" Value="0" />
       <Setter Property="Background" Value="Transparent" />
@@ -57,7 +58,7 @@
     </Style>
 
     <Style TargetType="GridViewColumnHeader">
-      <Setter Property="Height" Value="28" />
+      <Setter Property="Height" Value="22" />
       <Setter Property="HorizontalContentAlignment" Value="Left" />
       <Setter Property="ToolTip" Value="열 경계를 끌어 너비 비율 조절" />
       <Setter Property="Padding" Value="7,0" />

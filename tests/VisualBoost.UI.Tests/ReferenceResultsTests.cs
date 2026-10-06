@@ -218,10 +218,10 @@ internal static class ReferenceResultsTests
 
     private static void SharedListFont(string root)
     {
-        // 참조 창·파일 탐색·심볼 탐색은 모든 글자가 한 곳(ResultListFont)에서 정한 크기 하나를 씁니다. 창의 맨 위 요소와
+        // 참조 창·파일 탐색·심볼 탐색·정의 후보 창은 모든 글자가 한 곳(ResultListFont)에서 정한 크기 하나를 씁니다. 창의 맨 위 요소와
         // 부모 없는 팝업인 우클릭 메뉴에만 그 키를 두고, 강조는 크기 대신 굵기로 합니다.
         const string key = "{DynamicResource {x:Static ui:ResultListFont.SizeKey}}";
-        foreach (var name in new[] { "ReferencesControl", "FileSearchDialog", "SymbolSearchDialog" })
+        foreach (var name in new[] { "ReferencesControl", "FileSearchDialog", "SymbolSearchDialog", "NavigationResultsDialog" })
         {
             var document = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "UI", name + ".xaml"));
             var sized = document.Descendants().Where(element => element.Attribute("FontSize") is not null).ToArray();
