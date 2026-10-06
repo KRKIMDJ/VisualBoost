@@ -176,7 +176,7 @@ public partial class DocumentNavigationControl : Popup, IDisposable
     internal void MovePage(bool down)
     {
         if (!ResultListKeys.TryMove(down ? Key.PageDown : Key.PageUp, ModifierKeys.None, Results.SelectedIndex, Results.Items.Count,
-                ResultListKeys.PageSize(Results, 24), out var target) || target < 0) return;
+                ResultListKeys.PageSize(Results, 20), out var target) || target < 0) return;
         Results.SelectedIndex = target;
         Results.ScrollIntoView(Results.SelectedItem);
     }

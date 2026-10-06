@@ -8,7 +8,7 @@
  <Popup.Resources>
   <ui:SymbolColorConverter x:Key="SymbolColor" />
   <Style TargetType="GridViewColumnHeader">
-   <Setter Property="Height" Value="25"/><Setter Property="HorizontalContentAlignment" Value="Left"/>
+   <Setter Property="Height" Value="22"/><Setter Property="HorizontalContentAlignment" Value="Left"/>
    <Setter Property="Padding" Value="7,0"/>
    <Setter Property="Background" Value="{DynamicResource {x:Static vs:VsBrushes.GridHeadingBackgroundKey}}"/>
    <Setter Property="Foreground" Value="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"/>
@@ -20,7 +20,9 @@
            Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
            BorderBrush="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBorderKey}}"
            TextElement.Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"
-           TextElement.FontFamily="{DynamicResource {x:Static vs:VsFonts.EnvironmentFontFamilyKey}}" TextElement.FontSize="{DynamicResource {x:Static vs:VsFonts.EnvironmentFontSizeKey}}" PreviewKeyDown="OnPopupKeyDown">
+           TextElement.FontFamily="{DynamicResource {x:Static vs:VsFonts.EnvironmentFontFamilyKey}}" TextElement.FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
+           TextOptions.TextFormattingMode="Display" PreviewKeyDown="OnPopupKeyDown">
+    <!-- 부모 없는 팝업이라 글꼴·글자 렌더링을 물려받지 않습니다. 결과 목록 창과 같은 환경 글꼴·목록 글씨 크기 하나를 여기서 지정합니다. -->
     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
      <TextBox x:Name="Search" Margin="0,0,0,7" Height="26" Padding="7,2" TextChanged="OnSearchChanged"
        ToolTip="함수 이름 검색 · 공백으로 AND 검색" AutomationProperties.Name="문서 함수 이름 검색"
@@ -30,14 +32,15 @@
       <TextBlock Text="현재 문서의 함수 트리 · Alt+M" Opacity="0.7"/>
       <TextBlock x:Name="OrderLabel" Text="문서 순서" HorizontalAlignment="Right" Opacity="0.65"/>
      </DockPanel>
-     <ui:FittedResultsList x:Name="Results" Grid.Row="2" Height="288" BorderThickness="0"
+     <ui:FittedResultsList x:Name="Results" Grid.Row="2" Height="282" BorderThickness="0"
        MouseDoubleClick="OnDoubleClick" Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}" ui:SearchPalette.Track="True"
        Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"
        ScrollViewer.HorizontalScrollBarVisibility="Disabled" ScrollViewer.VerticalScrollBarVisibility="Auto"
        VirtualizingPanel.IsVirtualizing="True" VirtualizingPanel.VirtualizationMode="Recycling"
        AutomationProperties.Name="문서 함수 목록">
       <ListView.ItemContainerStyle><Style TargetType="ListViewItem">
-       <Setter Property="Height" Value="24"/><Setter Property="Padding" Value="4,0"/>
+       <!-- 다른 결과 목록과 같이 내용 높이(18 DIP 아이콘)에 위아래 1 DIP만 둡니다. 목록 높이는 머리글 22 + 13행입니다. -->
+       <Setter Property="Height" Value="20"/><Setter Property="Padding" Value="4,0"/>
        <Setter Property="HorizontalContentAlignment" Value="Stretch"/>
        <Setter Property="ToolTip" Value="{Binding Tooltip}"/>
        <Setter Property="Foreground" Value="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"/>
@@ -58,8 +61,8 @@
       <ListView.View><GridView AllowsColumnReorder="False">
        <GridViewColumn Header="함수" Width="510"><GridViewColumn.CellTemplate><DataTemplate>
         <DockPanel Margin="{Binding Indent}">
-         <Button Style="{DynamicResource {x:Static vs:VsResourceKeys.ButtonStyleKey}}" DockPanel.Dock="Left" Width="18" Height="20" Padding="0" BorderThickness="0" Background="Transparent"
-                 Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListViewItem}}" FontSize="{DynamicResource {x:Static vs:VsFonts.Environment90PercentFontSizeKey}}"
+         <Button Style="{DynamicResource {x:Static vs:VsResourceKeys.ButtonStyleKey}}" DockPanel.Dock="Left" Width="18" Height="18" Padding="0" BorderThickness="0" Background="Transparent"
+                 Foreground="{Binding Foreground, RelativeSource={RelativeSource AncestorType=ListViewItem}}"
                  Content="{Binding ExpanderText}" Visibility="{Binding ExpanderVisibility}" Click="OnExpanderClick"
                  Focusable="False" ToolTip="접기/펼치기" AutomationProperties.Name="{Binding Name}">
          </Button>

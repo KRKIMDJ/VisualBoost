@@ -219,7 +219,7 @@ internal static class ReferenceResultsTests
     private static void SharedListFont(string root)
     {
         // 참조 창·파일 탐색·심볼 탐색·정의 후보 창은 모든 글자가 한 곳(ResultListFont)에서 정한 크기 하나를 씁니다. 창의 맨 위 요소와
-        // 부모 없는 팝업인 우클릭 메뉴에만 그 키를 두고, 강조는 크기 대신 굵기로 합니다.
+        // 부모 없는 팝업인 우클릭 메뉴에만 그 키를 두고, 강조는 크기 대신 굵기로 합니다. 같은 곳에서 VS UI와 같은 글자 렌더링(Display)을 정합니다.
         const string key = "{DynamicResource {x:Static ui:ResultListFont.SizeKey}}";
         foreach (var name in new[] { "ReferencesControl", "FileSearchDialog", "SymbolSearchDialog", "NavigationResultsDialog" })
         {
@@ -229,7 +229,20 @@ internal static class ReferenceResultsTests
             Assert(sized.All(element => element == document.Root || element.Name.LocalName == "ContextMenu"),
                 name + ": 요소별 크기 지정 없음: " + string.Join(",", sized.Where(element => element != document.Root).Select(element => element.Name.LocalName)));
             Assert(sized.All(element => (string?)element.Attribute("FontSize") == key), name + ": 우클릭 메뉴도 같은 크기");
+            Assert(sized.All(element => (string?)element.Attribute("TextOptions.TextFormattingMode") == "Display"), name + ": 창과 우클릭 메뉴는 VS UI 글자 렌더링");
         }
+
+        // 문서 함수 트리(Alt+M) 팝업도 표면 하나에서 같은 크기·렌더링을 정하고, 행·머리글은 결과 목록 창과 같은 높이입니다.
+        var popup = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "DocumentNavigation", "DocumentNavigationControl.xaml"));
+        var surface = popup.Descendants().Single(element => (string?)element.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml")) == "PopupSurface");
+        Assert((string?)surface.Attribute("TextElement.FontSize") == key && (string?)surface.Attribute("TextOptions.TextFormattingMode") == "Display",
+            "Alt+M 팝업: 목록 글씨 크기와 VS UI 글자 렌더링");
+        Assert(popup.Descendants().All(element => element.Attribute("FontSize") is null), "Alt+M 팝업: 요소별 크기 지정 없음");
+        string? Setter(string target, string property) => (string?)popup.Descendants()
+            .Where(element => element.Name.LocalName == "Style" && (string?)element.Attribute("TargetType") == target)
+            .SelectMany(style => style.Elements()).FirstOrDefault(element => element.Name.LocalName == "Setter" && (string?)element.Attribute("Property") == property)
+            ?.Attribute("Value");
+        Assert(Setter("ListViewItem", "Height") == "20" && Setter("GridViewColumnHeader", "Height") == "22", "Alt+M 팝업: 행 20·머리글 22");
     }
 
     private static void Xaml(string root, string output)

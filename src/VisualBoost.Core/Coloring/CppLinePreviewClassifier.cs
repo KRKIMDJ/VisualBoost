@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using VisualBoost.Core.Analysis;
 
 namespace VisualBoost.Core.Coloring;
 
@@ -16,14 +17,18 @@ public readonly struct CodePreviewSpan
 
 /// <summary>
 /// 결과 목록의 C++ 코드 미리보기 한 줄을 색 구간으로 나눕니다. 화면 표시 전용입니다.
-/// 줄 하나만 보므로 앞 줄에서 시작한 블록 주석·raw 문자열은 알 수 없습니다. 식별자 종류는 문서 밖 자료를 읽지 않고
-/// 편집기 빠른 색상 보조(<see cref="CppQuickColorScanner"/>)와 같은 형태 추정(호출 형태, 선언 형태, <c>#define</c>)만 씁니다.
+/// 줄 하나만 보므로 앞 줄에서 시작한 블록 주석·raw 문자열은 알 수 없습니다. 식별자 종류는 편집기 빠른 색상 보조
+/// (<see cref="CppQuickColorScanner"/>)와 같은 형태 추정(호출 형태, 선언 형태, <c>#define</c>)에, 호출자가 주는 이름 판정
+/// (Solution 이름 인덱스 등)을 더해 정합니다. 이 클래스는 판정의 출처를 모르며, 판정이 없으면 형태만으로 분류합니다.
 /// 구간이 없는 글자는 기본색입니다.
 /// </summary>
 public static class CppLinePreviewClassifier
 {
     /// <summary>이보다 긴 줄은 색을 입히지 않습니다. 미리보기는 앞뒤를 잘라 수백 자 안쪽이므로 비정상 입력만 걸립니다.</summary>
     public const int MaximumLength = 4096;
+
+    // 템플릿 인수 목록으로 볼 최대 길이입니다. 더 길면 비교식일 가능성이 커 호출 형태로 보지 않습니다.
+    private const int MaximumTemplateArguments = 160;
 
     private static readonly HashSet<string> Keywords = new(("alignas alignof and and_eq asm auto bitand bitor bool break case catch char char8_t char16_t char32_t " +
         "class compl concept const consteval constexpr constinit const_cast continue co_await co_return co_yield decltype default delete do double " +
@@ -32,7 +37,12 @@ public static class CppLinePreviewClassifier
         "short signed sizeof static static_assert static_cast struct switch template this thread_local throw true try typedef typeid typename union " +
         "unsigned using virtual void volatile wchar_t while xor xor_eq").Split(' '), StringComparer.Ordinal);
 
-    public static IReadOnlyList<CodePreviewSpan> Classify(string? line)
+    /// <param name="line">분류할 코드 한 줄입니다.</param>
+    /// <param name="resolveName">
+    /// 식별자 이름의 종류를 알려 주는 판정입니다. 확실하지 않으면 null을 돌려줘야 합니다. 키워드가 아닌 식별자마다 부르므로
+    /// 호출자가 결과를 캐시합니다. null이면 줄 형태만으로 분류합니다.
+    /// </param>
+    public static IReadOnlyList<CodePreviewSpan> Classify(string? line, Func<string, CodePreviewKind?>? resolveName = null)
     {
         if (string.IsNullOrEmpty(line) || line!.Length > MaximumLength) return Array.Empty<CodePreviewSpan>();
         var text = line;
@@ -101,7 +111,7 @@ public static class CppLinePreviewClassifier
                 while (i < text.Length && IsIdentifierPart(text[i])) i++;
                 var word = text.Substring(start, i - start);
                 if (Keywords.Contains(word)) spans.Add(new CodePreviewSpan(start, i - start, CodePreviewKind.Keyword));
-                else if (hints.TryGetValue(start, out var kind) && ToPreviewKind(kind) is { } preview) spans.Add(new CodePreviewSpan(start, i - start, preview));
+                else if (IdentifierKind(text, start, i, word, hints, resolveName) is { } kind) spans.Add(new CodePreviewSpan(start, i - start, kind));
                 continue;
             }
 
@@ -125,6 +135,97 @@ public static class CppLinePreviewClassifier
         }
 
         return spans.AsReadOnly();
+    }
+
+    /// <summary>
+    /// 같은 이름으로 찾은 심볼 종류들을 구간 종류 하나로 줄입니다. 이름 판정을 만드는 쪽이 씁니다. 표시 보조라 확실한 경우만 답합니다.
+    /// 타입은 생성자(함수)와 같은 이름이므로 타입+함수는 타입입니다. 변수·모르는 종류가 섞이거나 서로 다른 그룹이 섞이면 null입니다.
+    /// </summary>
+    public static CodePreviewKind? KindOfSymbols(IEnumerable<SourceSymbolKind> kinds)
+    {
+        if (kinds is null) throw new ArgumentNullException(nameof(kinds));
+        var any = false;
+        var type = false;
+        var function = false;
+        CodePreviewKind? other = null;
+        foreach (var kind in kinds)
+        {
+            any = true;
+            switch (kind)
+            {
+                case SourceSymbolKind.Type or SourceSymbolKind.Class or SourceSymbolKind.Struct or SourceSymbolKind.Union or SourceSymbolKind.Enum:
+                    type = true;
+                    break;
+                case SourceSymbolKind.Function:
+                    function = true;
+                    break;
+                case SourceSymbolKind.Macro when other is null or CodePreviewKind.Macro:
+                    other = CodePreviewKind.Macro;
+                    break;
+                case SourceSymbolKind.Namespace when other is null or CodePreviewKind.Namespace:
+                    other = CodePreviewKind.Namespace;
+                    break;
+                default:
+                    return null;
+            }
+        }
+
+        if (!any) return null;
+        if (other is not null) return type || function ? null : other;
+        return type ? CodePreviewKind.Type : CodePreviewKind.Function;
+    }
+
+    /// <summary>
+    /// 키워드가 아닌 식별자의 종류입니다. 줄 형태로 확정한 종류(선언·<c>#define</c>·네임스페이스·열거자)가 가장 확실하고 이름 판정이 다음입니다.
+    /// 호출 형태(<c>Name(</c>)로 추정한 함수는 생성자 호출이나 함수형 매크로일 수 있어 이름 판정이 있으면 그것을 따릅니다.
+    /// </summary>
+    private static CodePreviewKind? IdentifierKind(string text, int start, int end, string word, Dictionary<int, SemanticColorKind> hints,
+        Func<string, CodePreviewKind?>? resolveName)
+    {
+        var shaped = hints.TryGetValue(start, out var hint) ? ToPreviewKind(hint) : null;
+        if (shaped is not null and not CodePreviewKind.Function) return shaped;
+        if (resolveName?.Invoke(word) is { } named) return named;
+        if (shaped is not null) return shaped;
+        // 편집기 빠른 색상 보조와 같이 대문자만인 이름은 매크로일 수 있어 호출 형태여도 함수로 칠하지 않습니다.
+        return !IsUpperName(word) && IsTemplateCall(text, end) ? CodePreviewKind.Function : null;
+    }
+
+    /// <summary>
+    /// 이름 바로 뒤가 템플릿 인수 목록과 여는 괄호(<c>Cast&lt;T&gt;(</c>)이면 호출 형태로 봅니다. 비교식(<c>a &lt; b &amp;&amp; c &gt; (d)</c>)을
+    /// 거르도록 인수 목록에는 이름·숫자·<c>::</c>·포인터·참조·쉼표·공백만 허용하고, <c>&amp;&amp;</c>는 인수 끝(<c>T&amp;&amp;&gt;</c>)에서만 받습니다.
+    /// </summary>
+    private static bool IsTemplateCall(string text, int index)
+    {
+        index = SkipSpaces(text, index);
+        if (index >= text.Length || text[index] != '<') return false;
+        var depth = 0;
+        for (var limit = Math.Min(text.Length, index + MaximumTemplateArguments); index < limit; index++)
+        {
+            var c = text[index];
+            if (c == '<') depth++;
+            else if (c == '>')
+            {
+                if (--depth > 0) continue;
+                var open = SkipSpaces(text, index + 1);
+                return open < text.Length && text[open] == '(';
+            }
+            else if (c == '&' && index + 1 < text.Length && text[index + 1] == '&')
+            {
+                var next = SkipSpaces(text, index + 2);
+                if (next >= text.Length || text[next] is not ('>' or ',')) return false;
+                index++;
+            }
+            else if (!IsIdentifierPart(c) && c is not (' ' or '\t' or ':' or '*' or '&' or ',')) return false;
+        }
+
+        return false;
+    }
+
+    private static bool IsUpperName(string word)
+    {
+        foreach (var c in word)
+            if (!char.IsUpper(c) && !char.IsDigit(c) && c != '_') return false;
+        return true;
     }
 
     /// <summary>색상 그룹에 대응하는 구간 종류입니다. 표시 전용이므로 나중에 늘어난 모르는 그룹은 예외 대신 색 없이 둡니다.</summary>

@@ -16,6 +16,7 @@
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
                        FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
+                       TextOptions.TextFormattingMode="Display"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
     <Style x:Key="ResultItemStyle" TargetType="ListBoxItem">

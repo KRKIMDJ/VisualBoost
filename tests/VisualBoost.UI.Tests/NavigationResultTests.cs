@@ -42,6 +42,30 @@ internal static class NavigationResultTests
         var tailItem = new NavigationResultItem(new NavigationLocation(path, 0, 0, 0, 7), tail, null);
         Assert(tailItem.PreviewSpans.All(span => span.Start + span.Length <= tailItem.Before.Length + tailItem.Match.Length + tailItem.After.Length - 1),
             "뒤를 자르면 줄임표와 보이지 않는 구간을 칠하지 않음");
+
+        // 패키지가 연결한 이름 판정(Solution 이름 인덱스)으로 줄 형태만으로 모르는 매크로·타입 이름을 칠합니다.
+        var declaration = "UE_API virtual UInputUserSettings* GetUserSettings() const;";
+        var target = declaration.IndexOf("GetUserSettings", StringComparison.Ordinal);
+        var shapeOnly = new NavigationResultItem(new NavigationLocation(path, 0, target, 0, target + 15), declaration, null);
+        Assert(Describe(declaration, shapeOnly.PreviewSpans) == "virtual:Keyword GetUserSettings:Function const:Keyword",
+            "이름 판정 없으면 형태만: " + Describe(declaration, shapeOnly.PreviewSpans));
+        try
+        {
+            CodePreviewStyle.NameKind = name => name switch
+            {
+                "UE_API" => CodePreviewKind.Macro,
+                "UInputUserSettings" => CodePreviewKind.Type,
+                _ => null,
+            };
+            var named = new NavigationResultItem(new NavigationLocation(path, 0, target, 0, target + 15), declaration, null);
+            Assert(Describe(declaration, named.PreviewSpans) == "UE_API:Macro virtual:Keyword UInputUserSettings:Type GetUserSettings:Function const:Keyword",
+                "이름 판정으로 매크로·타입 보강: " + Describe(declaration, named.PreviewSpans));
+        }
+        finally
+        {
+            CodePreviewStyle.NameKind = null;
+        }
+
         Console.WriteLine("PASS: 정의·참조 결과 줄 구성과 필터");
     }
 

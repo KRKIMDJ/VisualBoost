@@ -15,6 +15,7 @@
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
                        FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
+                       TextOptions.TextFormattingMode="Display"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
 
@@ -229,8 +230,8 @@
                ContextMenuOpening="OnResultsContextMenuOpening"
                MouseDoubleClick="OnResultDoubleClick">
         <ListView.ContextMenu>
-          <!-- 메뉴는 부모 없는 팝업이라 창 글꼴을 물려받지 않으므로 직접 지정합니다. -->
-          <ContextMenu FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+          <!-- 메뉴는 부모 없는 팝업이라 창 글꼴·글자 렌더링을 물려받지 않으므로 직접 지정합니다. -->
+          <ContextMenu TextOptions.TextFormattingMode="Display" FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
                        FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}">
             <MenuItem Header="열기" Click="OnContextOpenClick" />
             <Separator />

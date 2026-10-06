@@ -91,7 +91,7 @@ internal sealed class NavigationResultItem
     private IReadOnlyList<CodePreviewSpan> CreatePreviewSpans()
     {
         var result = new List<CodePreviewSpan>();
-        foreach (var span in CppLinePreviewClassifier.Classify(lineText))
+        foreach (var span in CppLinePreviewClassifier.Classify(lineText, CodePreviewStyle.NameKind))
         {
             var from = Math.Max(span.Start, visibleStart);
             var to = Math.Min(span.Start + span.Length, visibleEnd);
@@ -117,7 +117,7 @@ internal sealed class NavigationResultItem
 
 /// <summary>
 /// 코드 미리보기를 그립니다. 앞·일치·뒤 구간 중 일치 구간만 굵게 하고, 미리 분류한 색 구간(<see cref="SpansProperty"/>)으로
-/// 텍스트 편집기와 같은 계열의 색을 입힙니다. 여기서는 분류하지 않고 Run만 다시 만듭니다. 글꼴은 텍스트 편집기 글꼴 패밀리이며 크기는 목록 글꼴을 따릅니다.
+/// 텍스트 편집기와 같은 계열의 색을 입힙니다. 여기서는 분류하지 않고 Run만 다시 만듭니다. 글꼴은 정하지 않고 창의 환경 글꼴·목록 글씨 크기를 상속합니다.
 /// 선택 행(<see cref="PlainProperty"/>)과 고대비 모드에서는 색을 빼고 행 전경색을 상속합니다.
 /// </summary>
 public static class CodeSegments
@@ -145,7 +145,7 @@ public static class CodeSegments
     public static readonly DependencyProperty SurfaceProperty = DependencyProperty.RegisterAttached(
         "Surface", typeof(Brush), typeof(CodeSegments), new PropertyMetadata(null, Refresh));
 
-    /// <summary>색 설정·편집기 서식이 바뀌면 증가하는 값(<see cref="SearchPalette.RevisionProperty"/>)을 연결해 다시 그립니다.</summary>
+    /// <summary>색 설정·편집기 구문 색이 바뀌면 증가하는 값(<see cref="SearchPalette.RevisionProperty"/>)을 연결해 다시 그립니다.</summary>
     public static readonly DependencyProperty RevisionProperty = DependencyProperty.RegisterAttached(
         "Revision", typeof(int), typeof(CodeSegments), new PropertyMetadata(0, Refresh));
 
@@ -174,7 +174,6 @@ public static class CodeSegments
         var after = GetAfter(target) ?? string.Empty;
         var code = before + match + after;
         var matchEnd = before.Length + match.Length;
-        textBlock.FontFamily = CodePreviewStyle.FontFamily;
         textBlock.Inlines.Clear();
 
         var colored = !GetPlain(target);

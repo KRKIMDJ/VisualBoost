@@ -7,6 +7,7 @@
              Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
              FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
              FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
+             TextOptions.TextFormattingMode="Display"
              ui:SearchPalette.Track="True"
              PreviewKeyDown="OnPreviewKeyDown">
   <UserControl.Resources>
@@ -159,9 +160,9 @@
              PreviewMouseRightButtonDown="OnResultsPreviewMouseRightButtonDown"
              ContextMenuOpening="OnResultsContextMenuOpening"
              PreviewTextInput="OnResultTextInput">
-      <!-- 항목은 열 때 메뉴를 연 행의 종류에 맞춰 채웁니다(ReferenceMenu). 메뉴는 부모 없는 팝업이라 글꼴을 직접 지정합니다. -->
+      <!-- 항목은 열 때 메뉴를 연 행의 종류에 맞춰 채웁니다(ReferenceMenu). 메뉴는 부모 없는 팝업이라 글꼴·글자 렌더링을 직접 지정합니다. -->
       <ListBox.ContextMenu>
-        <ContextMenu FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+        <ContextMenu TextOptions.TextFormattingMode="Display" FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
                      FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}" />
       </ListBox.ContextMenu>
     </ListBox>

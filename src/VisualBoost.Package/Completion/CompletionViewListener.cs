@@ -79,14 +79,14 @@ internal sealed class CompletionViewListener : IWpfTextViewCreationListener
             panel.Children.Add(list);
             var hint = new TextBlock { Text = "VisualBoost · 이름 제안    ↓ 선택 · Tab 삽입 · Esc 닫기", Margin = new Thickness(6) };
             hint.SetResourceReference(TextBlock.ForegroundProperty, VsBrushes.ToolWindowTextKey);
-            hint.SetResourceReference(TextBlock.FontSizeProperty, VsFonts.Environment90PercentFontSizeKey);
             panel.Children.Add(hint);
             var border = new Border { Child = panel, BorderThickness = new Thickness(1) };
             border.SetResourceReference(Border.BackgroundProperty, VsBrushes.ToolWindowBackgroundKey);
             border.SetResourceReference(Border.BorderBrushProperty, VsBrushes.ToolWindowBorderKey);
-            // 부모 없는 Popup은 편집기 글꼴을 물려받지 않으므로 다른 VisualBoost 창과 같은 환경 글꼴을 직접 지정합니다.
+            // 부모 없는 Popup은 글꼴·글자 렌더링을 물려받지 않으므로 결과 목록 창과 같은 환경 글꼴·목록 글씨 크기 하나를 직접 지정합니다.
             border.SetResourceReference(System.Windows.Documents.TextElement.FontFamilyProperty, VsFonts.EnvironmentFontFamilyKey);
-            border.SetResourceReference(System.Windows.Documents.TextElement.FontSizeProperty, VsFonts.EnvironmentFontSizeKey);
+            border.SetResourceReference(System.Windows.Documents.TextElement.FontSizeProperty, UI.ResultListFont.SizeKey);
+            TextOptions.SetTextFormattingMode(border, TextFormattingMode.Display);
             popup = new Popup { Child = border, PlacementTarget = view.VisualElement, Placement = PlacementMode.Relative,
                 StaysOpen = true, Focusable = false, AllowsTransparency = false };
             delay.Tick += OnDelay;

@@ -9,7 +9,7 @@ using VisualBoost.Coloring;
 using VisualBoost.Core.Coloring;
 using VisualBoost.UI;
 
-/// <summary>정의 후보 창 코드 셀: 편집기 글꼴·구문 색, 대상 심볼 종류 색, 선택 행과 설정 변경 반영.</summary>
+/// <summary>정의 후보 창 코드 셀: 창 글꼴 상속, 편집기 구문 색, 대상 심볼 종류 색, 선택 행과 설정 변경 반영.</summary>
 internal static class CodePreviewTests
 {
     public static void Run(ItemsControl items)
@@ -20,8 +20,8 @@ internal static class CodePreviewTests
             ColoringSettings.Publish(new ColoringSettings(true, new string[8]));
             var keyword = new SolidColorBrush(Colors.Orange);
             keyword.Freeze();
-            // 편집기 서식 게시는 열린 창에 바로 반영되어야 합니다(SearchPalette 갱신 번호를 거쳐 다시 그림).
-            CodePreviewStyle.Publish(new FontFamily("Cascadia Mono"), new Dictionary<CodePreviewKind, Brush> { [CodePreviewKind.Keyword] = keyword });
+            // 편집기 구문 색 게시는 열린 창에 바로 반영되어야 합니다(SearchPalette 갱신 번호를 거쳐 다시 그림).
+            CodePreviewStyle.Publish(new Dictionary<CodePreviewKind, Brush> { [CodePreviewKind.Keyword] = keyword });
             Program.Pump();
             var rows = Program.Descendants<ListViewItem>(items).ToArray();
             var plain = Code(rows.First(row => !row.IsSelected));
@@ -30,7 +30,10 @@ internal static class CodePreviewTests
             {
                 Check(Joined(block) == "return SetMovementMode();", "코드 셀 전체 문자열");
                 Check(Bold(block) == "SetMovementMode", "코드 셀은 일치 구간만 굵게");
-                Check(block.FontFamily.Source == "Cascadia Mono", "코드 셀은 텍스트 편집기 글꼴");
+                // 코드 줄도 창의 다른 글자와 같은 환경 글꼴·목록 글씨 크기를 상속합니다.
+                Check(block.ReadLocalValue(TextBlock.FontFamilyProperty) == DependencyProperty.UnsetValue && Equals(block.FontFamily, items.FontFamily),
+                    "코드 셀은 창 글꼴 상속");
+                Check(block.ReadLocalValue(TextBlock.FontSizeProperty) == DependencyProperty.UnsetValue && block.FontSize == items.FontSize, "코드 셀은 창 글씨 크기 상속");
             }
 
             Check(ColorOf(plain, "return") == Colors.Orange, "키워드는 편집기 구문 색");
@@ -42,11 +45,11 @@ internal static class CodePreviewTests
             ColoringSettings.Publish(new ColoringSettings(false, new string[8]));
             Program.Pump();
             Check(ColorOf(plain, "SetMovementMode") is null && ColorOf(plain, "return") == Colors.Orange, "의미 기반 색상을 끄면 식별자 색만 빠짐");
-            Console.WriteLine("PASS: 코드 미리보기 편집기 글꼴·구문 색·대상 심볼 색, 선택 행과 설정 변경 반영");
+            Console.WriteLine("PASS: 코드 미리보기 창 글꼴 상속·구문 색·대상 심볼 색, 선택 행과 설정 변경 반영");
         }
         finally
         {
-            CodePreviewStyle.Publish(null, new Dictionary<CodePreviewKind, Brush>());
+            CodePreviewStyle.Publish(new Dictionary<CodePreviewKind, Brush>());
             ColoringSettings.Publish(settings);
             Program.Pump();
         }
