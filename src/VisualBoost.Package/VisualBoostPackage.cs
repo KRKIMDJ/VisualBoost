@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.39.7")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.40.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 // 폴더 열기 작업 영역(CMake 등)은 Solution 존재 상태를 켜지 않으므로 따로 등록합니다.
@@ -108,7 +108,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
         await GenerateFunctionCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await CodeContextMenuCommand.InitializeAsync(this, cancellationToken);
-        await SemanticNavigationCommand.InitializeAsync(this, navigation, cancellationToken);
+        await SemanticNavigationCommand.InitializeAsync(this, navigation, fileIndex, cancellationToken);
     }
 
     // 참조 결과 창이 열린 채로 다시 시작해도 창 복원이 패키지를 UI thread에서 동기 로드하지 않게 비동기로 만듭니다.

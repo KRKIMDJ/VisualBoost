@@ -67,6 +67,9 @@ internal sealed class NavigationResultItem
 
     public string Code { get; }
 
+    /// <summary>앞뒤 공백만 뺀 원래 코드 줄입니다. 미리보기(<see cref="Code"/>)와 달리 긴 줄을 줄임표로 자르지 않아 복사에 씁니다.</summary>
+    public string SourceLine => lineText.Trim();
+
     /// <summary>참조가 들어 있는 함수·클래스 이름입니다. 모르면 빈 문자열입니다.</summary>
     public string Container { get; }
 

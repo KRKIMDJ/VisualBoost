@@ -1,11 +1,14 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics.CodeAnalysis;
 using System.Linq;
 using System.Windows;
 using System.Windows.Controls;
+using System.Windows.Controls.Primitives;
 using System.Windows.Input;
 using System.Windows.Media;
 using System.Windows.Threading;
+using VisualBoost.Core.Indexing;
 using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.UI;
@@ -16,41 +19,70 @@ namespace VisualBoost.UI;
 /// </summary>
 public partial class ReferencesControl : UserControl
 {
-    private const string EmptyMessage = "C++ 편집기에서 참조 찾기(Shift+Alt+F)를 실행하면 결과가 여기에 표시됩니다.";
-    private const string NoMatchMessage = "필터와 일치하는 위치가 없습니다.";
-
     private readonly ReferenceResultsModel model = new();
 
-    // 코드에서 필터·묶기·최근 결과 선택을 맞추는 동안 생기는 변경 이벤트를 무시합니다.
+    // 코드에서 필터·범위·최근 결과 선택을 맞추는 동안 생기는 변경 이벤트를 무시합니다.
     private bool syncing;
+
+    // 우클릭 메뉴를 연 행입니다. 빈 곳에서 열면 null이며, 선택은 그대로 둡니다.
+    private object? menuRow;
 
     public ReferencesControl()
     {
         // XAML을 읽는 동안 생기는 변경 이벤트는 아직 만들지 않은 요소를 건드리므로 무시합니다. 첫 Refresh가 끝나면 풀립니다.
         syncing = true;
         InitializeComponent();
+        HintText.ToolTip = ResultListKeys.ScopeKeysDescription + "\nShift+F10 또는 우클릭: 위치·코드 복사, 탐색기에서 보기, 전부 펼치기·접기";
         Refresh(null, keepScroll: false);
     }
 
     /// <summary>위치를 엽니다. 두 번째 인수가 true이면 편집기로 초점을 옮기고, false이면 이 창에 초점을 남깁니다.</summary>
     internal Action<NavigationLocation, bool>? OpenLocation { get; set; }
 
+    /// <summary>현재 Solution의 범위 목록을 읽습니다. 새 결과·범위 목록 열기·범위 전환 때마다 다시 읽어 늦게 게시된 목록을 반영합니다.</summary>
+    internal Func<IReadOnlyList<SymbolSearchScope>>? ScopeSource { get; set; }
+
+    /// <summary>복사·탐색기 결과를 알립니다. 두 번째 인수가 true이면 실패입니다.</summary>
+    internal Action<string, bool>? Notify { get; set; }
+
     internal ReferenceResultsModel Model => model;
 
-    /// <summary>새 결과를 보이고 첫 위치를 고른 뒤 목록에 초점을 둡니다.</summary>
+    /// <summary>새 결과를 보이고 첫 위치를 고른 뒤 목록에 초점을 둡니다. 고른 범위는 유지합니다.</summary>
     [SuppressMessage("Usage", "VSTHRD001", Justification = "창을 처음 만들 때는 배치가 끝난 뒤에야 행 컨테이너가 생기므로 같은 UI thread에서 초점 이동만 미룹니다.")]
     internal void Show(ReferenceResultSet set)
     {
+        RefreshScopes();
         model.Show(set);
         Refresh(null, keepScroll: false);
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(FocusSelection));
     }
 
-    /// <summary>모든 결과를 지웁니다. 닫은 Solution의 위치를 다시 열지 않게 합니다.</summary>
+    /// <summary>모든 결과를 지우고 범위를 '전체'로 되돌립니다. 닫은 Solution의 위치를 다시 열지 않게 합니다.</summary>
     internal void Clear()
     {
         model.Clear();
         Refresh(null, keepScroll: false);
+    }
+
+    /// <summary>
+    /// 다음(<paramref name="forward"/>) 또는 이전 범위로 바꿉니다. 결과가 없으면 false를 돌려 키를 다른 처리에 넘깁니다.
+    /// VS가 Ctrl+Tab을 창 전환에 먼저 쓰므로 도구 창의 키 전처리에서도 부릅니다.
+    /// </summary>
+    internal bool CycleScope(bool forward)
+    {
+        if (model.Current is null) return false;
+        RefreshScopes();
+        var scopes = model.Scopes;
+        var index = ResultListKeys.NextScope(IndexOf(scopes, model.Scope), scopes.Count, forward, _ => true);
+        if (index >= 0 && !ReferenceEquals(scopes[index], model.Scope))
+        {
+            var keep = SelectionKey();
+            model.SelectScope(scopes[index]);
+            Refresh(keep, keepScroll: false);
+        }
+
+        if (!FilterBox.IsKeyboardFocusWithin && !ScopeBox.IsKeyboardFocusWithin) FocusSelection();
+        return true;
     }
 
     /// <summary>선택한 행에 키보드 초점을 둡니다. 선택이 없으면 목록에 둡니다.</summary>
@@ -69,6 +101,11 @@ public partial class ReferencesControl : UserControl
         else ResultsList.Focus();
     }
 
+    private void RefreshScopes()
+    {
+        if (ScopeSource?.Invoke() is { } scopes) model.SetScopes(scopes);
+    }
+
     /// <summary>모델 상태를 화면에 옮깁니다. <paramref name="keep"/>는 다시 고를 위치(<see cref="NavigationResultItem"/>)나 파일 경로입니다.</summary>
     private void Refresh(object? keep, bool keepScroll)
     {
@@ -83,13 +120,14 @@ public partial class ReferencesControl : UserControl
             if (FilterBox.Text.Trim() != model.Filter) FilterBox.Text = model.Filter;
             FilterPlaceholder.Visibility = FilterBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
             FilterBox.IsEnabled = current is not null;
-            GroupToggle.IsChecked = model.GroupByFile;
-            ExpandAllButton.IsEnabled = CollapseAllButton.IsEnabled = current is not null && model.GroupByFile;
+            ScopeBox.ItemsSource = model.Scopes;
+            ScopeBox.SelectedItem = model.Scope;
+            ScopeBox.IsEnabled = current is not null;
             HistoryBox.ItemsSource = model.History.ToArray();
             HistoryBox.SelectedItem = current;
             HistoryBox.IsEnabled = model.History.Count > 0;
 
-            // 행 목록을 바꾸면 스크롤이 맨 위로 돌아가므로, 접기·필터처럼 같은 결과 안의 변경은 보던 위치를 지킵니다.
+            // 행 목록을 바꾸면 스크롤이 맨 위로 돌아가므로, 접기처럼 같은 결과 안의 변경은 보던 위치를 지킵니다.
             var scroll = keepScroll ? ScrollViewerOf(ResultsList) : null;
             var offset = scroll?.VerticalOffset ?? 0;
             ResultsList.ItemsSource = model.Rows;
@@ -100,7 +138,7 @@ public partial class ReferencesControl : UserControl
             }
 
             Select(keep);
-            EmptyText.Text = current is null ? EmptyMessage : NoMatchMessage;
+            EmptyText.Text = model.EmptyMessage;
             EmptyText.Visibility = model.Rows.Count == 0 ? Visibility.Visible : Visibility.Collapsed;
         }
         finally
@@ -142,17 +180,22 @@ public partial class ReferencesControl : UserControl
         Refresh(keep, keepScroll: false);
     }
 
-    private void OnGroupToggled(object sender, RoutedEventArgs eventArgs)
+    private void OnScopeDropDownOpened(object sender, EventArgs eventArgs)
     {
-        if (syncing) return;
+        // 결과를 보인 뒤에 게시된 프로젝트 범위도 고를 수 있게 목록을 열 때 다시 읽습니다.
         var keep = SelectionKey();
-        model.GroupByFile = GroupToggle.IsChecked == true;
-        Refresh(keep, keepScroll: false);
+        var before = model.Scopes;
+        RefreshScopes();
+        if (!ReferenceEquals(before, model.Scopes)) Refresh(keep, keepScroll: false);
     }
 
-    private void OnExpandAll(object sender, RoutedEventArgs eventArgs) => SetAllExpanded(true);
-
-    private void OnCollapseAll(object sender, RoutedEventArgs eventArgs) => SetAllExpanded(false);
+    private void OnScopeSelectionChanged(object sender, SelectionChangedEventArgs eventArgs)
+    {
+        if (syncing || ScopeBox.SelectedItem is not SymbolSearchScope scope || ReferenceEquals(scope, model.Scope)) return;
+        var keep = SelectionKey();
+        model.SelectScope(scope);
+        Refresh(keep, keepScroll: false);
+    }
 
     private void SetAllExpanded(bool expanded)
     {
@@ -164,13 +207,22 @@ public partial class ReferencesControl : UserControl
     private void OnHistorySelectionChanged(object sender, SelectionChangedEventArgs eventArgs)
     {
         if (syncing || HistoryBox.SelectedItem is not ReferenceResultSet set || ReferenceEquals(set, model.Current)) return;
-        // 다른 심볼의 결과로 돌아가므로 이전 필터는 지웁니다.
+        // 다른 심볼의 결과로 돌아가므로 이전 필터는 지웁니다. 범위는 같은 Solution 동안 유지합니다.
+        RefreshScopes();
         model.Select(set, clearFilter: true);
         Refresh(null, keepScroll: false);
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs eventArgs)
     {
+        // 범위 목록이 열려 있으면 화살표·Enter는 목록 항목 선택에 씁니다.
+        if (ScopeBox.IsDropDownOpen || HistoryBox.IsDropDownOpen) return;
+        if (ResultListKeys.IsScopeCycle(eventArgs.Key, Keyboard.Modifiers, out var forward))
+        {
+            if (CycleScope(forward)) eventArgs.Handled = true;
+            return;
+        }
+
         if (FilterBox.IsKeyboardFocusWithin)
         {
             switch (eventArgs.Key)
@@ -205,7 +257,7 @@ public partial class ReferencesControl : UserControl
             case Key.Left when selected is ReferenceFileRow { IsExpanded: true } file:
                 SetExpanded(file.FullPath, false);
                 break;
-            case Key.Left when selected is ReferenceLineRow line && model.GroupByFile:
+            case Key.Left when selected is ReferenceLineRow line:
                 // 위치 행에서 왼쪽은 그 파일의 머리 행으로 올라갑니다.
                 ResultsList.SelectedItem = model.Rows.OfType<ReferenceFileRow>().FirstOrDefault(r => SamePath(r.FullPath, line.FullPath)) ?? selected;
                 FocusSelection();
@@ -254,6 +306,107 @@ public partial class ReferencesControl : UserControl
         Activate(container.DataContext, keepFocus: false);
     }
 
+    private void OnResultsPreviewMouseRightButtonDown(object sender, MouseButtonEventArgs eventArgs)
+    {
+        // 우클릭한 행을 먼저 골라 메뉴 동작이 보이는 행에 적용되게 합니다. 빈 곳이면 선택은 두고 전체 동작만 보입니다.
+        if (ItemsControl.ContainerFromElement(ResultsList, eventArgs.OriginalSource as DependencyObject) is ListBoxItem container)
+        {
+            container.IsSelected = true;
+            container.Focus();
+            menuRow = container.DataContext;
+        }
+        else
+        {
+            menuRow = null;
+        }
+    }
+
+    private void OnResultsContextMenuOpening(object sender, ContextMenuEventArgs eventArgs)
+    {
+        var menu = ResultsList.ContextMenu;
+        if (menu is null) return;
+
+        // Shift+F10·메뉴 키로 열면 좌표가 -1입니다. 이때는 선택한 행에 대해 열고 그 행 아래에 붙입니다.
+        var keyboard = eventArgs.CursorLeft < 0 && eventArgs.CursorTop < 0;
+        if (keyboard) menuRow = ResultsList.SelectedItem;
+        Fill(menu, menuRow);
+        if (!keyboard)
+        {
+            menu.Placement = PlacementMode.MousePoint;
+            menu.ClearValue(ContextMenu.PlacementTargetProperty);
+            return;
+        }
+
+        eventArgs.Handled = true;
+        var container = menuRow is null ? null : ResultsList.ItemContainerGenerator.ContainerFromItem(menuRow) as UIElement;
+        menu.PlacementTarget = container ?? ResultsList;
+        menu.Placement = container is null ? PlacementMode.Relative : PlacementMode.Bottom;
+        menu.IsOpen = true;
+    }
+
+    private void Fill(ContextMenu menu, object? row)
+    {
+        menu.Items.Clear();
+        foreach (var entry in ReferenceMenu.Entries(row, model))
+        {
+            if (entry is null)
+            {
+                menu.Items.Add(new Separator());
+                continue;
+            }
+
+            var item = new MenuItem { Header = entry.Header, InputGestureText = entry.Gesture, IsEnabled = entry.IsEnabled };
+            var command = entry.Command;
+            item.Click += (_, _) => Run(command, row);
+            menu.Items.Add(item);
+        }
+    }
+
+    private void Run(ReferenceMenuCommand command, object? row)
+    {
+        var line = row as ReferenceLineRow;
+        var path = line?.FullPath ?? (row as ReferenceFileRow)?.FullPath;
+        switch (command)
+        {
+            case ReferenceMenuCommand.Open:
+                Activate(line, keepFocus: false);
+                break;
+            case ReferenceMenuCommand.Preview:
+                Activate(line, keepFocus: true);
+                break;
+            case ReferenceMenuCommand.ToggleFile when row is ReferenceFileRow file:
+                SetExpanded(file.FullPath, !file.IsExpanded);
+                break;
+            case ReferenceMenuCommand.CopyLocation when line is not null:
+                Copy(ReferenceMenu.Location(line.Item), "위치를 복사했습니다.");
+                break;
+            case ReferenceMenuCommand.CopyCode when line is not null:
+                Copy(line.Item.SourceLine, "코드 줄을 복사했습니다.");
+                break;
+            case ReferenceMenuCommand.CopyPath when path is not null:
+                Copy(path, "전체 경로를 복사했습니다.");
+                break;
+            case ReferenceMenuCommand.ShowInExplorer when path is not null:
+                if (ResultActions.ShowInExplorer(path) is { } failure) Notify?.Invoke(failure, true);
+                break;
+            case ReferenceMenuCommand.CopyVisible when model.VisibleCount > 0:
+                Copy(ReferenceMenu.Lines(model.VisibleItems), $"보이는 결과 {model.VisibleCount:N0}개를 복사했습니다.");
+                break;
+            case ReferenceMenuCommand.ExpandAll:
+                SetAllExpanded(true);
+                break;
+            case ReferenceMenuCommand.CollapseAll:
+                SetAllExpanded(false);
+                break;
+        }
+    }
+
+    private void Copy(string text, string done)
+    {
+        var result = ResultActions.Copy(text, done);
+        Notify?.Invoke(result, !ReferenceEquals(result, done));
+    }
+
     /// <summary>파일 머리 행은 접거나 펼치고, 위치 행은 편집기에서 엽니다.</summary>
     private void Activate(object? row, bool keepFocus)
     {
@@ -281,6 +434,16 @@ public partial class ReferencesControl : UserControl
         if (first is null) return;
         ResultsList.SelectedItem = first;
         FocusSelection();
+    }
+
+    private static int IndexOf(IReadOnlyList<SymbolSearchScope> scopes, SymbolSearchScope scope)
+    {
+        for (var index = 0; index < scopes.Count; index++)
+        {
+            if (ReferenceEquals(scopes[index], scope)) return index;
+        }
+
+        return -1;
     }
 
     private static bool SamePath(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);

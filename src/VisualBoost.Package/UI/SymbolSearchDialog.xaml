@@ -15,7 +15,7 @@
                        Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
-                       FontSize="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontSizeKey}}"
+                       FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
     <ui:SymbolColorConverter x:Key="SymbolColorConverter" />
@@ -87,9 +87,9 @@
             <ColumnDefinition Width="34" />
           </Grid.ColumnDefinitions>
           <TextBlock Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center"
-                     FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" Text="⌕" />
+                     Text="⌕" />
           <Grid Grid.Column="1">
-            <TextBox x:Name="SearchBox" Padding="0,8" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" BorderThickness="0"
+            <TextBox x:Name="SearchBox" Padding="0,6" BorderThickness="0"
                      Background="Transparent"
                      Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                      ToolTip="심볼 이름을 입력하세요. 편집기에서 이름을 선택한 채 열면 그 이름으로 검색합니다."
@@ -98,7 +98,7 @@
                        Text="심볼명 검색" IsHitTestVisible="False" />
           </Grid>
           <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="ClearSearchButton" Grid.Column="2" Margin="4" Padding="0"
-                  FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}" Content="×" Visibility="Hidden" ToolTip="검색어 지우기"
+                  Content="×" Visibility="Hidden" ToolTip="검색어 지우기"
                   Click="OnClearSearchClick" />
         </Grid>
       </Border>
@@ -128,7 +128,9 @@
                ContextMenuOpening="OnResultsContextMenuOpening"
                MouseDoubleClick="OnResultDoubleClick">
         <ListView.ContextMenu>
-          <ContextMenu>
+          <!-- 메뉴는 부모 없는 팝업이라 창 글꼴을 물려받지 않으므로 직접 지정합니다. -->
+          <ContextMenu FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+                       FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}">
             <MenuItem Header="열기" Click="OnContextOpenClick" />
             <Separator />
             <MenuItem Header="이름 복사" Click="OnContextCopyNameClick" />
@@ -200,7 +202,7 @@
 
       <StackPanel x:Name="EmptyStatePanel"
                   HorizontalAlignment="Center" VerticalAlignment="Center" IsHitTestVisible="False">
-        <TextBlock x:Name="EmptyStateTitle" HorizontalAlignment="Center" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}"
+        <TextBlock x:Name="EmptyStateTitle" HorizontalAlignment="Center"
                    FontWeight="SemiBold" Text="심볼명을 입력하세요." />
         <TextBlock x:Name="EmptyStateDescription" Margin="0,6,0,0" HorizontalAlignment="Center"
                   Opacity="0.68" Text="심볼 이름만 검색합니다." />

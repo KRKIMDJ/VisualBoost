@@ -14,7 +14,7 @@
                        Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
                        FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
-                       FontSize="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontSizeKey}}"
+                       FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
                        PreviewKeyDown="OnPreviewKeyDown">
   <platform:DialogWindow.Resources>
 
@@ -151,14 +151,12 @@
           <TextBlock Grid.Column="0"
                      HorizontalAlignment="Center"
                      VerticalAlignment="Center"
-                     FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}"
                      Text="⌕"
                      IsHitTestVisible="False" />
 
           <Grid Grid.Column="1">
             <TextBox x:Name="SearchBox"
-                     Padding="0,8"
-                     FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}"
+                     Padding="0,6"
                      BorderThickness="0"
                      Background="Transparent"
                      Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
@@ -178,7 +176,6 @@
                   Grid.Column="2"
                   Margin="4"
                   Padding="0"
-                  FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}"
                   Content="×"
                   ToolTip="검색어 지우기"
                   Click="OnClearSearchClick" />
@@ -231,7 +228,9 @@
                ContextMenuOpening="OnResultsContextMenuOpening"
                MouseDoubleClick="OnResultDoubleClick">
         <ListView.ContextMenu>
-          <ContextMenu>
+          <!-- 메뉴는 부모 없는 팝업이라 창 글꼴을 물려받지 않으므로 직접 지정합니다. -->
+          <ContextMenu FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+                       FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}">
             <MenuItem Header="열기" Click="OnContextOpenClick" />
             <Separator />
             <MenuItem Header="전체 경로 복사" Click="OnContextCopyPathClick" />
@@ -279,7 +278,7 @@
               <GridViewColumn.CellTemplate>
                 <DataTemplate>
                   <TextBlock Margin="6,0" VerticalAlignment="Center" Opacity="0.78"
-                             FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment90PercentFontSizeKey}}" Text="{Binding ProjectName}"
+                             Text="{Binding ProjectName}"
                              TextTrimming="CharacterEllipsis" ToolTip="{Binding ProjectName}" />
                 </DataTemplate>
               </GridViewColumn.CellTemplate>
@@ -294,7 +293,6 @@
                   IsHitTestVisible="False">
         <TextBlock x:Name="EmptyStateTitle"
                    HorizontalAlignment="Center"
-                   FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment122PercentFontSizeKey}}"
                    FontWeight="SemiBold" />
         <TextBlock x:Name="EmptyStateDescription"
                    Margin="0,5,0,0"

@@ -6,7 +6,7 @@
              Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBackgroundKey}}"
              Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
              FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
-             FontSize="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontSizeKey}}"
+             FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}"
              ui:SearchPalette.Track="True"
              PreviewKeyDown="OnPreviewKeyDown">
   <UserControl.Resources>
@@ -39,9 +39,9 @@
       </Setter>
     </Style>
 
-    <!-- 파일 머리 행: 펼침 표시 · 파일 이름 · 폴더 · 위치 수. 한 화면에 위치를 많이 보이도록 행은 글자 높이에 맞춰 촘촘하게 둡니다. -->
+    <!-- 파일 머리 행: 펼침 표시 · 파일 이름 · 폴더 · 위치 수. 한 화면에 위치를 많이 보이도록 행은 글자 높이에 위아래 1 DIP만 둡니다. -->
     <DataTemplate DataType="{x:Type ui:ReferenceFileRow}">
-      <Grid MinHeight="20" ToolTip="{Binding FullPath}">
+      <Grid ToolTip="{Binding FullPath}">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="18" />
           <ColumnDefinition Width="Auto" />
@@ -54,23 +54,20 @@
         <TextBlock Grid.Column="2" Text="{Binding Folder}" Opacity="0.65" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
         <Border Grid.Column="3" Margin="8,0,4,0" Padding="6,0" CornerRadius="8" VerticalAlignment="Center"
                 Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
-          <TextBlock Text="{Binding Count}" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment90PercentFontSizeKey}}" />
+          <TextBlock Text="{Binding Count}" />
         </Border>
       </Grid>
     </DataTemplate>
 
-    <!-- 위치 행: (묶지 않을 때 파일) · 줄 · 코드 미리보기 · 포함 함수 -->
+    <!-- 위치 행: 들여쓰기 · 줄 · 코드 미리보기 · 포함 함수 -->
     <DataTemplate DataType="{x:Type ui:ReferenceLineRow}">
-      <Grid MinHeight="16" ToolTip="{Binding FullPath}">
+      <Grid ToolTip="{Binding FullPath}">
         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="18" />
           <ColumnDefinition Width="52" />
           <ColumnDefinition Width="*" />
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
-        <Border x:Name="Indent" Grid.Column="0" Width="18" />
-        <TextBlock x:Name="FileColumn" Grid.Column="0" Width="220" Visibility="Collapsed" Margin="4,0,0,0"
-                   Text="{Binding FileName}" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
         <TextBlock Grid.Column="1" Text="{Binding Line}" Opacity="0.7" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0" />
         <TextBlock x:Name="CodeText" Grid.Column="2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                    ui:CodeSegments.Before="{Binding Before}"
@@ -86,10 +83,6 @@
                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Container}" />
       </Grid>
       <DataTemplate.Triggers>
-        <DataTrigger Binding="{Binding ShowFile}" Value="True">
-          <Setter TargetName="Indent" Property="Visibility" Value="Collapsed" />
-          <Setter TargetName="FileColumn" Property="Visibility" Value="Visible" />
-        </DataTrigger>
         <DataTrigger Binding="{Binding Container}" Value="">
           <Setter TargetName="ContainerText" Property="Visibility" Value="Collapsed" />
         </DataTrigger>
@@ -104,7 +97,8 @@
       <RowDefinition Height="Auto" />
     </Grid.RowDefinitions>
 
-    <Border Grid.Row="0" Padding="8,6"
+    <!-- 머리 줄: 심볼·요약 · 필터 · 범위 · 최근 결과 -->
+    <Border Grid.Row="0" Padding="8,5"
             Background="{DynamicResource {x:Static vsshell:VsBrushes.CommandBarGradientKey}}"
             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
             BorderThickness="0,0,0,1">
@@ -115,7 +109,7 @@
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <StackPanel Grid.Column="0" Orientation="Horizontal" VerticalAlignment="Center" Margin="0,0,12,0">
-          <TextBlock x:Name="SymbolText" FontSize="{DynamicResource {x:Static vsshell:VsFonts.Environment111PercentFontSizeKey}}" FontWeight="SemiBold" MaxWidth="360" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
+          <TextBlock x:Name="SymbolText" FontWeight="SemiBold" MaxWidth="360" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
           <TextBlock x:Name="SummaryText" Margin="10,0,0,0" Opacity="0.75" MaxWidth="420" TextTrimming="CharacterEllipsis" VerticalAlignment="Center" />
         </StackPanel>
         <Border Grid.Column="1" MinWidth="160" MaxWidth="420" HorizontalAlignment="Stretch"
@@ -123,7 +117,7 @@
                 Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
           <Grid>
             <Grid.ColumnDefinitions>
-              <ColumnDefinition Width="24" />
+              <ColumnDefinition Width="22" />
               <ColumnDefinition Width="*" />
             </Grid.ColumnDefinitions>
             <TextBlock Grid.Column="0" HorizontalAlignment="Center" VerticalAlignment="Center" Text="⌕" />
@@ -136,15 +130,16 @@
             </Grid>
           </Grid>
         </Border>
-        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="12,0,0,0">
-          <CheckBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.CheckBoxStyleKey}}" x:Name="GroupToggle" Content="파일별 묶기" VerticalAlignment="Center"
-                    Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
-                    Checked="OnGroupToggled" Unchecked="OnGroupToggled" />
-          <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="ExpandAllButton" Content="펼치기" Margin="10,0,0,0" Padding="8,1" ToolTip="모든 파일 펼치기" Click="OnExpandAll" />
-          <Button Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ButtonStyleKey}}" x:Name="CollapseAllButton" Content="접기" Margin="4,0,0,0" Padding="8,1" ToolTip="모든 파일 접기" Click="OnCollapseAll" />
+        <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
           <ComboBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
                     ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
-                    x:Name="HistoryBox" Width="200" Margin="10,0,0,0" ToolTip="최근 참조 결과"
+                    x:Name="ScopeBox" Width="170" DisplayMemberPath="Name"
+                    ToolTip="보일 위치의 범위 · Ctrl+Tab/Ctrl+Shift+Tab으로 바꿉니다. 프로젝트 범위는 등록된 파일, 엔진은 확인된 설치 경로 기준입니다."
+                    DropDownOpened="OnScopeDropDownOpened"
+                    SelectionChanged="OnScopeSelectionChanged" />
+          <ComboBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
+                    ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
+                    x:Name="HistoryBox" Width="200" Margin="6,0,0,0" ToolTip="최근 참조 결과"
                     SelectionChanged="OnHistorySelectionChanged" />
         </StackPanel>
       </Grid>
@@ -161,17 +156,25 @@
              IsTextSearchEnabled="False"
              MouseDoubleClick="OnResultDoubleClick"
              PreviewMouseLeftButtonDown="OnResultMouseDown"
-             PreviewTextInput="OnResultTextInput" />
+             PreviewMouseRightButtonDown="OnResultsPreviewMouseRightButtonDown"
+             ContextMenuOpening="OnResultsContextMenuOpening"
+             PreviewTextInput="OnResultTextInput">
+      <!-- 항목은 열 때 메뉴를 연 행의 종류에 맞춰 채웁니다(ReferenceMenu). 메뉴는 부모 없는 팝업이라 글꼴을 직접 지정합니다. -->
+      <ListBox.ContextMenu>
+        <ContextMenu FontFamily="{DynamicResource {x:Static vsshell:VsFonts.EnvironmentFontFamilyKey}}"
+                     FontSize="{DynamicResource {x:Static ui:ResultListFont.SizeKey}}" />
+      </ListBox.ContextMenu>
+    </ListBox>
 
     <TextBlock x:Name="EmptyText" Grid.Row="1" HorizontalAlignment="Center" VerticalAlignment="Center" Opacity="0.65"
-               TextAlignment="Center" Text="C++ 편집기에서 참조 찾기(Shift+Alt+F)를 실행하면 결과가 여기에 표시됩니다." />
+               TextAlignment="Center" TextWrapping="Wrap" Margin="12,0" IsHitTestVisible="False" />
 
     <Border Grid.Row="2" Padding="8,3"
             Background="{DynamicResource {x:Static vsshell:VsBrushes.CommandBarGradientKey}}"
             BorderBrush="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}"
             BorderThickness="0,1,0,0">
-      <TextBlock Opacity="0.75" TextTrimming="CharacterEllipsis"
-                 Text="Enter 열기 · Space 미리 보기 · ←/→ 파일 접기·펼치기 · 글자 입력으로 좁히기" />
+      <TextBlock x:Name="HintText" Opacity="0.75" TextTrimming="CharacterEllipsis"
+                 Text="Enter 열기 · Space 미리 보기 · ←/→ 접기·펼치기 · Ctrl+Tab 범위 · 글자 입력으로 좁히기 · 우클릭 복사" />
     </Border>
   </Grid>
 </UserControl>

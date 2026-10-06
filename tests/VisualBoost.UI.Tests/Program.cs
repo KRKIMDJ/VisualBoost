@@ -87,7 +87,7 @@ internal static class Program
         XNamespace ui = "clr-namespace:VisualBoost.UI;assembly=VisualBoost.UI.Tests";
         var events = new HashSet<string> { "PreviewKeyDown", "TextChanged", "Click", "GotKeyboardFocus",
             "LostKeyboardFocus", "PreviewMouseRightButtonDown", "ContextMenuOpening", "MouseDoubleClick", "SelectionChanged",
-            "PreviewMouseLeftButtonDown", "Checked", "Unchecked", "PreviewTextInput" };
+            "PreviewMouseLeftButtonDown", "Checked", "Unchecked", "PreviewTextInput", "DropDownOpened" };
         foreach (var node in xml.Descendants().ToArray())
         {
             if (node.Name.LocalName == "DialogWindow") node.Name = wpf + "Window";
@@ -111,7 +111,8 @@ internal static class Program
                 else if (attribute.IsNamespaceDeclaration && attribute.Name.LocalName == "ui") attribute.Value = ui.NamespaceName;
                 else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsResourceKeys."))
                     attribute.Value = "{x:Null}";
-                else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsFonts."))
+                // 목록 글씨 크기 키(ResultListFont)도 VS 글꼴 키를 돌려주므로 VS 글꼴처럼 뺍니다.
+                else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsFonts.") || attribute.Value.Contains("{x:Static ui:ResultListFont."))
                     attribute.Remove();
                 else if (attribute.Value.Contains("DynamicResource {x:Static vsshell:VsBrushes."))
                     attribute.Value = attribute.Value.Contains("HighlightText") ? "#FFFFFF"

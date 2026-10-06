@@ -18,6 +18,7 @@ using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.TextManager.Interop;
 using VisualBoost.Core.SemanticNavigation;
 using VisualBoost.SemanticNavigation;
+using VisualBoost.Services;
 using VisualBoost.UI;
 
 namespace VisualBoost.Commands;
@@ -30,11 +31,14 @@ internal sealed class SemanticNavigationCommand
 
     private readonly VisualBoostPackage package;
     private readonly SemanticNavigationService service;
+    private readonly SolutionFileIndexService fileIndex;
 
-    private SemanticNavigationCommand(VisualBoostPackage package, SemanticNavigationService service, OleMenuCommandService commandService)
+    private SemanticNavigationCommand(VisualBoostPackage package, SemanticNavigationService service, SolutionFileIndexService fileIndex,
+        OleMenuCommandService commandService)
     {
         this.package = package;
         this.service = service;
+        this.fileIndex = fileIndex;
         commandService.AddCommand(new OleMenuCommand(ExecuteDefinition, new CommandID(CommandSet, CommandIds.GoToDefinition)));
         commandService.AddCommand(new OleMenuCommand(ExecuteReferences, new CommandID(CommandSet, CommandIds.FindReferences)));
         commandService.AddCommand(new OleMenuCommand(ExecuteShowReferencesWindow, new CommandID(CommandSet, CommandIds.ShowReferencesWindow)));
@@ -46,12 +50,13 @@ internal sealed class SemanticNavigationCommand
         References
     }
 
-    public static async Task InitializeAsync(VisualBoostPackage package, SemanticNavigationService service, CancellationToken cancellationToken)
+    public static async Task InitializeAsync(VisualBoostPackage package, SemanticNavigationService service, SolutionFileIndexService fileIndex,
+        CancellationToken cancellationToken)
     {
         await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         var commandService = await package.GetServiceAsync(typeof(IMenuCommandService)) as OleMenuCommandService;
         Assumes.Present(commandService);
-        _ = new SemanticNavigationCommand(package, service, commandService);
+        _ = new SemanticNavigationCommand(package, service, fileIndex, commandService);
     }
 
     private void ExecuteDefinition(object sender, EventArgs eventArgs)
@@ -198,6 +203,8 @@ internal sealed class SemanticNavigationCommand
             var pane = await package.ShowToolWindowAsync(typeof(ReferencesToolWindow), 0, true, package.DisposalToken);
             await package.JoinableTaskFactory.SwitchToMainThreadAsync();
             if (pane is not ReferencesToolWindow window) throw new InvalidOperationException("참조 결과 창을 만들지 못했습니다.");
+            // 범위 빠른 필터는 심볼 탐색과 같은 범위 목록을 씁니다. 창은 VS가 배치를 복원하며 먼저 만들 수 있어 결과를 보일 때 연결합니다.
+            window.Control.ScopeSource ??= () => fileIndex.SymbolScopes;
             window.Control.Show(new ReferenceResultSet(symbol, items, string.Join(" · ", notes), DateTime.Now));
             return;
         }

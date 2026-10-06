@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Media;
 using System.Runtime.InteropServices;
+using System.Windows.Input;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
 using VisualBoost.Core.SemanticNavigation;
@@ -27,11 +28,28 @@ public sealed class ReferencesToolWindow : ToolWindowPane
         ThreadHelper.ThrowIfNotOnUIThread();
         Caption = Title;
         EditorCodeStyleSource.EnsureStarted();
-        control = new ReferencesControl { OpenLocation = Open };
+        control = new ReferencesControl { OpenLocation = Open, Notify = Notify };
         Content = control;
     }
 
     internal ReferencesControl Control => control;
+
+    /// <summary>
+    /// VS는 Ctrl+Tab을 창 전환 명령으로 먼저 처리해 WPF 내용에 키가 오지 않습니다. 이 창에 초점이 있고 결과가 있으면
+    /// 다른 검색 창처럼 범위 전환에 쓰고, 그 밖에는 VS에 넘깁니다.
+    /// </summary>
+    protected override bool PreProcessMessage(ref System.Windows.Forms.Message m)
+    {
+        const int KeyDownMessage = 0x0100;
+        const int TabKey = 0x09;
+        if (m.Msg == KeyDownMessage && (int)m.WParam == TabKey && control.IsKeyboardFocusWithin &&
+            ResultListKeys.IsScopeCycle(Key.Tab, Keyboard.Modifiers, out var forward) && control.CycleScope(forward))
+        {
+            return true;
+        }
+
+        return base.PreProcessMessage(ref m);
+    }
 
     private void Open(NavigationLocation location, bool activate)
     {
@@ -39,7 +57,7 @@ public sealed class ReferencesToolWindow : ToolWindowPane
         // 최근 결과에는 그 뒤에 지우거나 옮긴 파일이 있을 수 있습니다. 입력 처리기에서 부르므로 여기서 알리고 끝냅니다.
         if (!File.Exists(location.Path))
         {
-            Notify("파일이 없습니다: " + location.Path);
+            Notify("파일이 없습니다: " + location.Path, failed: true);
             return;
         }
 
@@ -51,7 +69,7 @@ public sealed class ReferencesToolWindow : ToolWindowPane
         catch (Exception exception) when (exception is COMException || exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException)
         {
             ActivityLog.LogWarning("VisualBoost/ReferencesWindow", exception.ToString());
-            Notify("파일을 열지 못했습니다: " + exception.Message);
+            Notify("파일을 열지 못했습니다: " + exception.Message, failed: true);
             return;
         }
 
@@ -61,10 +79,11 @@ public sealed class ReferencesToolWindow : ToolWindowPane
         control.FocusSelection();
     }
 
-    private static void Notify(string message)
+    /// <summary>상태 표시줄에 알립니다. 실패는 소리도 냅니다.</summary>
+    private static void Notify(string message, bool failed)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        SystemSounds.Beep.Play();
+        if (failed) SystemSounds.Beep.Play();
         (ServiceProvider.GlobalProvider.GetService(typeof(SVsStatusbar)) as IVsStatusbar)?.SetText("VisualBoost: " + message);
     }
 }
