@@ -32,14 +32,22 @@ public partial class ReferencesControl : UserControl
         // XAML을 읽는 동안 생기는 변경 이벤트는 아직 만들지 않은 요소를 건드리므로 무시합니다. 첫 Refresh가 끝나면 풀립니다.
         syncing = true;
         InitializeComponent();
-        HintText.ToolTip = ResultListKeys.ScopeKeysDescription + "\nShift+F10 또는 우클릭: 위치·코드 복사, 탐색기에서 보기, 전부 펼치기·접기";
+        HintText.ToolTip = "Ctrl+Tab/Ctrl+Shift+Tab 현재 프로젝트·모든 프로젝트 전환\nShift+F10 또는 우클릭: 위치·코드 복사, 탐색기에서 보기, 전부 펼치기·접기";
+        // 결과를 보인 뒤에 게시된 프로젝트 소속도 쓰도록 이 창에 초점이 올 때 소속 목록을 다시 읽습니다.
+        IsKeyboardFocusWithinChanged += (_, eventArgs) =>
+        {
+            if (eventArgs.NewValue is true && RefreshProjects()) Refresh(SelectionKey(), keepScroll: true);
+        };
         Refresh(null, keepScroll: false);
     }
 
     /// <summary>위치를 엽니다. 두 번째 인수가 true이면 편집기로 초점을 옮기고, false이면 이 창에 초점을 남깁니다.</summary>
     internal Action<NavigationLocation, bool>? OpenLocation { get; set; }
 
-    /// <summary>현재 Solution의 범위 목록을 읽습니다. 새 결과·범위 목록 열기·범위 전환 때마다 다시 읽어 늦게 게시된 목록을 반영합니다.</summary>
+    /// <summary>
+    /// 현재 Solution의 범위 목록(프로젝트 소속)을 읽습니다. '현재 프로젝트' 판정과 가까운 순서에 쓰며, 새 결과·모드 전환·창 초점 때마다 다시 읽어
+    /// 늦게 게시된 목록을 반영합니다.
+    /// </summary>
     internal Func<IReadOnlyList<SymbolSearchScope>>? ScopeSource { get; set; }
 
     /// <summary>복사·탐색기 결과를 알립니다. 두 번째 인수가 true이면 실패입니다.</summary>
@@ -47,17 +55,17 @@ public partial class ReferencesControl : UserControl
 
     internal ReferenceResultsModel Model => model;
 
-    /// <summary>새 결과를 보이고 첫 위치를 고른 뒤 목록에 초점을 둡니다. 고른 범위는 유지합니다.</summary>
+    /// <summary>새 결과를 보이고 첫 위치를 고른 뒤 목록에 초점을 둡니다. 범위 모드는 유지합니다.</summary>
     [SuppressMessage("Usage", "VSTHRD001", Justification = "창을 처음 만들 때는 배치가 끝난 뒤에야 행 컨테이너가 생기므로 같은 UI thread에서 초점 이동만 미룹니다.")]
     internal void Show(ReferenceResultSet set)
     {
-        RefreshScopes();
+        RefreshProjects();
         model.Show(set);
         Refresh(null, keepScroll: false);
         _ = Dispatcher.BeginInvoke(DispatcherPriority.Loaded, new Action(FocusSelection));
     }
 
-    /// <summary>모든 결과를 지우고 범위를 '전체'로 되돌립니다. 닫은 Solution의 위치를 다시 열지 않게 합니다.</summary>
+    /// <summary>모든 결과와 Solution의 소속 목록을 지웁니다. 닫은 Solution의 위치를 다시 열지 않게 합니다. 범위 모드는 유지합니다.</summary>
     internal void Clear()
     {
         model.Clear();
@@ -65,23 +73,16 @@ public partial class ReferencesControl : UserControl
     }
 
     /// <summary>
-    /// 다음(<paramref name="forward"/>) 또는 이전 범위로 바꿉니다. 결과가 없으면 false를 돌려 키를 다른 처리에 넘깁니다.
-    /// VS가 Ctrl+Tab을 창 전환에 먼저 쓰므로 도구 창의 키 전처리에서도 부릅니다.
+    /// 현재 프로젝트·모든 프로젝트 모드를 서로 바꿉니다(모드가 둘이라 방향은 같습니다). 결과가 없으면 false를 돌려 키를 다른 처리에 넘깁니다.
+    /// VS가 Ctrl+Tab을 창 전환에 먼저 쓰므로 도구 창의 키 전처리에서도 부르며, 그 경로는 목록 열림 가드를 거치지 않으므로 여기서 닫습니다.
     /// </summary>
     internal bool CycleScope(bool forward)
     {
+        _ = forward;
         if (model.Current is null) return false;
-        RefreshScopes();
-        var scopes = model.Scopes;
-        var index = ResultListKeys.NextScope(IndexOf(scopes, model.Scope), scopes.Count, forward, _ => true);
-        if (index >= 0 && !ReferenceEquals(scopes[index], model.Scope))
-        {
-            var keep = SelectionKey();
-            model.SelectScope(scopes[index]);
-            Refresh(keep, keepScroll: false);
-        }
-
-        if (!FilterBox.IsKeyboardFocusWithin && !ScopeBox.IsKeyboardFocusWithin) FocusSelection();
+        HistoryBox.IsDropDownOpen = false;
+        SetMode(model.Mode == ReferenceScopeMode.CurrentProject ? ReferenceScopeMode.AllProjects : ReferenceScopeMode.CurrentProject);
+        if (!FilterBox.IsKeyboardFocusWithin) FocusSelection();
         return true;
     }
 
@@ -101,9 +102,15 @@ public partial class ReferencesControl : UserControl
         else ResultsList.Focus();
     }
 
-    private void RefreshScopes()
+    /// <summary>소속 목록을 다시 읽습니다. 목록이 바뀌어 순서·현재 프로젝트를 다시 정했으면 true입니다.</summary>
+    private bool RefreshProjects() => ScopeSource?.Invoke() is { } scopes && model.SetProjects(scopes);
+
+    private void SetMode(ReferenceScopeMode mode)
     {
-        if (ScopeSource?.Invoke() is { } scopes) model.SetScopes(scopes);
+        var keep = SelectionKey();
+        RefreshProjects();
+        model.SetMode(mode);
+        Refresh(keep, keepScroll: false);
     }
 
     /// <summary>모델 상태를 화면에 옮깁니다. <paramref name="keep"/>는 다시 고를 위치(<see cref="NavigationResultItem"/>)나 파일 경로입니다.</summary>
@@ -120,9 +127,10 @@ public partial class ReferencesControl : UserControl
             if (FilterBox.Text.Trim() != model.Filter) FilterBox.Text = model.Filter;
             FilterPlaceholder.Visibility = FilterBox.Text.Length == 0 ? Visibility.Visible : Visibility.Collapsed;
             FilterBox.IsEnabled = current is not null;
-            ScopeBox.ItemsSource = model.Scopes;
-            ScopeBox.SelectedItem = model.Scope;
-            ScopeBox.IsEnabled = current is not null;
+            CurrentProjectButton.IsChecked = model.Mode == ReferenceScopeMode.CurrentProject;
+            AllProjectsButton.IsChecked = model.Mode == ReferenceScopeMode.AllProjects;
+            CurrentProjectButton.IsEnabled = AllProjectsButton.IsEnabled = current is not null;
+            CurrentProjectButton.ToolTip = model.CurrentProjectToolTip;
             HistoryBox.ItemsSource = model.History.ToArray();
             HistoryBox.SelectedItem = current;
             HistoryBox.IsEnabled = model.History.Count > 0;
@@ -180,21 +188,11 @@ public partial class ReferencesControl : UserControl
         Refresh(keep, keepScroll: false);
     }
 
-    private void OnScopeDropDownOpened(object sender, EventArgs eventArgs)
+    private void OnModeChecked(object sender, RoutedEventArgs eventArgs)
     {
-        // 결과를 보인 뒤에 게시된 프로젝트 범위도 고를 수 있게 목록을 열 때 다시 읽습니다.
-        var keep = SelectionKey();
-        var before = model.Scopes;
-        RefreshScopes();
-        if (!ReferenceEquals(before, model.Scopes)) Refresh(keep, keepScroll: false);
-    }
-
-    private void OnScopeSelectionChanged(object sender, SelectionChangedEventArgs eventArgs)
-    {
-        if (syncing || ScopeBox.SelectedItem is not SymbolSearchScope scope || ReferenceEquals(scope, model.Scope)) return;
-        var keep = SelectionKey();
-        model.SelectScope(scope);
-        Refresh(keep, keepScroll: false);
+        // 코드에서 고른 표시를 맞출 때(Refresh)는 무시하고, 클릭·키보드·접근성 선택만 모드로 반영합니다.
+        if (syncing) return;
+        SetMode(ReferenceEquals(sender, CurrentProjectButton) ? ReferenceScopeMode.CurrentProject : ReferenceScopeMode.AllProjects);
     }
 
     private void SetAllExpanded(bool expanded)
@@ -207,16 +205,16 @@ public partial class ReferencesControl : UserControl
     private void OnHistorySelectionChanged(object sender, SelectionChangedEventArgs eventArgs)
     {
         if (syncing || HistoryBox.SelectedItem is not ReferenceResultSet set || ReferenceEquals(set, model.Current)) return;
-        // 다른 심볼의 결과로 돌아가므로 이전 필터는 지웁니다. 범위는 같은 Solution 동안 유지합니다.
-        RefreshScopes();
+        // 다른 심볼의 결과로 돌아가므로 이전 필터는 지웁니다. 범위 모드는 유지하고 현재 프로젝트는 그 결과의 파일 기준입니다.
+        RefreshProjects();
         model.Select(set, clearFilter: true);
         Refresh(null, keepScroll: false);
     }
 
     private void OnPreviewKeyDown(object sender, KeyEventArgs eventArgs)
     {
-        // 범위 목록이 열려 있으면 화살표·Enter는 목록 항목 선택에 씁니다.
-        if (ScopeBox.IsDropDownOpen || HistoryBox.IsDropDownOpen) return;
+        // 최근 결과 목록이 열려 있으면 화살표·Enter는 목록 항목 선택에 씁니다.
+        if (HistoryBox.IsDropDownOpen) return;
         if (ResultListKeys.IsScopeCycle(eventArgs.Key, Keyboard.Modifiers, out var forward))
         {
             if (CycleScope(forward)) eventArgs.Handled = true;
@@ -434,16 +432,6 @@ public partial class ReferencesControl : UserControl
         if (first is null) return;
         ResultsList.SelectedItem = first;
         FocusSelection();
-    }
-
-    private static int IndexOf(IReadOnlyList<SymbolSearchScope> scopes, SymbolSearchScope scope)
-    {
-        for (var index = 0; index < scopes.Count; index++)
-        {
-            if (ReferenceEquals(scopes[index], scope)) return index;
-        }
-
-        return -1;
     }
 
     private static bool SamePath(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);

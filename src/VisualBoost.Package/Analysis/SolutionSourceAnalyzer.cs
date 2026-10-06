@@ -65,6 +65,9 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     }
 
     public int SymbolCount => symbols.Count;
+
+    /// <summary>이름 인덱스의 공개 번호입니다(<see cref="SourceSymbolIndex.Revision"/>). 잠금 없이 읽습니다.</summary>
+    public int SymbolRevision => symbols.Revision;
     public string? LastWarning { get; private set; }
     public SymbolCompletionSnapshot CompletionSnapshot => symbols.CompletionSnapshot;
     internal event Action<int>? SymbolsPublished;
@@ -73,7 +76,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     {
         get
         {
-            lock (gate) return includeEdgeCount;
+            // 캐시 게시는 이 잠금을 쥔 채 이름 묶음을 병합하므로, UI thread의 상태 조회(GetSnapshot)가 기다리지 않게 잠금 없이 읽습니다.
+            return Volatile.Read(ref includeEdgeCount);
         }
     }
 

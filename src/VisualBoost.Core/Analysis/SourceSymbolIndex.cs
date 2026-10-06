@@ -16,6 +16,7 @@ public sealed class SourceSymbolIndex : IDisposable
     private readonly object appendGate = new();
     private Segment[] additions = Array.Empty<Segment>();
     private int replacementVersion;
+    private int revision;
 
     private sealed class Segment
     {
@@ -36,6 +37,9 @@ public sealed class SourceSymbolIndex : IDisposable
     }
 
     public int Count { get; private set; }
+
+    /// <summary>검색에 공개한 내용이 바뀔 때마다(전체 교체·추가 묶음) 늘어나는 번호입니다. 잠금 없이 읽으며 수가 같은 재분석도 구별합니다.</summary>
+    public int Revision => Volatile.Read(ref revision);
 
     public void ReplaceAll(IEnumerable<SourceSymbolLocation> locations, CancellationToken cancellationToken = default)
     {
@@ -70,6 +74,7 @@ public sealed class SourceSymbolIndex : IDisposable
             locationsByName = replacement;
             additions = Array.Empty<Segment>();
             replacementVersion++;
+            Interlocked.Increment(ref revision);
             searchSnapshot = snapshot;
             Volatile.Write(ref completionSnapshot, completion);
             Count = count;
@@ -108,6 +113,7 @@ public sealed class SourceSymbolIndex : IDisposable
                 token.ThrowIfCancellationRequested();
                 if (replacementVersion != version) return;
                 additions = replacement;
+                Interlocked.Increment(ref revision);
                 Count = locationsByName.Values.Sum(values => values.Length) + additions.Sum(part => part.Items.Length);
             }
             finally { gate.ExitWriteLock(); }

@@ -205,7 +205,7 @@ internal sealed class SemanticNavigationCommand
             if (pane is not ReferencesToolWindow window) throw new InvalidOperationException("참조 결과 창을 만들지 못했습니다.");
             // 범위 빠른 필터는 심볼 탐색과 같은 범위 목록을 씁니다. 창은 VS가 배치를 복원하며 먼저 만들 수 있어 결과를 보일 때 연결합니다.
             window.Control.ScopeSource ??= () => fileIndex.SymbolScopes;
-            window.Control.Show(new ReferenceResultSet(symbol, items, string.Join(" · ", notes), DateTime.Now));
+            window.Control.Show(new ReferenceResultSet(symbol, items, string.Join(" · ", notes), DateTime.Now, path));
             return;
         }
 

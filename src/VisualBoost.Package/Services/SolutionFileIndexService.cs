@@ -54,6 +54,12 @@ internal sealed class SolutionFileIndexService : IDisposable
 
     public int Count => index.Count;
     public SymbolCompletionSnapshot CompletionSnapshot => sourceAnalyzer.CompletionSnapshot;
+
+    /// <summary>
+    /// 이름 인덱스가 바뀔 때마다(전체 교체·분석 중 추가 묶음) 늘어나는 번호입니다. 수가 같은 재분석도 구별하며 잠금 없이 읽으므로
+    /// UI thread의 표시용 캐시가 <see cref="GetSnapshot"/> 대신 바뀜 여부만 볼 때 씁니다.
+    /// </summary>
+    public int SymbolRevision => sourceAnalyzer.SymbolRevision;
     public long Generation => Interlocked.Read(ref generation);
     public void BeginDiscovery(string path)
     {

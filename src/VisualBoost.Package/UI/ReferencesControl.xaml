@@ -11,6 +11,41 @@
              ui:SearchPalette.Track="True"
              PreviewKeyDown="OnPreviewKeyDown">
   <UserControl.Resources>
+    <!-- 범위 모드 아이콘 버튼: 고른 쪽은 강조색 배경, 가리키면 테두리를 보입니다. -->
+    <Style x:Key="ModeButtonStyle" TargetType="RadioButton">
+      <Setter Property="Padding" Value="4,3" />
+      <Setter Property="Background" Value="Transparent" />
+      <Setter Property="BorderBrush" Value="Transparent" />
+      <Setter Property="BorderThickness" Value="1" />
+      <Setter Property="Cursor" Value="Hand" />
+      <Setter Property="FocusVisualStyle" Value="{x:Null}" />
+      <Setter Property="VerticalAlignment" Value="Center" />
+      <Setter Property="Template">
+        <Setter.Value>
+          <ControlTemplate TargetType="RadioButton">
+            <Border x:Name="ButtonBorder" Padding="{TemplateBinding Padding}" Background="{TemplateBinding Background}"
+                    BorderBrush="{TemplateBinding BorderBrush}" BorderThickness="{TemplateBinding BorderThickness}" CornerRadius="3">
+              <ContentPresenter HorizontalAlignment="Center" VerticalAlignment="Center" />
+            </Border>
+            <ControlTemplate.Triggers>
+              <Trigger Property="IsMouseOver" Value="True">
+                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" />
+              </Trigger>
+              <Trigger Property="IsChecked" Value="True">
+                <Setter TargetName="ButtonBorder" Property="Background" Value="{DynamicResource {x:Static vsshell:VsBrushes.HighlightKey}}" />
+              </Trigger>
+              <Trigger Property="IsKeyboardFocused" Value="True">
+                <Setter TargetName="ButtonBorder" Property="BorderBrush" Value="{DynamicResource {x:Static vsshell:VsBrushes.HighlightKey}}" />
+              </Trigger>
+              <Trigger Property="IsEnabled" Value="False">
+                <Setter Property="Opacity" Value="0.45" />
+              </Trigger>
+            </ControlTemplate.Triggers>
+          </ControlTemplate>
+        </Setter.Value>
+      </Setter>
+    </Style>
+
     <Style x:Key="RowStyle" TargetType="ListBoxItem">
       <Setter Property="HorizontalContentAlignment" Value="Stretch" />
       <Setter Property="Padding" Value="0" />
@@ -46,14 +81,16 @@
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="18" />
           <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="*" />
           <ColumnDefinition Width="Auto" />
         </Grid.ColumnDefinitions>
         <TextBlock x:Name="Glyph" Grid.Column="0" Text="{Binding Glyph}" VerticalAlignment="Center" HorizontalAlignment="Center"
                    Background="Transparent" Cursor="Hand" />
-        <TextBlock Grid.Column="1" Text="{Binding FileName}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="2,0,10,0" />
-        <TextBlock Grid.Column="2" Text="{Binding Folder}" Opacity="0.65" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
-        <Border Grid.Column="3" Margin="8,0,4,0" Padding="6,0" CornerRadius="8" VerticalAlignment="Center"
+        <ui:ProductIcon x:Name="FileIcon" Grid.Column="1" FilePath="{Binding FullPath}" Width="16" Height="16" Margin="0,0,4,0" VerticalAlignment="Center" />
+        <TextBlock Grid.Column="2" Text="{Binding FileName}" FontWeight="SemiBold" VerticalAlignment="Center" Margin="0,0,10,0" />
+        <TextBlock Grid.Column="3" Text="{Binding Folder}" Opacity="0.65" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        <Border Grid.Column="4" Margin="8,0,4,0" Padding="6,0" CornerRadius="8" VerticalAlignment="Center"
                 Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
           <TextBlock Text="{Binding Count}" />
         </Border>
@@ -132,12 +169,17 @@
           </Grid>
         </Border>
         <StackPanel Grid.Column="2" Orientation="Horizontal" VerticalAlignment="Center" Margin="10,0,0,0">
-          <ComboBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
-                    ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
-                    x:Name="ScopeBox" Width="170" DisplayMemberPath="Name"
-                    ToolTip="보일 위치의 범위 · Ctrl+Tab/Ctrl+Shift+Tab으로 바꿉니다. 프로젝트 범위는 등록된 파일, 엔진은 확인된 설치 경로 기준입니다."
-                    DropDownOpened="OnScopeDropDownOpened"
-                    SelectionChanged="OnScopeSelectionChanged" />
+          <!-- 범위 모드: 아이콘 버튼 두 개. 툴팁이 기능 이름이며 현재 프로젝트 쪽은 코드에서 기준 프로젝트를 둘째 줄에 붙입니다. -->
+          <RadioButton x:Name="CurrentProjectButton" GroupName="ReferenceScope" Style="{StaticResource ModeButtonStyle}"
+                       ToolTip="현재 프로젝트 탐색" AutomationProperties.Name="현재 프로젝트 탐색" ToolTipService.ShowOnDisabled="True"
+                       Checked="OnModeChecked">
+            <ui:ProductIcon SymbolKind="project" Width="16" Height="16" />
+          </RadioButton>
+          <RadioButton x:Name="AllProjectsButton" GroupName="ReferenceScope" Style="{StaticResource ModeButtonStyle}" Margin="2,0,0,0"
+                       ToolTip="모든 프로젝트 탐색" AutomationProperties.Name="모든 프로젝트 탐색" ToolTipService.ShowOnDisabled="True"
+                       Checked="OnModeChecked">
+            <ui:ProductIcon SymbolKind="projects" Width="16" Height="16" />
+          </RadioButton>
           <ComboBox Style="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxStyleKey}}"
                     ItemContainerStyle="{DynamicResource {x:Static vsshell:VsResourceKeys.ComboBoxItemStyleKey}}"
                     x:Name="HistoryBox" Width="200" Margin="6,0,0,0" ToolTip="최근 참조 결과"

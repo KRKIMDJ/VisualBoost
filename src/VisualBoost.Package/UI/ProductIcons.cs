@@ -69,11 +69,15 @@ public static class ProductIcons
         Add("macro", "#F1D77B", "M 24,4 L 44,4 L 36,26 L 55,26 L 25,60 L 30,37 L 10,37 Z", "");
         Add("type", "#C8B3EA", "M 32,5 L 59,32 L 32,59 L 5,32 Z", "M 21,24 L 43,24 M 32,24 L 32,45");
         Add("unknown", "#BDC9D8", "M 12,10 L 52,10 L 52,54 L 12,54 Z", "M 22,26 Q 22,17 33,18 Q 46,21 35,32 L 32,36 M 32,45 L 32,46");
+        // 참조 창 범위 버튼: 프로젝트 하나(현재 프로젝트)와 겹친 프로젝트 여럿(모든 프로젝트)입니다.
+        Add("project", "#9AD7A6", "M 9,11 L 55,11 L 55,55 L 9,55 Z", "M 9,23 L 55,23 M 20,35 L 44,35 M 20,45 L 37,45");
+        Add("projects", "#9AD7A6", "M 21,5 L 59,5 L 59,41 L 50,41 L 50,14 L 21,14 Z M 5,21 L 43,21 L 43,59 L 5,59 Z", "M 5,32 L 43,32 M 14,43 L 34,43");
         result["scope"] = result["namespace"]; result["constructor"] = result["function"]; result["destructor"] = result["function"];
         return result;
     }
 }
 
+/// <summary>제품 아이콘입니다. <see cref="FilePath"/>가 있으면 파일 형식 아이콘을, 없으면 <see cref="SymbolKind"/> 이름의 아이콘(심볼 종류·"project" 등)을 보입니다.</summary>
 public sealed class ProductIcon : Image
 {
     public static readonly DependencyProperty FilePathProperty = DependencyProperty.Register(nameof(FilePath), typeof(string), typeof(ProductIcon), new PropertyMetadata(null, Changed));

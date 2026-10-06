@@ -36,11 +36,19 @@ internal static class ProgressiveIndexTests
         Console.WriteLine($"INFO: 독립 300,000개 심볼 부분 인덱스 구축 {build:F1}ms / 검색 p95 {timings[18]:F1}ms");
         using var token = new CancellationTokenSource();
         token.Cancel();
+        var beforeCancel = progressive.Revision;
         try { progressive.AppendBatch(symbols.Take(1), token.Token); }
         catch (OperationCanceledException) { }
-        Check(progressive.Count == symbols.Length, "취소된 부분 인덱스 공개 차단");
+        Check(progressive.Count == symbols.Length && progressive.Revision == beforeCancel, "취소된 부분 인덱스 공개 차단");
         progressive.ReplaceAll(Array.Empty<SourceSymbolLocation>());
         Check(progressive.Count == 0 && progressive.Search("Set Mode").Count == 0, "솔루션 교체 시 부분 인덱스 제거");
+
+        // 공개 번호는 수가 같은 재분석(전체 교체)과 추가 묶음마다 바뀌어 표시용 캐시가 GetSnapshot 없이 바뀜을 알 수 있습니다.
+        var revision = progressive.Revision;
+        progressive.ReplaceAll(Array.Empty<SourceSymbolLocation>());
+        var replaced = progressive.Revision;
+        progressive.AppendBatch(symbols.Take(3));
+        Check(replaced != revision && progressive.Revision != replaced && progressive.Count == 3, "인덱스 공개 번호: 같은 수의 교체·추가 묶음 구별");
     }
     private static void Check(bool value, string message)
     {
