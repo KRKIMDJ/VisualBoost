@@ -26,6 +26,7 @@ internal static class Program
             ProjectScopeTests.Run();
             ProgressiveIndexTests.Run();
             SymbolScopeTests.Run();
+            CodePreviewNamesTests.Run();
             Console.WriteLine("모든 .NET Framework 경로·이름 검색 회귀 테스트가 통과했습니다.");
             return 0;
         }

@@ -19,6 +19,7 @@
     <Compile Include="../../src/VisualBoost.Package/Analysis/IncludeRootLookup.cs" Link="IncludeRootLookup.cs" />
     <Compile Include="../../src/VisualBoost.Package/Analysis/SourceAnalysisCache.cs" Link="SourceAnalysisCache.cs" />
     <Compile Include="../../src/VisualBoost.Package/Analysis/CachedSourceAnalysis.cs" Link="CachedSourceAnalysis.cs" />
+    <Compile Include="../../src/VisualBoost.Package/UI/CodePreviewNames.cs" Link="CodePreviewNames.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>
