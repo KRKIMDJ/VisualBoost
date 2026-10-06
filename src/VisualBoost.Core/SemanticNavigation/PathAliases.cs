@@ -53,7 +53,9 @@ public sealed class PathAliases
 
             // 드라이브 루트는 'P:'만으로는 그 드라이브의 현재 폴더를 뜻하므로 구분자를 붙여 조회합니다.
             var real = resolve(given.Length == 2 && given[1] == ':' ? given + Path.DirectorySeparatorChar : given) is { } resolved ? Trim(resolved) : null;
-            if (real is null || string.Equals(real, given, StringComparison.OrdinalIgnoreCase)) continue;
+            // clangd의 실제 경로도 디스크의 대소문자를 쓰므로 대소문자만 달라도 대응을 둡니다. VS는 Solution 경로를 디스크 대소문자로 주지만,
+            // 엔진 루트처럼 다른 출처의 경로는 다를 수 있습니다. 루트 아래 이름의 대소문자 차이는 맞추지 않습니다.
+            if (real is null || string.Equals(real, given, StringComparison.Ordinal)) continue;
             if (found.Any(alias => string.Equals(alias.Given, given, StringComparison.OrdinalIgnoreCase))) continue;
             found.Add((real, given));
         }

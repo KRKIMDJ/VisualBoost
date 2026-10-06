@@ -84,6 +84,16 @@ internal static class ReferenceResultsTests
         Assert(model.VisibleCount == 5 && model.Summary.Contains("현재 프로젝트 확인 중") &&
                model.CurrentProjectToolTip == ReferenceResultsModel.CurrentProjectTip + "\n현재 프로젝트 확인 중", "확인 중 안내: " + model.Summary);
 
+        // '전체' 하나뿐인 초기 목록은 아직 확인 중이고, 게시된 목록에 프로젝트가 없으면(폴더 작업 영역 등) 확인 중으로 남기지 않습니다.
+        var bare = new ReferenceResultsModel();
+        bare.Show(Sample("FMod::Compute"));
+        bare.SetMode(ReferenceScopeMode.CurrentProject);
+        bare.SetProjects(new[] { SymbolSearchScope.All });
+        var initial = bare.Summary;
+        bare.SetProjects(Catalog(withProject: false));
+        Assert(initial.Contains("현재 프로젝트 확인 중") && bare.VisibleCount == 5 && bare.Summary.Contains("프로젝트 정보가 없어 모든 위치 표시"),
+            "프로젝트 없는 작업 영역 안내: " + initial + " → " + bare.Summary);
+
         // 요청한 파일(Use.cpp)이 속한 프로젝트 Game에는 Use.cpp·Other.cpp만 있습니다. Mod.h는 미등록입니다.
         var catalog = Catalog(withProject: true);
         Assert(model.SetProjects(catalog) && !model.SetProjects(catalog), "같은 소속 목록은 다시 계산하지 않음");
@@ -143,18 +153,35 @@ internal static class ReferenceResultsTests
         };
         var catalog = SymbolSearchScope.CreateCatalog(projects, new[] { origin, header, near, deeper, tool }, new[] { EngineRoot });
         var model = new ReferenceResultsModel();
-        model.Show(new ReferenceResultSet("Foo", items, string.Empty, DateTime.Now, origin));
+        model.Show(new ReferenceResultSet("Foo", items, string.Empty, DateTime.Now, origin, header));
         model.SetProjects(catalog);
         var order = string.Join(" ", model.VisibleItems.Select(item => item.FileName + ":" + item.Line));
         Assert(order == "Foo.cpp:5 Foo.h:2 Baz.cpp:2 Baz.cpp:9 Bar.cpp:7 Tool.cpp:4 Gen.h:1 Engine.cpp:3",
             "요청 파일 → 짝 헤더 → 현재 프로젝트(가까운 폴더 먼저) → 다른 프로젝트 → 그 밖(가까운 폴더 먼저): " + order);
+
+        // 짝은 명령이 헤더·구현 전환 규칙으로 고른 하나뿐입니다. 이름만 같은 엔진 헤더는 앞에 오지 않습니다.
+        var engineFoo = Path.Combine(EngineRoot, "Source", "Runtime", "Foo.h");
+        var sameName = new ReferenceResultsModel();
+        sameName.Show(new ReferenceResultSet("Foo", items.Append(Item(engineFoo, 6, "", "void Foo();")).ToArray(), string.Empty, DateTime.Now, origin, header));
+        sameName.SetProjects(catalog);
+        var sameNameOrder = string.Join(" ", sameName.VisibleItems.Select(item => item.FileName + ":" + item.Line));
+        Assert(sameNameOrder.StartsWith("Foo.cpp:5 Foo.h:2 Baz.cpp:2", StringComparison.Ordinal) &&
+               sameNameOrder.IndexOf("Foo.h:6", StringComparison.Ordinal) > sameNameOrder.IndexOf("Tool.cpp:4", StringComparison.Ordinal),
+            "이름만 같은 먼 파일은 짝 등급 아님: " + sameNameOrder);
+
+        // 현재 프로젝트를 알 때 짝이 다른 프로젝트·엔진에 있으면 현재 프로젝트 파일보다 앞에 두지 않고, 모를 때는 짝을 앞에 둡니다.
+        var inGame = new HashSet<string>(new[] { origin, near }, StringComparer.OrdinalIgnoreCase);
+        string Sorted(bool hasProject) => string.Join(" ", ReferenceOrder.Sort(new[] { Item(engineFoo, 6, "", "void Foo();"), Item(near, 2, "", "Foo();"), Item(origin, 5, "", "Foo();") },
+            origin, engineFoo, hasProject, inGame.Contains, _ => false).Select(item => item.FileName));
+        Assert(Sorted(hasProject: true) == "Foo.cpp Baz.cpp Foo.h" && Sorted(hasProject: false) == "Foo.cpp Foo.h Baz.cpp",
+            "현재 프로젝트 밖의 짝: " + Sorted(true) + " / 소속을 모를 때: " + Sorted(false));
         Assert(ReferenceOrder.Distance(ReferenceOrder.Folders(@"C:\A\B\C"), ReferenceOrder.Folders(@"C:\A\D")) == 3 &&
                ReferenceOrder.Distance(ReferenceOrder.Folders(@"C:\A\B"), ReferenceOrder.Folders(@"c:\a\b")) == 0 &&
                ReferenceOrder.Distance(null, ReferenceOrder.Folders(@"C:\A")) == 0, "폴더 거리");
 
         // 소속 목록 전에도 요청 파일·짝 파일·폴더 거리로 정렬합니다.
         var early = new ReferenceResultsModel();
-        early.Show(new ReferenceResultSet("Foo", items, string.Empty, DateTime.Now, origin));
+        early.Show(new ReferenceResultSet("Foo", items, string.Empty, DateTime.Now, origin, header));
         var earlyOrder = string.Join(" ", early.VisibleItems.Select(item => item.FileName));
         Assert(earlyOrder.StartsWith("Foo.cpp Foo.h Baz.cpp Baz.cpp Bar.cpp", StringComparison.Ordinal), "소속 목록 전 순서: " + earlyOrder);
     }

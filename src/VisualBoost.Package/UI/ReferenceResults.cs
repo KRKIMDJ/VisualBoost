@@ -11,13 +11,15 @@ namespace VisualBoost.UI;
 /// <summary>참조 찾기 한 번의 결과입니다. 만든 뒤에는 바꾸지 않습니다.</summary>
 internal sealed class ReferenceResultSet
 {
-    public ReferenceResultSet(string symbol, IReadOnlyList<NavigationResultItem> items, string notes, DateTime createdAt, string? originPath = null)
+    public ReferenceResultSet(string symbol, IReadOnlyList<NavigationResultItem> items, string notes, DateTime createdAt, string? originPath = null,
+        string? pairPath = null)
     {
         Symbol = symbol ?? string.Empty;
         Items = items ?? throw new ArgumentNullException(nameof(items));
         Notes = notes ?? string.Empty;
         CreatedAt = createdAt;
         OriginPath = string.IsNullOrEmpty(originPath) ? null : originPath;
+        PairPath = string.IsNullOrEmpty(pairPath) ? null : pairPath;
         FileCount = items.Select(item => item.FullPath).Distinct(StringComparer.OrdinalIgnoreCase).Count();
     }
 
@@ -28,6 +30,12 @@ internal sealed class ReferenceResultSet
 
     /// <summary>참조 찾기를 실행한 파일입니다. '현재 프로젝트'와 가까운 순서의 기준이며 모르면 null입니다.</summary>
     public string? OriginPath { get; }
+
+    /// <summary>
+    /// 결과 파일 중 요청한 파일의 헤더·구현 짝입니다. 헤더·구현 전환과 같은 규칙(<c>FilePairResolver</c>, 사용자 옵션)의 가장 높은 후보 하나이며,
+    /// 이름만 같은 먼 파일을 짝으로 올리지 않게 명령에서 정합니다. 없으면 null입니다.
+    /// </summary>
+    public string? PairPath { get; }
 
     /// <summary>결과 제한·색인 진행처럼 함께 알릴 내용입니다.</summary>
     public string Notes { get; }
@@ -214,10 +222,13 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
 
     private bool IsNarrowedByProject => mode == ReferenceScopeMode.CurrentProject && HasCurrentProject;
 
-    // 소속 목록이 게시되기 전이면 확인 중이고, 게시되었는데 요청한 파일이 어느 프로젝트에도 없으면(엔진·미등록 파일) 모든 위치를 보입니다.
-    private string ProjectPendingText => current?.OriginPath is not null && catalog?.Any(IsProject) == true
-        ? "현재 파일이 속한 프로젝트가 없어 모든 프로젝트 표시"
-        : "현재 프로젝트 확인 중";
+    // 소속 목록이 게시되기 전('전체' 하나뿐인 초기 목록 포함)이면 확인 중입니다. 게시된 목록은 '프로젝트 코드'·'소속 미확인'을 늘 포함합니다.
+    // 게시되었는데 프로젝트가 하나도 없거나(폴더 작업 영역 등) 요청한 파일이 어느 프로젝트에도 없으면(엔진·미등록 파일) 모든 위치를 보입니다.
+    private string ProjectPendingText =>
+        catalog is null || catalog.Count <= 1 ? "현재 프로젝트 확인 중"
+        : !catalog.Any(IsProject) ? "프로젝트 정보가 없어 모든 위치 표시"
+        : current?.OriginPath is not null ? "현재 파일이 속한 프로젝트가 없어 모든 프로젝트 표시"
+        : "찾은 파일을 알 수 없어 모든 프로젝트 표시";
 
     /// <summary>새 결과를 보이고 최근 결과 맨 앞에 둡니다. 필터는 지우고 접힌 파일은 모두 펼칩니다. 범위 모드는 유지합니다.</summary>
     public void Show(ReferenceResultSet set)
@@ -322,7 +333,8 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
         var solutionCode = catalog?.FirstOrDefault(scope => scope.Id == SymbolSearchScope.RegisteredId);
         orderedItems = current is null
             ? Array.Empty<NavigationResultItem>()
-            : ReferenceOrder.Sort(current.Items, origin, InCurrentProject, path => solutionCode?.Includes(path) == true);
+            : ReferenceOrder.Sort(current.Items, origin, current.PairPath, originProjects.Any(), InCurrentProject,
+                path => solutionCode?.Includes(path) == true);
     }
 
     private void Rebuild()
@@ -368,18 +380,21 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
 /// </summary>
 internal static class ReferenceOrder
 {
-    public static IReadOnlyList<NavigationResultItem> Sort(IReadOnlyList<NavigationResultItem> items, string? origin,
-        Func<string, bool> inCurrentProject, Func<string, bool> inSolutionCode)
+    /// <param name="pair">요청 파일의 헤더·구현 짝입니다. 현재 프로젝트를 알 때는 현재 프로젝트 안의 짝만 앞에 둡니다.</param>
+    /// <param name="hasCurrentProject">요청 파일의 프로젝트를 알면 true입니다.</param>
+    public static IReadOnlyList<NavigationResultItem> Sort(IReadOnlyList<NavigationResultItem> items, string? origin, string? pair,
+        bool hasCurrentProject, Func<string, bool> inCurrentProject, Func<string, bool> inSolutionCode)
     {
         if (items is null) throw new ArgumentNullException(nameof(items));
         var originFolders = origin is null ? null : Folders(Path.GetDirectoryName(origin));
-        var originStem = origin is null ? null : Path.GetFileNameWithoutExtension(origin);
+        // 짝이 다른 프로젝트·엔진에 있으면 현재 프로젝트 파일보다 앞에 두지 않습니다(현재 프로젝트 우선).
+        var promotedPair = pair is not null && (!hasCurrentProject || inCurrentProject(pair)) ? pair : null;
         var keys = new Dictionary<string, (int Rank, int Distance)>(StringComparer.OrdinalIgnoreCase);
         (int Rank, int Distance) Key(string path)
         {
             if (keys.TryGetValue(path, out var key)) return key;
             var rank = origin is not null && string.Equals(path, origin, StringComparison.OrdinalIgnoreCase) ? 0
-                : originStem is not null && string.Equals(Path.GetFileNameWithoutExtension(path), originStem, StringComparison.OrdinalIgnoreCase) ? 1
+                : promotedPair is not null && string.Equals(path, promotedPair, StringComparison.OrdinalIgnoreCase) ? 1
                 : inCurrentProject(path) ? 2
                 : inSolutionCode(path) ? 3
                 : 4;

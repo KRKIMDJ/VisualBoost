@@ -16,6 +16,7 @@ using Microsoft.VisualStudio.Shell.Interop;
 using Microsoft.VisualStudio.Text;
 using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.TextManager.Interop;
+using VisualBoost.Core.FilePairing;
 using VisualBoost.Core.SemanticNavigation;
 using VisualBoost.SemanticNavigation;
 using VisualBoost.Services;
@@ -205,7 +206,10 @@ internal sealed class SemanticNavigationCommand
             if (pane is not ReferencesToolWindow window) throw new InvalidOperationException("참조 결과 창을 만들지 못했습니다.");
             // 범위 빠른 필터는 심볼 탐색과 같은 범위 목록을 씁니다. 창은 VS가 배치를 복원하며 먼저 만들 수 있어 결과를 보일 때 연결합니다.
             window.Control.ScopeSource ??= () => fileIndex.SymbolScopes;
-            window.Control.Show(new ReferenceResultSet(symbol, items, string.Join(" · ", notes), DateTime.Now, path));
+            // 짝 파일은 헤더·구현 전환과 같은 규칙·옵션으로 결과 파일 중 가장 높은 후보 하나만 고릅니다(이름만 같은 먼 파일 제외).
+            var pair = new FilePairResolver(package.GetGeneralOptions().CreateFilePairingOptions())
+                .FindMatches(path, items.Select(item => item.FullPath)).FirstOrDefault()?.Path;
+            window.Control.Show(new ReferenceResultSet(symbol, items, string.Join(" · ", notes), DateTime.Now, path, pair));
             return;
         }
 

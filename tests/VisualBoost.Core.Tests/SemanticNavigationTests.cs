@@ -70,6 +70,9 @@ internal static class SemanticNavigationTests
         string? Resolve(string path) => real.TryGetValue(path, out var found) ? found : path;
         var aliases = PathAliases.ForRoots(new[] { @"J:\Smoke\", @"J:\Smoke\Plugins\Shared", @"C:\Plain", null, @"P:\" }, Resolve);
         Check(aliases.Count == 3 && PathAliases.ForRoots(new[] { @"C:\Plain" }, Resolve) == PathAliases.None, "링크를 거친 루트만 대응");
+        var cased = PathAliases.ForRoots(new[] { @"C:\work\engine" }, path => @"C:\Work\Engine");
+        Check(cased.Count == 1 && cased.ToReal(@"C:\work\engine\Source\A.h") == @"C:\Work\Engine\Source\A.h" &&
+              cased.ToGiven(@"C:\Work\Engine\Source\A.h") == @"C:\work\engine\Source\A.h", "대소문자만 다른 루트도 디스크 대소문자로 대응");
         Check(aliases.ToGiven(@"C:\Real\Smoke\App\Main.cpp") == @"J:\Smoke\App\Main.cpp" && aliases.ToGiven(@"c:\real\smoke") == @"J:\Smoke" &&
               aliases.ToGiven(@"D:\Shared\Lib.h") == @"J:\Smoke\Plugins\Shared\Lib.h", "실제 경로 → 연 경로(대소문자 무시·가장 긴 루트)");
         Check(aliases.ToReal(@"J:\Smoke\App\Main.cpp") == @"C:\Real\Smoke\App\Main.cpp" && aliases.ToReal(@"J:\Smoke\Plugins\Shared\Lib.h") == @"D:\Shared\Lib.h" &&
@@ -94,7 +97,10 @@ internal static class SemanticNavigationTests
             "링크가 없으면 경로를 바꾸지 않음");
 
         // 실제 junction에서 Windows 최종 경로 조회와 compile_commands.json 기록을 확인합니다. 테스트 전용 임시 폴더만 만들고 지웁니다.
-        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.PathAliases." + Guid.NewGuid().ToString("N"));
+        var created = Path.Combine(Path.GetTempPath(), "VisualBoost.PathAliases." + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(created);
+        // TEMP가 8.3 짧은 이름이나 링크를 거치면 링크가 아닌 폴더도 대응이 생기므로, 실제 경로로 푼 임시 폴더 아래에서 확인합니다.
+        var root = PathAliases.ForRoots(new[] { created }).ToReal(created);
         var target = Path.Combine(root, "real");
         var link = Path.Combine(root, "link");
         Directory.CreateDirectory(Path.Combine(target, "App"));

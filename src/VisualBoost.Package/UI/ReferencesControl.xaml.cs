@@ -33,20 +33,38 @@ public partial class ReferencesControl : UserControl
         syncing = true;
         InitializeComponent();
         HintText.ToolTip = "Ctrl+Tab/Ctrl+Shift+Tab 현재 프로젝트·모든 프로젝트 전환\nShift+F10 또는 우클릭: 위치·코드 복사, 탐색기에서 보기, 전부 펼치기·접기";
-        // 결과를 보인 뒤에 게시된 프로젝트 소속도 쓰도록 이 창에 초점이 올 때 소속 목록을 다시 읽습니다.
-        IsKeyboardFocusWithinChanged += (_, eventArgs) =>
+        // 결과를 보인 뒤에 게시되거나 다시 게시된 프로젝트 소속을 반영합니다. 초점 이벤트에서 바로 다시 정렬하면 마우스 처리 도중
+        // 목록이 바뀌어 클릭이 사라지거나 두 번째 클릭이 자리를 옮긴 행에 떨어지므로, 창이 보이는 동안 주기적으로 확인하고
+        // 버튼을 누르고 있지 않으며 두 번 클릭 간격이 지난 때에만 적용합니다.
+        projectTimer = new DispatcherTimer(DispatcherPriority.Background, Dispatcher) { Interval = TimeSpan.FromSeconds(1) };
+        projectTimer.Tick += (_, _) => ApplyLateProjects();
+        IsVisibleChanged += (_, eventArgs) =>
         {
-            if (eventArgs.NewValue is true && RefreshProjects()) Refresh(SelectionKey(), keepScroll: true);
+            if (eventArgs.NewValue is true)
+            {
+                projectTimer.Start();
+                ApplyLateProjects();
+            }
+            else
+            {
+                projectTimer.Stop();
+            }
         };
+        PreviewMouseDown += (_, _) => lastPointerDown = Environment.TickCount;
         Refresh(null, keepScroll: false);
     }
+
+    private readonly DispatcherTimer projectTimer;
+
+    // 이 창에서 마지막으로 마우스 버튼을 누른 시각(Environment.TickCount)입니다. 두 번 클릭 사이에 행을 옮기지 않으려고 씁니다.
+    private int lastPointerDown = Environment.TickCount - 60_000;
 
     /// <summary>위치를 엽니다. 두 번째 인수가 true이면 편집기로 초점을 옮기고, false이면 이 창에 초점을 남깁니다.</summary>
     internal Action<NavigationLocation, bool>? OpenLocation { get; set; }
 
     /// <summary>
-    /// 현재 Solution의 범위 목록(프로젝트 소속)을 읽습니다. '현재 프로젝트' 판정과 가까운 순서에 쓰며, 새 결과·모드 전환·창 초점 때마다 다시 읽어
-    /// 늦게 게시된 목록을 반영합니다.
+    /// 현재 Solution의 범위 목록(프로젝트 소속)을 읽습니다. '현재 프로젝트' 판정과 가까운 순서에 쓰며, 새 결과·모드 전환·최근 결과 전환 때와
+    /// 창이 보이는 동안의 주기 확인(<see cref="ApplyLateProjects"/>)으로 늦게 게시된 목록을 반영합니다.
     /// </summary>
     internal Func<IReadOnlyList<SymbolSearchScope>>? ScopeSource { get; set; }
 
@@ -104,6 +122,21 @@ public partial class ReferencesControl : UserControl
 
     /// <summary>소속 목록을 다시 읽습니다. 목록이 바뀌어 순서·현재 프로젝트를 다시 정했으면 true입니다.</summary>
     private bool RefreshProjects() => ScopeSource?.Invoke() is { } scopes && model.SetProjects(scopes);
+
+    /// <summary>
+    /// 늦게 게시된 소속 목록을 사용자 입력과 겹치지 않을 때만 반영합니다. 버튼을 누르고 있거나, 마지막 누름이 두 번 클릭 간격 안이거나,
+    /// 최근 결과 목록이 열려 있으면 다음 확인으로 미룹니다. 소속 목록 읽기는 잠금 하나와 참조 비교라 주기적으로 불러도 가볍습니다.
+    /// </summary>
+    private void ApplyLateProjects()
+    {
+        if (model.Current is null || ScopeSource is null || HistoryBox.IsDropDownOpen) return;
+        if (Mouse.LeftButton == MouseButtonState.Pressed || Mouse.RightButton == MouseButtonState.Pressed) return;
+        if (unchecked(Environment.TickCount - lastPointerDown) < (int)GetDoubleClickTime()) return;
+        if (RefreshProjects()) Refresh(SelectionKey(), keepScroll: true);
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")]
+    private static extern uint GetDoubleClickTime();
 
     private void SetMode(ReferenceScopeMode mode)
     {
