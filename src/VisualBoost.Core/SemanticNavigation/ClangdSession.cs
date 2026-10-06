@@ -60,12 +60,20 @@ public readonly struct BackgroundIndexProgress
 /// <summary>clangd <c>textDocument/symbolInfo</c> 확장 응답의 일부입니다.</summary>
 public sealed class SemanticSymbol
 {
-    public SemanticSymbol(string name, string containerName, string usr)
+    public SemanticSymbol(string name, string containerName, string usr, NavigationLocation? declaration = null, NavigationLocation? definition = null)
     {
         Name = name;
         ContainerName = containerName;
         Usr = usr;
+        Declaration = declaration;
+        Definition = definition;
     }
+
+    /// <summary>요청 파일 AST가 아는 대표 선언 위치(<c>declarationRange</c>)입니다. 응답에 없거나 심볼이 여럿이면 null입니다.</summary>
+    public NavigationLocation? Declaration { get; }
+
+    /// <summary>요청 파일 AST가 아는 정의 위치(<c>definitionRange</c>)입니다. 정의가 다른 번역 단위에만 있으면 null입니다.</summary>
+    public NavigationLocation? Definition { get; }
 
     public string Name { get; }
 
@@ -300,7 +308,10 @@ public sealed class ClangdSession : IDisposable
         }
 
         var container = (first["containerName"].AsString() ?? string.Empty).TrimEnd(':');
-        return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty);
+        // 선언·정의 범위는 역할 표식 근거라 심볼 하나로 정해질 때만 씁니다.
+        NavigationLocation? Range(string field) =>
+            result.Items.Count == 1 ? options.Paths.ToGiven(NavigationLocation.FromLsp(first[field])).FirstOrDefault() : null;
+        return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty, Range("declarationRange"), Range("definitionRange"));
     }
 
     /// <summary>

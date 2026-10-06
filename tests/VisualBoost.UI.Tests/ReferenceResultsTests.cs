@@ -55,13 +55,22 @@ internal static class ReferenceResultsTests
         Assert(model.EmptyMessage.Length == 0, "행이 있으면 안내 없음");
         var tick = model.Rows.OfType<ReferenceLineRow>().First(row => row.Line == "8");
         Assert(tick.Container == "Game::Tick" && tick.Match == "Compute", "위치 행의 포함 함수·일치 구간");
-        Assert(model.Rows[0].ToString() == "Use.cpp, 3개 위치" && tick.ToString() == "Use.cpp 8줄: Total += FMod::Compute(Delta);", "화면 읽기용 행 이름: " + model.Rows[0] + " / " + tick);
+        Assert(model.Rows[0].ToString() == "Use.cpp, 3개 위치" && tick.ToString() == "Use.cpp 8줄 Game::Tick: Total += FMod::Compute(Delta);", "화면 읽기용 행 이름: " + model.Rows[0] + " / " + tick);
 
         model.Filter = "  tick ";
         Assert(model.Filter == "tick" && model.VisibleCount == 1 && Shape(model) == "F:Use.cpp(1/3) L:8", "포함 함수로 좁히기: " + Shape(model));
         Assert(model.Summary == "1/5개 위치 · 1/3개 파일 · 색인 진행 중", "필터 요약은 위치·파일 모두 보이는 수/전체: " + model.Summary);
         model.Filter = "nothing";
         Assert(model.Rows.Count == 0 && model.VisibleCount == 0 && model.EmptyMessage == ReferenceResultsModel.NoMatchMessage, "일치 없음");
+
+        // 역할 표식은 화면 읽기 이름에 들어가고, 표식 글자를 그대로 치면 그 역할의 위치만 남습니다. 표식 글자 일부로는 좁히지 않습니다.
+        model.Filter = "선언";
+        var declaration = model.Rows.OfType<ReferenceLineRow>().SingleOrDefault();
+        Assert(Shape(model) == "F:Mod.h(1) L:5" && declaration is { RoleText: "선언" } && declaration.ToString() == "Mod.h 5줄 선언 FMod: static int Compute(int Value);",
+            "역할로 좁히기·화면 읽기 이름: " + Shape(model) + " / " + declaration);
+        model.Filter = "선";
+        Assert(model.Rows.Count == 0, "표식 글자 일부로는 좁히지 않음");
+        Assert(tick.RoleText.Length == 0 && Item(Use, 1, string.Empty, "x", NavigationRole.Definition).RoleText == "정의", "역할 없는 위치는 표식 없음");
         model.Filter = string.Empty;
 
         model.SetExpanded(set.Items[0].FullPath, false);
@@ -564,6 +573,17 @@ internal static class ReferenceResultsTests
             "줄 번호 → 소속 이름 → 코드 순서");
         Assert(X(Part(noContainer, "CodeText")) < X(Part(lineItems.First(item => item.DataContext is ReferenceLineRow { Container: "Game::Tick" }), "CodeText")),
             "소속 이름이 없으면 빈 칸 없이 코드가 붙음");
+
+        // 역할 표식은 줄 번호와 소속 이름 사이에 두고, 소속 이름과 코드 사이에는 세로선을 둡니다. 소속·역할이 없으면 둘 다 접습니다.
+        var declared = lineItems.Single(item => item.DataContext is ReferenceLineRow { RoleText: "선언" });
+        Assert(Part(declared, "RoleBadge").IsVisible && X(Part(declared, "LineText")) < X(Part(declared, "RoleBadge")) &&
+               X(Part(declared, "RoleBadge")) < X(Part(declared, "ContainerText")) && X(Part(declared, "ContainerText")) < X(Part(declared, "ContainerSeparator")) &&
+               X(Part(declared, "ContainerSeparator")) < X(Part(declared, "CodeText")) && texts.Any(text => text.Name == "RoleText" && text.Text == "선언"),
+            "줄 번호 → 역할 표식 → 소속 이름 → 세로선 → 코드");
+        var separator = Part(declared, "ContainerSeparator");
+        Assert(separator.ActualWidth == 1 && separator.ActualHeight > 6 && declared.ActualHeight < 22 && Fits(declared), "세로선은 글자 높이 안, 표식이 있어도 행 높이 그대로");
+        Assert(lineItems.Where(item => item != declared).All(item => !Part(item, "RoleBadge").IsVisible) && !Part(noContainer, "ContainerSeparator").IsVisible &&
+               lineItems.Where(item => item != noContainer).All(item => Part(item, "ContainerSeparator").IsVisible), "역할·소속이 없으면 표식·세로선 접기");
         if (!SystemParameters.HighContrast)
         {
             var dark = KindForeground.GetSurface(tickText) is not SolidColorBrush surface ||
@@ -618,11 +638,11 @@ internal static class ReferenceResultsTests
         string.Concat(text.Inlines.OfType<Run>().Where(run => run.FontWeight == FontWeights.Bold).Select(run => run.Text));
 
     /// <summary>"Compute"가 있으면 그 이름을, 없으면 줄 앞을 일치 구간으로 둔 위치입니다.</summary>
-    private static NavigationResultItem Item(string path, int line, string container, string text)
+    private static NavigationResultItem Item(string path, int line, string container, string text, NavigationRole role = NavigationRole.None)
     {
         var at = text.IndexOf("Compute", StringComparison.Ordinal);
         var start = Math.Max(0, at);
-        return new(new NavigationLocation(path, line - 1, start, line - 1, at < 0 ? start : at + "Compute".Length, container), text, Root);
+        return new(new NavigationLocation(path, line - 1, start, line - 1, at < 0 ? start : at + "Compute".Length, container), text, Root, role: role);
     }
 
     /// <summary>참조 결과 예시입니다. 요청한 파일은 기본으로 Use.cpp입니다.</summary>
@@ -635,7 +655,7 @@ internal static class ReferenceResultsTests
             Item(Use, 8, "Game::Tick", "    Total += FMod::Compute(Delta);"),
             Item(Other, 2, "Other", "int Other() { return FMod::Compute(2); }"),
             Item(Use, 20, string.Empty, "static int Value = FMod::Compute(3);"),
-            Item(Header, 5, "FMod", "    static int Compute(int Value);"),
+            Item(Header, 5, "FMod", "    static int Compute(int Value);", NavigationRole.Declaration),
         };
         return new ReferenceResultSet(symbol, items, "색인 진행 중", new DateTime(2026, 10, 5, 21, 7, 0), origin ?? Use);
     }

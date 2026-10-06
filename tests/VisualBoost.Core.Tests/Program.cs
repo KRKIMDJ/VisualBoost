@@ -21,6 +21,7 @@ internal static class Program
         Run("의미 탐색 JSON", SemanticNavigationTests.RunJson);
         Run("의미 탐색 명령줄 분리", SemanticNavigationTests.RunCommandLine);
         Run("의미 탐색 URI·위치 변환", SemanticNavigationTests.RunUri);
+        Run("참조 위치의 정의·선언 역할 판정", SemanticNavigationTests.RunReferenceRoles);
         Run("링크를 거친 Solution의 clangd 결과 경로 보정", SemanticNavigationTests.RunPathAliases);
         Run("LSP 연결 요청·통지·취소·끊김", SemanticNavigationTests.RunConnection);
         Run("Unreal 응답 파일 compilation database", SemanticNavigationTests.RunUnrealCommands);

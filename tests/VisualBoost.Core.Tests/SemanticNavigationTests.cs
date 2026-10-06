@@ -58,6 +58,54 @@ internal static class SemanticNavigationTests
         Check(NavigationLocation.Normalize(locations.Concat(locations)).Count == 2, "중복 위치 병합");
     }
 
+    public static void RunReferenceRoles()
+    {
+        // clangd 22로 확인한 응답 모양을 그대로 씁니다. a.h: 1행 int Foo(); 2행 inline int Bar() {...} 3행 struct S; 4행 struct S {...}; 5행 int Foo();
+        // b.cpp: 1행 Foo 정의, 2행 Foo·Bar·S 사용. c.cpp: 1행 Foo 사용.
+        static NavigationLocation At(string file, int line, int character) => new(@"C:\p\" + file, line, character, line, character + 3);
+        var fooDecl = At("a.h", 1, 4);
+        var fooRedecl = At("a.h", 5, 4);
+        var fooDef = At("b.cpp", 1, 4);
+        var useInB = At("b.cpp", 2, 26);
+        var useInC = At("c.cpp", 1, 17);
+        var all = new[] { fooDef, useInB, fooDecl, fooRedecl, useInC };
+        var uses = new[] { useInB, useInC };
+        string Roles(IReadOnlyDictionary<NavigationLocation, NavigationRole> roles) =>
+            string.Join(" ", all.Select(location => !roles.TryGetValue(location, out var role) ? "-" : role == NavigationRole.Definition ? "def" : "decl"));
+
+        // 사용 위치에서: 정의(AST)·대표 선언(AST)과 선언 묶음의 나머지(재선언)를 표시합니다. 일반 사용에는 붙이지 않습니다.
+        var fromUse = ReferenceRoles.Classify(all, uses, fooDef, fooDecl, new[] { fooDef }, new[] { fooDecl });
+        Check(Roles(fromUse) == "def - decl decl -", "사용 위치에서 정의·선언: " + Roles(fromUse));
+        Check(ReferenceRoles.Text(NavigationRole.Definition) == "정의" && ReferenceRoles.Text(NavigationRole.Declaration) == "선언" &&
+              ReferenceRoles.Text(NavigationRole.None).Length == 0, "역할 표식 글자");
+
+        // 정의가 다른 번역 단위에만 있으면 AST 정의가 없어도 정의·선언 이동 응답이 서로 다르므로 색인의 정의를 씁니다.
+        Check(Roles(ReferenceRoles.Classify(all, uses, null, fooDecl, new[] { fooDef }, new[] { fooDecl })) == "def - decl decl -", "다른 번역 단위의 정의");
+
+        // 선언 제외 참조를 받지 못하면(시간 상한·결과 수 제한) 확실한 정의·대표 선언만 표시합니다.
+        Check(Roles(ReferenceRoles.Classify(all, null, fooDef, fooDecl, new[] { fooDef }, new[] { fooDecl })) == "def - decl - -", "선언 묶음 없이");
+
+        // 대표 선언 위에서 찾으면 정의·선언 이동이 같은 곳(정의)으로 토글되어 근거가 되지 못합니다. 정의를 모르면 선언 묶음의 나머지도 표시하지 않습니다.
+        Check(Roles(ReferenceRoles.Classify(all, uses, null, fooDecl, new[] { fooDef }, new[] { fooDef })) == "- - decl - -", "토글 응답은 쓰지 않음");
+
+        // 근거가 없으면 비어 있고, 여러 심볼 응답은 쓰지 않으며, clangd가 일반 사용으로 돌려준 위치에는 다른 근거가 있어도 붙이지 않습니다.
+        Check(ReferenceRoles.Classify(all, uses, null, null, null, null).Count == 0, "근거 없음");
+        Check(Roles(ReferenceRoles.Classify(all, uses, null, null, new[] { fooDef, fooRedecl }, new[] { fooDecl })) == "- - - - -", "여러 위치 응답 무시");
+        Check(Roles(ReferenceRoles.Classify(all, uses, useInB, null, null, null)) == "- - - - -", "일반 사용과 어긋나는 근거 무시");
+
+        // 정의와 대표 선언이 같은 위치(헤더의 inline 함수)이면 정의만 표시합니다.
+        var bar = At("a.h", 2, 11);
+        var barAll = new[] { At("b.cpp", 1, 19), bar };
+        var barRoles = ReferenceRoles.Classify(barAll, new[] { barAll[0] }, bar, bar, new[] { bar }, new[] { bar });
+        Check(barRoles.Count == 1 && barRoles[bar] == NavigationRole.Definition, "정의이자 선언은 정의만");
+
+        // 앞선 전방 선언이 있는 타입: 정의·선언 이동이 모두 정의를 돌려줘도 AST 범위로 둘을 가립니다.
+        var forward = At("a.h", 3, 7);
+        var type = At("a.h", 4, 7);
+        var typeRoles = ReferenceRoles.Classify(new[] { At("b.cpp", 2, 12), forward, type }, new[] { At("b.cpp", 2, 12) }, type, forward, new[] { type }, new[] { type });
+        Check(typeRoles.Count == 2 && typeRoles[type] == NavigationRole.Definition && typeRoles[forward] == NavigationRole.Declaration, "전방 선언과 타입 정의");
+    }
+
     public static void RunPathAliases()
     {
         // clangd에는 실제 경로를 보내고, 받은 경로는 연 경로로 되돌립니다. 같아진 위치는 처음 것만 남깁니다.
@@ -527,6 +575,11 @@ internal static class SemanticNavigationTests
                 "LSP 심볼 종류 대응");
             Check(references.Locations.Any(l => l.Path == other && l.Container == "Other") && references.Locations.Any(l => l.Path == use && l.Container == "Use"),
                 "참조마다 포함 함수 이름: " + string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path) + "=" + l.Container)));
+            // 헤더의 선언은 선언, 요청 시점에 확정한 엔진 정의가 결과에 있으면 정의이고, 프로젝트의 호출에는 역할이 없습니다.
+            var roles = string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path) + ":" + (l.Line + 1) + "=" + references.RoleOf(l)));
+            Check(references.Locations.Where(l => l.Path == header).Any(l => references.RoleOf(l) == NavigationRole.Declaration) &&
+                  references.Locations.Where(l => l.Path == use || l.Path == other).All(l => references.RoleOf(l) == NavigationRole.None) &&
+                  references.Locations.Where(l => l.Path == engineSource).All(l => references.RoleOf(l) == NavigationRole.Definition), "참조 위치의 역할: " + roles);
 
             // 편집기에서 열지 않은 파일을 저장한 경우: 저장 내용으로 잠시 열어 색인에 반영합니다.
             var otherText = "#include \"Mod.h\"\nint Other() { return FMod::Compute(4); }\nint Again() { return FMod::Compute(5); }\n";

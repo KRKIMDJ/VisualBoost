@@ -75,14 +75,20 @@ public sealed class NavigationQuery
 public sealed class NavigationResult
 {
     public NavigationResult(IReadOnlyList<NavigationLocation> locations, SemanticSymbol? symbol, BackgroundIndexProgress progress, bool resolvedOnDemand,
-        SourceSymbolKind? symbolKind = null)
+        SourceSymbolKind? symbolKind = null, IReadOnlyDictionary<NavigationLocation, NavigationRole>? roles = null)
     {
         Locations = locations;
         Symbol = symbol;
         Progress = progress;
         ResolvedOnDemand = resolvedOnDemand;
         SymbolKind = symbolKind;
+        Roles = roles ?? new Dictionary<NavigationLocation, NavigationRole>();
     }
+
+    /// <summary>참조 위치별 역할(정의·선언)입니다. 근거가 확실한 위치만 들어 있습니다(<see cref="ReferenceRoles"/>).</summary>
+    public IReadOnlyDictionary<NavigationLocation, NavigationRole> Roles { get; }
+
+    public NavigationRole RoleOf(NavigationLocation location) => Roles.TryGetValue(location, out var role) ? role : NavigationRole.None;
 
     public IReadOnlyList<NavigationLocation> Locations { get; }
 
@@ -113,6 +119,9 @@ public sealed class ClangdNavigator : IDisposable
 {
     /// <summary>색칠용 종류 조회의 자체 상한입니다. 이미 받은 결과를 보이는 시간을 이 이상 늦추지 않습니다.</summary>
     private static readonly TimeSpan SymbolKindTimeout = TimeSpan.FromSeconds(1);
+
+    // 역할 표식 근거를 본 참조 결과 뒤에 기다리는 상한입니다. 종류 판정(SymbolKindTimeout)과 같은 구간에 겹쳐 결과 표시를 크게 늦추지 않습니다.
+    private static readonly TimeSpan RoleTimeout = TimeSpan.FromSeconds(1);
 
     private readonly ClangdNavigatorOptions options;
     private readonly ClangdSession session;
@@ -260,16 +269,48 @@ public sealed class ClangdNavigator : IDisposable
     {
         SyncOpenDocuments(query);
         documents.Acquire(query.Document);
+        // 역할 표식 근거(선언 제외 참조, 정의·선언 이동)는 표시 보조라 본 요청 뒤에 함께 보내고, 본 결과가 온 뒤 정한 시간까지만 기다립니다.
+        // 늦거나 실패하면 그 근거 없이 정합니다. 본 요청이 실패해도 남은 보조 요청은 finally에서 취소합니다.
+        using var roleLimit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
         try
         {
-            var locations = await session.ReferencesAsync(query.Path, query.Line, query.Character, true, cancellationToken).ConfigureAwait(false);
+            var all = session.ReferencesAsync(query.Path, query.Line, query.Character, true, cancellationToken);
+            var uses = Quietly(session.ReferencesAsync(query.Path, query.Line, query.Character, false, roleLimit.Token));
+            var definition = Quietly(session.DefinitionAsync(query.Path, query.Line, query.Character, roleLimit.Token));
+            var declaration = Quietly(session.DeclarationAsync(query.Path, query.Line, query.Character, roleLimit.Token));
+            var locations = await all.ConfigureAwait(false);
+            roleLimit.CancelAfter(RoleTimeout);
             var symbol = await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
             var kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
-            return new NavigationResult(locations, symbol, Progress, false, kind);
+            var plain = await uses.ConfigureAwait(false);
+            // 결과 수 제한에 걸리면 두 참조 결과가 서로 다른 위치에서 잘려 차이가 선언 묶음이 아닙니다.
+            if (plain is not null && (locations.Count >= ReferenceLimit || plain.Count >= ReferenceLimit)) plain = null;
+            var roles = ReferenceRoles.Classify(locations, plain, symbol?.Definition, symbol?.Declaration,
+                await definition.ConfigureAwait(false), await declaration.ConfigureAwait(false));
+            cancellationToken.ThrowIfCancellationRequested();
+            return new NavigationResult(locations, symbol, Progress, false, kind, roles);
         }
         finally
         {
+            roleLimit.Cancel();
             documents.Release(query.Path);
+        }
+    }
+
+    /// <summary>표시 보조 요청의 결과입니다. 시간 상한·취소·요청 거절·연결 끊김은 null(근거 없음)로 둡니다.</summary>
+    private static async Task<IReadOnlyList<NavigationLocation>?> Quietly(Task<IReadOnlyList<NavigationLocation>> request)
+    {
+        try
+        {
+            return await request.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return null;
+        }
+        catch (Exception exception) when (exception is LspRequestException || exception is LspConnectionClosedException)
+        {
+            return null;
         }
     }
 

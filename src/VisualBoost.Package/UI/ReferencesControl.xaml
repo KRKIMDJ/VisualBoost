@@ -118,23 +118,32 @@
       </Grid>
     </DataTemplate>
 
-    <!-- 위치 행: 들여쓰기 · 줄 번호 · 소속 이름 · 코드 미리보기. 행 왼쪽만 훑어도 어디에서 쓰는지 읽히게 소속 이름을 코드 앞에 둡니다.
-         줄 번호는 결과의 최대 자릿수로 앞을 채운 글자라 열 너비를 행끼리 공유하지 않아도 오른쪽 끝이 맞습니다. 소속 이름은 행마다 자기 너비만 씁니다. -->
+    <!-- 위치 행: 들여쓰기 · 줄 번호 · 역할 표식 · 소속 이름 | 코드 미리보기. 행 왼쪽만 훑어도 어디에서 어떻게 쓰는지 읽히게 표식과 소속 이름을 코드 앞에 둡니다.
+         줄 번호는 결과의 최대 자릿수로 앞을 채운 글자라 열 너비를 행끼리 공유하지 않아도 오른쪽 끝이 맞습니다. 표식·소속 이름은 있을 때만 자기 너비를 씁니다.
+         소속 이름과 코드 사이의 세로선은 글꼴·색이 코드와 같아도(선택 행·고대비·종류 모름) 경계가 보이게 하며, 글자가 아니라 복사·필터·화면 읽기에 섞이지 않습니다. -->
     <DataTemplate DataType="{x:Type ui:ReferenceLineRow}">
       <Grid ToolTip="{Binding FullPath}" Margin="{Binding Indent}">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
           <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
         <TextBlock x:Name="LineText" Grid.Column="0" Text="{Binding LineLabel}" Opacity="0.7" VerticalAlignment="Center" Margin="0,0,8,0" />
-        <TextBlock x:Name="ContainerText" Grid.Column="1" Text="{Binding ContainerShortName}" MaxWidth="160" Margin="0,0,8,0"
+        <Border x:Name="RoleBadge" Grid.Column="1" Margin="0,0,6,0" Padding="4,0" CornerRadius="3" VerticalAlignment="Center"
+                Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
+          <TextBlock x:Name="RoleText" Text="{Binding RoleText}" />
+        </Border>
+        <TextBlock x:Name="ContainerText" Grid.Column="2" Text="{Binding ContainerShortName}" MaxWidth="160"
                    VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Container}"
                    ui:KindForeground.Kind="{Binding ContainerKind}"
                    ui:KindForeground.Plain="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
                    ui:KindForeground.Surface="{Binding Background, RelativeSource={RelativeSource AncestorType=UserControl}}"
                    ui:KindForeground.Revision="{Binding (ui:SearchPalette.Revision), RelativeSource={RelativeSource AncestorType=UserControl}}" />
-        <TextBlock x:Name="CodeText" Grid.Column="2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
+        <Border x:Name="ContainerSeparator" Grid.Column="3" Width="1" Margin="6,2"
+                Background="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowBorderKey}}" />
+        <TextBlock x:Name="CodeText" Grid.Column="4" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                    ui:CodeSegments.Before="{Binding Before}"
                    ui:CodeSegments.Match="{Binding Match}"
                    ui:CodeSegments.After="{Binding After}"
@@ -148,6 +157,14 @@
       <DataTemplate.Triggers>
         <DataTrigger Binding="{Binding ContainerShortName}" Value="">
           <Setter TargetName="ContainerText" Property="Visibility" Value="Collapsed" />
+          <Setter TargetName="ContainerSeparator" Property="Visibility" Value="Collapsed" />
+        </DataTrigger>
+        <DataTrigger Binding="{Binding RoleText}" Value="">
+          <Setter TargetName="RoleBadge" Property="Visibility" Value="Collapsed" />
+        </DataTrigger>
+        <!-- 선택 행은 강조색 위라 표식 바탕을 지웁니다. 테두리로 대신하면 행 높이가 바뀌어 선택할 때 목록이 흔들립니다. -->
+        <DataTrigger Binding="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}" Value="True">
+          <Setter TargetName="RoleBadge" Property="Background" Value="Transparent" />
         </DataTrigger>
       </DataTemplate.Triggers>
     </DataTemplate>

@@ -124,8 +124,8 @@ public sealed class ReferenceFileRow
 }
 
 /// <summary>
-/// 참조 위치 한 줄입니다. 항상 파일 머리 행 아래에 오므로 파일 이름은 보이지 않습니다. 왼쪽부터 줄 번호 · 소속 이름 · 코드 순서라
-/// 행 왼쪽만 훑어도 어디에서 쓰는지 읽힙니다.
+/// 참조 위치 한 줄입니다. 항상 파일 머리 행 아래에 오므로 파일 이름은 보이지 않습니다. 왼쪽부터 줄 번호 · 역할 표식 · 소속 이름 · 코드 순서라
+/// 행 왼쪽만 훑어도 어디에서 어떻게 쓰는지 읽힙니다.
 /// </summary>
 public sealed class ReferenceLineRow
 {
@@ -155,6 +155,9 @@ public sealed class ReferenceLineRow
     /// <summary>파일 머리 행의 펼침 표시만큼 더 들여씁니다.</summary>
     public Thickness Indent { get; }
 
+    /// <summary>역할 표식("정의"·"선언")입니다. 근거가 없으면 빈 문자열이고 표식을 숨깁니다.</summary>
+    public string RoleText => Item.RoleText;
+
     /// <summary>소속 이름의 마지막 마디입니다. 전체 이름은 <see cref="Container"/>입니다.</summary>
     public string ContainerShortName => Item.ContainerShortName;
 
@@ -176,8 +179,13 @@ public sealed class ReferenceLineRow
 
     public IReadOnlyList<VisualBoost.Core.Coloring.CodePreviewSpan> PreviewSpans => Item.PreviewSpans;
 
-    /// <summary>화면 읽기 프로그램이 읽는 이름입니다.</summary>
-    public override string ToString() => $"{FileName} {Line}줄: {Code}";
+    /// <summary>화면 읽기 프로그램이 읽는 이름입니다. 화면에 보이는 역할·소속을 함께 읽고, 소속은 전체 이름으로 읽습니다.</summary>
+    public override string ToString()
+    {
+        var role = RoleText.Length == 0 ? string.Empty : " " + RoleText;
+        var container = Container.Length == 0 ? string.Empty : " " + Container;
+        return $"{FileName} {Line}줄{role}{container}: {Code}";
+    }
 }
 
 /// <summary>참조 행들이 함께 쓰는 표시 규칙입니다.</summary>

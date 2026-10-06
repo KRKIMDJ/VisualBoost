@@ -27,9 +27,12 @@ internal sealed class NavigationResultItem
     private CodePreviewKind? containerKind;
     private bool containerKindResolved;
 
-    public NavigationResultItem(NavigationLocation location, string lineText, string? solutionDirectory, SourceSymbolKind? symbolKind = null)
+    public NavigationResultItem(NavigationLocation location, string lineText, string? solutionDirectory, SourceSymbolKind? symbolKind = null,
+        NavigationRole role = NavigationRole.None)
     {
         SymbolKind = symbolKind;
+        Role = role;
+        RoleText = ReferenceRoles.Text(role);
         Location = location;
         FullPath = location.Path;
         FileName = Path.GetFileName(location.Path);
@@ -101,6 +104,12 @@ internal sealed class NavigationResultItem
     /// <summary>일치 구간(<see cref="Match"/>)이 가리키는 심볼의 종류입니다. 이름 색칠에 쓰며 clangd가 판정하지 못하면 null입니다.</summary>
     public SourceSymbolKind? SymbolKind { get; }
 
+    /// <summary>참조 위치의 역할(정의·선언)입니다. clangd 근거가 확실할 때만 있고 모르면 <see cref="NavigationRole.None"/>입니다.</summary>
+    public NavigationRole Role { get; }
+
+    /// <summary>역할 표식 글자("정의"·"선언")입니다. 역할이 없으면 빈 문자열입니다. 필터에 이 글자를 그대로 치면 그 역할의 위치만 남습니다.</summary>
+    public string RoleText { get; }
+
     /// <summary>
     /// 미리보기(<see cref="Before"/>+<see cref="Match"/>+<see cref="After"/>) 좌표의 색 구간입니다. 화면에 처음 그릴 때 한 번 만들고,
     /// 행 재활용·선택 변경으로 다시 그릴 때는 그대로 씁니다. 결과는 수천 개일 수 있어 보이는 행만 분류하도록 미룹니다. UI thread에서만 읽습니다.
@@ -111,7 +120,8 @@ internal sealed class NavigationResultItem
         FileName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Folder.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Code.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
-        Container.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
+        Container.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
+        (RoleText.Length > 0 && string.Equals(RoleText, query, StringComparison.Ordinal));
 
     private IReadOnlyList<CodePreviewSpan> CreatePreviewSpans()
     {
