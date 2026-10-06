@@ -24,6 +24,8 @@ internal sealed class NavigationResultItem
     private readonly int visibleEnd;
     private readonly int previewShift;
     private IReadOnlyList<CodePreviewSpan>? previewSpans;
+    private CodePreviewKind? containerKind;
+    private bool containerKindResolved;
 
     public NavigationResultItem(NavigationLocation location, string lineText, string? solutionDirectory, SourceSymbolKind? symbolKind = null)
     {
@@ -47,6 +49,7 @@ internal sealed class NavigationResultItem
         previewShift = Before.Length - Math.Min(before.Length, MaxBefore);
         Code = (Before + Match + After).Trim();
         Container = location.Container ?? string.Empty;
+        ContainerShortName = LastSegment(Container);
     }
 
     public NavigationLocation Location { get; }
@@ -72,6 +75,28 @@ internal sealed class NavigationResultItem
 
     /// <summary>참조가 들어 있는 함수·클래스 이름입니다. 모르면 빈 문자열입니다.</summary>
     public string Container { get; }
+
+    /// <summary>
+    /// <see cref="Container"/>의 마지막 이름 마디입니다(<c>Game::Tick</c> → <c>Tick</c>). 템플릿 인수 안의 <c>::</c>로는 나누지 않습니다.
+    /// 좁은 행에서도 소속을 읽을 수 있게 보이는 이름이며, 전체 이름은 툴팁에 둡니다.
+    /// </summary>
+    public string ContainerShortName { get; }
+
+    /// <summary>
+    /// 소속 이름(<see cref="ContainerShortName"/>)의 종류입니다. 이름 인덱스가 정확히 같은 이름을 한 그룹으로 판정할 때만
+    /// 타입·함수·네임스페이스로 두고, 모르면 추측하지 않고 null입니다. 처음 읽을 때 한 번 판정해 둡니다. UI thread에서만 읽습니다.
+    /// </summary>
+    public CodePreviewKind? ContainerKind
+    {
+        get
+        {
+            if (containerKindResolved) return containerKind;
+            containerKindResolved = true;
+            var kind = ContainerShortName.Length == 0 ? null : CodePreviewStyle.NameKind?.Invoke(ContainerShortName);
+            containerKind = kind is CodePreviewKind.Type or CodePreviewKind.Function or CodePreviewKind.Namespace ? kind : null;
+            return containerKind;
+        }
+    }
 
     /// <summary>일치 구간(<see cref="Match"/>)이 가리키는 심볼의 종류입니다. 이름 색칠에 쓰며 clangd가 판정하지 못하면 null입니다.</summary>
     public SourceSymbolKind? SymbolKind { get; }
@@ -99,6 +124,33 @@ internal sealed class NavigationResultItem
         }
 
         return result.AsReadOnly();
+    }
+
+    /// <summary>바깥 단계(꺾쇠·괄호 밖)의 마지막 <c>::</c> 뒤 이름입니다. 나눌 곳이 없으면 그대로 돌려줍니다.</summary>
+    internal static string LastSegment(string qualified)
+    {
+        var depth = 0;
+        var start = 0;
+        for (var index = 0; index < qualified.Length; index++)
+        {
+            switch (qualified[index])
+            {
+                case '<':
+                case '(':
+                    depth++;
+                    break;
+                case '>':
+                case ')':
+                    if (depth > 0) depth--;
+                    break;
+                case ':' when depth == 0 && index + 1 < qualified.Length && qualified[index + 1] == ':':
+                    start = index + 2;
+                    index++;
+                    break;
+            }
+        }
+
+        return qualified.Substring(start);
     }
 
     private static string RelativeFolder(string path, string? solutionDirectory)
@@ -219,5 +271,39 @@ public static class CodeSegments
         if (bold) run.FontWeight = FontWeights.Bold;
         if (brush is not null) run.Foreground = brush;
         return run;
+    }
+}
+
+/// <summary>
+/// 이름 하나만 담은 글자(참조 위치 행의 소속 이름 등)를 그 이름 종류의 의미 기반 색으로 칠합니다. 종류를 모르거나, 선택 행(<see cref="PlainProperty"/>)이거나,
+/// 고대비 모드이면 색을 지우고 행 전경색을 상속합니다. 연결 방식은 <see cref="CodeSegments"/>와 같습니다.
+/// </summary>
+public static class KindForeground
+{
+    public static readonly DependencyProperty KindProperty = DependencyProperty.RegisterAttached(
+        "Kind", typeof(CodePreviewKind?), typeof(KindForeground), new PropertyMetadata(null, Refresh));
+    public static readonly DependencyProperty PlainProperty = DependencyProperty.RegisterAttached(
+        "Plain", typeof(bool), typeof(KindForeground), new PropertyMetadata(false, Refresh));
+    public static readonly DependencyProperty SurfaceProperty = DependencyProperty.RegisterAttached(
+        "Surface", typeof(Brush), typeof(KindForeground), new PropertyMetadata(null, Refresh));
+    public static readonly DependencyProperty RevisionProperty = DependencyProperty.RegisterAttached(
+        "Revision", typeof(int), typeof(KindForeground), new PropertyMetadata(0, Refresh));
+
+    public static CodePreviewKind? GetKind(DependencyObject target) => (CodePreviewKind?)target.GetValue(KindProperty);
+    public static void SetKind(DependencyObject target, CodePreviewKind? value) => target.SetValue(KindProperty, value);
+    public static bool GetPlain(DependencyObject target) => (bool)target.GetValue(PlainProperty);
+    public static void SetPlain(DependencyObject target, bool value) => target.SetValue(PlainProperty, value);
+    public static Brush? GetSurface(DependencyObject target) => (Brush?)target.GetValue(SurfaceProperty);
+    public static void SetSurface(DependencyObject target, Brush? value) => target.SetValue(SurfaceProperty, value);
+    public static int GetRevision(DependencyObject target) => (int)target.GetValue(RevisionProperty);
+    public static void SetRevision(DependencyObject target, int value) => target.SetValue(RevisionProperty, value);
+
+    private static void Refresh(DependencyObject target, DependencyPropertyChangedEventArgs args)
+    {
+        if (target is not TextBlock textBlock) return;
+        var dark = GetSurface(target) is not SolidColorBrush surface || SemanticColorPalette.IsDark(surface.Color.R, surface.Color.G, surface.Color.B);
+        var brush = !GetPlain(target) && GetKind(target) is { } kind ? CodePreviewStyle.BrushFor(kind, dark) : null;
+        if (brush is null) textBlock.ClearValue(TextBlock.ForegroundProperty);
+        else textBlock.Foreground = brush;
     }
 }

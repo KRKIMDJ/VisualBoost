@@ -9,6 +9,7 @@ using System.Windows.Documents;
 using System.Windows.Media;
 using System.Windows.Media.Imaging;
 using System.Xml.Linq;
+using VisualBoost.Core.Coloring;
 using VisualBoost.Core.Indexing;
 using VisualBoost.Core.SemanticNavigation;
 using VisualBoost.UI;
@@ -27,13 +28,15 @@ internal static class ReferenceResultsTests
         Model();
         Modes();
         Order();
+        Grouping();
+        Layout();
         Menu();
         CopyFormats();
         History();
         InitialValuesDoNotRaiseHandlers(root);
         SharedListFont(root);
         Xaml(root, output);
-        Console.WriteLine("PASS: 참조 결과 창의 파일별 묶기·범위·필터·접기·우클릭 메뉴·최근 결과와 행 템플릿");
+        Console.WriteLine("PASS: 참조 결과 창의 프로젝트·파일별 묶기·범위·필터·접기·우클릭 메뉴·최근 결과와 행 템플릿");
     }
 
     private static void Model()
@@ -186,6 +189,162 @@ internal static class ReferenceResultsTests
         Assert(earlyOrder.StartsWith("Foo.cpp Foo.h Baz.cpp Baz.cpp Bar.cpp", StringComparison.Ordinal), "소속 목록 전 순서: " + earlyOrder);
     }
 
+    private static void Grouping()
+    {
+        // 프로젝트 머리 행은 모든 프로젝트 모드에서 결과가 둘 이상의 묶음(프로젝트·프로젝트 밖)에 걸칠 때만 둡니다.
+        var model = new ReferenceResultsModel();
+        model.Show(Sample("FMod::Compute"));
+        Assert(!model.IsGrouped && Shape(model).StartsWith("F:", StringComparison.Ordinal), "소속 목록 전에는 한 묶음이라 머리 행 없음: " + Shape(model));
+        model.SetProjects(Catalog(withProject: true));
+        Assert(model.IsGrouped && Shape(model) == "P:Game(4) F:Use.cpp(3) L:3 L:8 L:20 F:Other.cpp(1) L:2 P:프로젝트 밖(1) F:Mod.h(1) L:5",
+            "프로젝트별 묶기: " + Shape(model));
+        var game = model.Rows.OfType<ReferenceProjectRow>().First();
+        var outside = model.Rows.OfType<ReferenceProjectRow>().Last();
+        Assert(game.Name == "Game" && !game.IsOutside && game.IconKind == "project" && game.Glyph == "▾" && game.ToString() == "Game, 4개 위치",
+            "프로젝트 머리 행은 범위 이름 앞말 없이: " + game);
+        Assert(outside.Key == ReferenceResultsModel.OutsideKey && outside.IsOutside && outside.IconKind == "unknown" && outside.Name == ReferenceResultsModel.OutsideName,
+            "프로젝트 밖 머리 행");
+        Assert(model.Rows.OfType<ReferenceFileRow>().All(row => row.Indent.Left == ReferenceRowText.LevelWidth) &&
+               model.Rows.OfType<ReferenceLineRow>().All(row => row.Indent.Left == ReferenceRowText.LevelWidth + ReferenceRowText.GlyphWidth),
+            "묶이면 파일·위치 행을 한 단계 들여씀");
+        Assert(model.Summary == "5개 위치 · 3개 파일 · 색인 진행 중", "묶어도 요약은 위치·파일 수: " + model.Summary);
+
+        // 필터를 치는 동안 묶음 여부가 흔들리지 않게 필터 전 위치로 정하고, 머리 행 수는 보이는 수/전체입니다.
+        model.Filter = "tick";
+        Assert(Shape(model) == "P:Game(1/4) F:Use.cpp(1/3) L:8", "필터 중 머리 행: " + Shape(model));
+        model.Filter = string.Empty;
+
+        // 묶음 접기는 파일 접기와 같은 기억을 쓰고, 접힌 묶음의 위치도 보이는 결과(복사 대상)에 남깁니다.
+        model.SetExpanded(game.Key, false);
+        Assert(Shape(model) == "P:Game(4) P:프로젝트 밖(1) F:Mod.h(1) L:5" && !model.IsExpanded(game.Key) && model.VisibleCount == 5 &&
+               model.Rows.OfType<ReferenceProjectRow>().First().Glyph == "▸", "프로젝트 접기: " + Shape(model));
+        Assert(string.Join(",", model.VisibleItems.Select(item => item.FileName + ":" + item.Line)) == "Use.cpp:3,Use.cpp:8,Use.cpp:20,Other.cpp:2,Mod.h:5",
+            "보이는 결과는 묶음 순서");
+        var foldedHead = model.Rows.OfType<ReferenceProjectRow>().First();
+        Assert(Describe(ReferenceMenu.Entries(foldedHead, model)) == "펼치기[→] | 보이는 결과 모두 복사 | 전부 펼치기 전부 접기",
+            "접힌 프로젝트 머리 행 메뉴: " + Describe(ReferenceMenu.Entries(foldedHead, model)));
+        model.SetAllExpanded(false);
+        Assert(Shape(model) == "P:Game(4) P:프로젝트 밖(1)" && Describe(ReferenceMenu.Entries(null, model)) == "전부 펼치기 전부 접기(꺼짐)",
+            "전부 접기는 프로젝트·파일 모두: " + Shape(model));
+        model.SetExpanded(game.Key, true);
+        Assert(Shape(model) == "P:Game(4) F:Use.cpp(3) F:Other.cpp(1) P:프로젝트 밖(1)", "프로젝트만 펼치면 파일은 접힌 채: " + Shape(model));
+        model.SetAllExpanded(true);
+        Assert(model.Rows.Count == 10, "전부 펼치기는 두 단계 모두");
+        var head = model.Rows.OfType<ReferenceProjectRow>().First();
+        Assert(Describe(ReferenceMenu.Entries(head, model)) == "접기[←] | 보이는 결과 모두 복사 | 전부 펼치기(꺼짐) 전부 접기",
+            "프로젝트 머리 행 메뉴: " + Describe(ReferenceMenu.Entries(head, model)));
+
+        // 현재 프로젝트 모드는 이미 한 프로젝트라 머리 행 없이 파일부터 보입니다.
+        model.SetMode(ReferenceScopeMode.CurrentProject);
+        Assert(!model.IsGrouped && Shape(model) == "F:Use.cpp(3) L:3 L:8 L:20 F:Other.cpp(1) L:2" &&
+               model.Rows.OfType<ReferenceFileRow>().All(row => row.Indent.Left == 0) &&
+               model.Rows.OfType<ReferenceLineRow>().All(row => row.Indent.Left == ReferenceRowText.GlyphWidth), "현재 프로젝트 모드는 머리 행 없음: " + Shape(model));
+
+        // 결과가 한 프로젝트 안에만 있으면 모든 프로젝트 모드에서도 머리 행을 두지 않습니다.
+        var single = new ReferenceResultsModel();
+        single.Show(new ReferenceResultSet("FMod::Compute", new[] { Item(Use, 3, "Use", "return FMod::Compute(1);"), Item(Other, 2, "Other", "return FMod::Compute(2);") },
+            string.Empty, DateTime.Now, Use));
+        single.SetProjects(Catalog(withProject: true));
+        Assert(!single.IsGrouped && Shape(single) == "F:Use.cpp(1) L:3 F:Other.cpp(1) L:2", "한 프로젝트뿐이면 머리 행 없음: " + Shape(single));
+
+        // 여러 프로젝트에 등록된 공유 헤더는 요청한 파일의 프로젝트에, 그렇지 않으면 범위 목록 순서(프로젝트 이름순)상 첫 프로젝트에 묶습니다.
+        // 요청한 파일의 프로젝트가 맨 앞입니다.
+        var shared = Path.Combine(Root, "Source", "Shared", "Shared.h");
+        var tool = Path.Combine(Root, "Source", "Tools", "Tool.cpp");
+        var editor = Path.Combine(Root, "Source", "Editor", "Editor.cpp");
+        var projects = new[]
+        {
+            SymbolSearchScope.Project(Path.Combine(Root, "Tools.vcxproj"), "Tools", new[] { tool, shared }),
+            SymbolSearchScope.Project(Path.Combine(Root, "Editor.vcxproj"), "Editor", new[] { editor }),
+            SymbolSearchScope.Project(Path.Combine(Root, "Game.vcxproj"), "Game", new[] { Use, shared }),
+        };
+        var catalog = SymbolSearchScope.CreateCatalog(projects, new[] { tool, shared, editor, Use }, new[] { EngineRoot });
+        var items = new[] { Item(shared, 1, "", "int Compute();"), Item(tool, 2, "", "Compute();"), Item(editor, 3, "", "Compute();"), Item(Use, 4, "", "Compute();") };
+        string Owners(string origin)
+        {
+            var grouped = new ReferenceResultsModel();
+            grouped.Show(new ReferenceResultSet("Compute", items, string.Empty, DateTime.Now, origin));
+            grouped.SetProjects(catalog);
+            var owner = string.Empty;
+            var result = new List<string>();
+            foreach (var row in grouped.Rows)
+            {
+                if (row is ReferenceProjectRow project) owner = project.Name;
+                else if (row is ReferenceFileRow file) result.Add(file.FileName + "@" + owner);
+            }
+
+            return string.Join(" ", result);
+        }
+
+        // Shared.h는 Game·Tools 둘에 등록돼 있습니다. Tools에서 찾으면 Tools에, Game 밖(Editor)에서 찾으면 이름순 첫 프로젝트 Game에 묶습니다.
+        var fromTools = Owners(tool);
+        var fromEditor = Owners(editor);
+        Assert(fromTools.StartsWith("Tool.cpp@Tools ", StringComparison.Ordinal) && fromTools.Contains("Shared.h@Tools") && fromTools.Contains("Use.cpp@Game"),
+            "공유 헤더는 요청한 파일의 프로젝트에: " + fromTools);
+        Assert(fromEditor.StartsWith("Editor.cpp@Editor ", StringComparison.Ordinal) && fromEditor.Contains("Shared.h@Game") && fromEditor.Contains("Tool.cpp@Tools"),
+            "요청한 파일의 프로젝트에 없으면 목록 순서상 첫 프로젝트에: " + fromEditor);
+    }
+
+    private static void Layout()
+    {
+        // 소속 이름은 바깥 단계의 마지막 이름 마디만 보입니다. 템플릿 인수 안의 ::로는 나누지 않습니다.
+        string Last(string name) => NavigationResultItem.LastSegment(name);
+        Assert(Last("Game::Tick") == "Tick" && Last("Tick") == "Tick" && Last(string.Empty) == string.Empty && Last("::Run") == "Run" &&
+               Last("ns::TMap<a::B, c::D>") == "TMap<a::B, c::D>" && Last("ns::Outer<a::B>::Inner") == "Inner" &&
+               Last("(anonymous namespace)::Helper") == "Helper", "소속 짧은 이름");
+        var tick = Item(Use, 8, "Game::Tick", "    Total += FMod::Compute(Delta);");
+        Assert(tick.ContainerShortName == "Tick" && tick.Container == "Game::Tick" && Item(Use, 20, string.Empty, "x").ContainerShortName.Length == 0,
+            "위치 항목의 소속 짧은 이름·전체 이름");
+
+        // 줄 번호는 결과 전체의 최대 자릿수로 앞을 숫자 폭 공백으로 채웁니다. 필터로 줄어도 자릿수는 그대로입니다.
+        var model = new ReferenceResultsModel();
+        model.Show(Sample("FMod::Compute"));
+        string Labels() => string.Join(",", model.Rows.OfType<ReferenceLineRow>().Select(row => row.LineLabel.Replace('\u2007', '_')));
+        Assert(Labels() == "_3,_8,20,_5,_2", "줄 번호 앞 채움: " + Labels());
+        model.Filter = "tick";
+        Assert(Labels() == "_8", "필터 뒤에도 같은 자릿수: " + Labels());
+        Assert(ReferenceRowText.LineLabel("7", 0) == "7" && ReferenceRowText.LineLabel("123", 2) == "123", "자릿수보다 긴 줄 번호는 그대로");
+
+        // 소속 이름의 색은 이름 인덱스가 타입·함수·네임스페이스 한 그룹으로 판정할 때만 칠하고, 다른 판정이나 모르는 이름은 추측하지 않습니다.
+        try
+        {
+            CodePreviewStyle.NameKind = name => name switch
+            {
+                "Tick" => CodePreviewKind.Function,
+                "FMod" => CodePreviewKind.Type,
+                "Game" => CodePreviewKind.Namespace,
+                "Value" => CodePreviewKind.Variable,
+                _ => null,
+            };
+            CodePreviewKind? Kind(string container) => Item(Use, 1, container, "Compute();").ContainerKind;
+            Assert(Kind("Game::Tick") == CodePreviewKind.Function && Kind("FMod") == CodePreviewKind.Type && Kind("Game") == CodePreviewKind.Namespace &&
+                   Kind("Value") is null && Kind("Unknown") is null && Kind(string.Empty) is null, "소속 이름 종류 판정");
+            var cached = Item(Use, 1, "Game::Tick", "Compute();");
+            _ = cached.ContainerKind;
+            CodePreviewStyle.NameKind = _ => null;
+            Assert(cached.ContainerKind == CodePreviewKind.Function, "항목마다 한 번 판정");
+        }
+        finally
+        {
+            CodePreviewStyle.NameKind = null;
+        }
+
+        // 선택 행·종류 모름에서는 색을 지워 행 전경색을 상속합니다. 바탕이 없으면 어두운 바탕 색을 씁니다.
+        if (!SystemParameters.HighContrast)
+        {
+            var text = new TextBlock();
+            KindForeground.SetKind(text, CodePreviewKind.Function);
+            Assert(CodePreviewStyle.BrushFor(CodePreviewKind.Function, true) is { } dark && ReferenceEquals(text.Foreground, dark), "소속 이름 함수 색");
+            KindForeground.SetSurface(text, Brushes.White);
+            Assert(ReferenceEquals(text.Foreground, CodePreviewStyle.BrushFor(CodePreviewKind.Function, false)), "밝은 바탕 색");
+            KindForeground.SetPlain(text, true);
+            Assert(text.ReadLocalValue(TextBlock.ForegroundProperty) == DependencyProperty.UnsetValue, "선택 행은 색 없음");
+            KindForeground.SetPlain(text, false);
+            KindForeground.SetKind(text, null);
+            Assert(text.ReadLocalValue(TextBlock.ForegroundProperty) == DependencyProperty.UnsetValue, "종류 모름은 색 없음");
+        }
+    }
+
     private static void Menu()
     {
         var model = new ReferenceResultsModel();
@@ -325,8 +484,12 @@ internal static class ReferenceResultsTests
         var element = Program.LoadXaml(root, "ReferencesControl");
         var window = new Window { Content = element, Width = 1000, Height = 360, Left = -20000, ShowInTaskbar = false };
         var model = new ReferenceResultsModel();
+        // 소속 이름 색을 보려고 이름 판정을 잠시 연결합니다. 항목은 처음 읽을 때 한 번 판정하므로 결과를 만들기 전에 연결합니다.
+        CodePreviewStyle.NameKind = name => name is "Tick" or "Use" ? CodePreviewKind.Function : null;
         model.Show(Sample("FMod::Compute"));
         model.SetProjects(Catalog(withProject: true));
+        _ = model.Rows.OfType<ReferenceLineRow>().Select(row => row.ContainerKind).ToArray();
+        CodePreviewStyle.NameKind = null;
         var list = (ListBox)element.FindName("ResultsList");
         ((TextBlock)element.FindName("SymbolText")).Text = model.Current!.Symbol;
         ((TextBlock)element.FindName("SummaryText")).Text = model.Summary;
@@ -356,7 +519,8 @@ internal static class ReferenceResultsTests
         Assert(items.Length == model.Rows.Count, "행 컨테이너 수");
         var texts = Program.Descendants<TextBlock>(list).Where(text => text.IsVisible).ToArray();
         Assert(texts.Any(text => text.Text == "Use.cpp" && text.FontWeight == FontWeights.SemiBold) && texts.Any(text => text.Text == "3"), "파일 머리 행: 이름·위치 수");
-        Assert(texts.Any(text => text.Text == "Game::Tick"), "위치 행: 포함 함수");
+        var tickText = texts.Single(text => text.Name == "ContainerText" && text.Text == "Tick");
+        Assert((string)tickText.ToolTip == "Game::Tick" && !texts.Any(text => text.Text == "Game::Tick"), "위치 행: 소속 짧은 이름, 전체 이름은 툴팁");
         Assert(items.Where(item => item.DataContext is ReferenceLineRow).All(item => Program.Descendants<TextBlock>(item).All(text => text.Text != "Use.cpp" || !text.IsVisible)),
             "위치 행에는 파일 이름을 다시 보이지 않음");
         var codes = texts.Where(text => text.Name == "CodeText").ToArray();
@@ -375,6 +539,41 @@ internal static class ReferenceResultsTests
                lineItems.All(item => !Program.Descendants<ProductIcon>(item).Any()), "파일 머리 행 앞에 파일 형식 제품 아이콘");
         var noContainer = items.First(item => item.DataContext is ReferenceLineRow { Container: "" });
         Assert(Program.Descendants<TextBlock>(noContainer).All(text => text.Name != "ContainerText" || !text.IsVisible), "포함 함수가 없으면 숨김");
+
+        // 프로젝트 머리 행: 펼침 표시 · 프로젝트 아이콘(프로젝트 밖은 미확인 아이콘) · 굵은 이름 · 위치 수. 파일 행은 그 아래 한 단계 들여씁니다.
+        var projectItems = items.Where(item => item.DataContext is ReferenceProjectRow).ToArray();
+        Assert(projectItems.Length == 2 && projectItems.All(item => item.ActualHeight < 24 && Fits(item)),
+            "프로젝트 머리 행 높이: " + string.Join(",", projectItems.Select(item => item.ActualHeight)));
+        Assert(projectItems.All(item => Program.Descendants<ProductIcon>(item).Single() is { Name: "ProjectIcon" } icon && icon.IsVisible &&
+                                        ReferenceEquals(icon.Source, ProductIcons.Symbol(((ReferenceProjectRow)item.DataContext).IsOutside ? "unknown" : "project"))),
+            "프로젝트 머리 행 아이콘");
+        Assert(texts.Any(text => text.Text == "Game" && text.FontWeight == FontWeights.Bold) &&
+               texts.Any(text => text.Text == ReferenceResultsModel.OutsideName && text.FontWeight == FontWeights.Bold) && texts.Any(text => text.Text == "4"),
+            "프로젝트 머리 행: 굵은 이름·위치 수");
+        double X(FrameworkElement part) => part.TranslatePoint(new Point(0, 0), list).X;
+        FrameworkElement Part(ListBoxItem item, string name) => Program.Descendants<FrameworkElement>(item).Single(part => part.Name == name);
+        Assert(Math.Abs(X(Part(fileItems[0], "FileIcon")) - X(Part(projectItems[0], "ProjectIcon")) - ReferenceRowText.LevelWidth) < 0.5,
+            "묶이면 파일 머리 행을 한 단계 들여씀");
+
+        // 위치 행: 줄 번호 → 소속 이름 → 코드. 줄 번호는 파일 아이콘 열에서 시작하고 오른쪽 끝이 맞습니다.
+        Assert(lineItems.All(item => Math.Abs(X(Part(item, "LineText")) - X(Part(fileItems[0], "FileIcon"))) < 0.5), "줄 번호는 파일 아이콘 열에서 시작");
+        var lineRights = lineItems.Select(item => X(Part(item, "LineText")) + Part(item, "LineText").ActualWidth).ToArray();
+        Assert(lineRights.Max() - lineRights.Min() < 0.6, "줄 번호 오른쪽 끝 맞춤: " + string.Join(",", lineRights));
+        Assert(lineItems.Where(item => ((ReferenceLineRow)item.DataContext).ContainerShortName.Length > 0)
+                .All(item => X(Part(item, "LineText")) < X(Part(item, "ContainerText")) && X(Part(item, "ContainerText")) < X(Part(item, "CodeText"))),
+            "줄 번호 → 소속 이름 → 코드 순서");
+        Assert(X(Part(noContainer, "CodeText")) < X(Part(lineItems.First(item => item.DataContext is ReferenceLineRow { Container: "Game::Tick" }), "CodeText")),
+            "소속 이름이 없으면 빈 칸 없이 코드가 붙음");
+        if (!SystemParameters.HighContrast)
+        {
+            var dark = KindForeground.GetSurface(tickText) is not SolidColorBrush surface ||
+                       SemanticColorPalette.IsDark(surface.Color.R, surface.Color.G, surface.Color.B);
+            Assert(CodePreviewStyle.BrushFor(CodePreviewKind.Function, dark) is { } function && ReferenceEquals(tickText.Foreground, function), "소속 이름 함수 색");
+            var selected = (ListBoxItem)list.ItemContainerGenerator.ContainerFromIndex(list.SelectedIndex);
+            Assert(selected.DataContext is ReferenceLineRow { ContainerKind: CodePreviewKind.Function } &&
+                   Part(selected, "ContainerText").ReadLocalValue(TextBlock.ForegroundProperty) == DependencyProperty.UnsetValue, "선택 행 소속 이름은 행 전경색");
+        }
+
         Save(window, Path.Combine(output, "ReferencesControl.png"));
 
         // 현재 프로젝트에 위치가 없으면 빈 안내를 보입니다.
@@ -443,6 +642,7 @@ internal static class ReferenceResultsTests
 
     private static string Shape(ReferenceResultsModel model) => string.Join(" ", model.Rows.Select(row => row switch
     {
+        ReferenceProjectRow project => $"P:{project.Name}({project.Count})",
         ReferenceFileRow file => $"F:{file.FileName}({file.Count})",
         ReferenceLineRow line => "L:" + line.Line,
         _ => "?",

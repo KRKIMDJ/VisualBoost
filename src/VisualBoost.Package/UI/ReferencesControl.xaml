@@ -75,9 +75,30 @@
       </Setter>
     </Style>
 
-    <!-- 파일 머리 행: 펼침 표시 · 파일 이름 · 폴더 · 위치 수. 한 화면에 위치를 많이 보이도록 행은 글자 높이에 위아래 1 DIP만 둡니다. -->
+    <!-- 프로젝트 머리 행: 펼침 표시 · 프로젝트 아이콘 · 이름 · 위치 수. 모든 프로젝트 모드에서 결과가 둘 이상의 묶음에 걸칠 때만 나옵니다. -->
+    <DataTemplate DataType="{x:Type ui:ReferenceProjectRow}">
+      <Grid ToolTip="{Binding ToolTip}">
+        <Grid.ColumnDefinitions>
+          <ColumnDefinition Width="18" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
+          <ColumnDefinition Width="Auto" />
+        </Grid.ColumnDefinitions>
+        <TextBlock x:Name="Glyph" Grid.Column="0" Text="{Binding Glyph}" VerticalAlignment="Center" HorizontalAlignment="Center"
+                   Background="Transparent" Cursor="Hand" />
+        <ui:ProductIcon x:Name="ProjectIcon" Grid.Column="1" SymbolKind="{Binding IconKind}" Width="16" Height="16" Margin="0,0,4,0" VerticalAlignment="Center" />
+        <TextBlock Grid.Column="2" Text="{Binding Name}" FontWeight="Bold" VerticalAlignment="Center" TextTrimming="CharacterEllipsis" />
+        <Border Grid.Column="3" Margin="8,0,4,0" Padding="6,0" CornerRadius="8" VerticalAlignment="Center"
+                Background="{DynamicResource {x:Static vsshell:VsBrushes.SearchBoxBackgroundKey}}">
+          <TextBlock Text="{Binding Count}" />
+        </Border>
+      </Grid>
+    </DataTemplate>
+
+    <!-- 파일 머리 행: 펼침 표시 · 파일 이름 · 폴더 · 위치 수. 한 화면에 위치를 많이 보이도록 행은 글자 높이에 위아래 1 DIP만 둡니다.
+         프로젝트로 묶이면 한 단계(16 DIP) 들여씁니다. -->
     <DataTemplate DataType="{x:Type ui:ReferenceFileRow}">
-      <Grid ToolTip="{Binding FullPath}">
+      <Grid ToolTip="{Binding FullPath}" Margin="{Binding Indent}">
         <Grid.ColumnDefinitions>
           <ColumnDefinition Width="18" />
           <ColumnDefinition Width="Auto" />
@@ -97,16 +118,22 @@
       </Grid>
     </DataTemplate>
 
-    <!-- 위치 행: 들여쓰기 · 줄 · 코드 미리보기 · 포함 함수 -->
+    <!-- 위치 행: 들여쓰기 · 줄 번호 · 소속 이름 · 코드 미리보기. 행 왼쪽만 훑어도 어디에서 쓰는지 읽히게 소속 이름을 코드 앞에 둡니다.
+         줄 번호는 결과의 최대 자릿수로 앞을 채운 글자라 열 너비를 행끼리 공유하지 않아도 오른쪽 끝이 맞습니다. 소속 이름은 행마다 자기 너비만 씁니다. -->
     <DataTemplate DataType="{x:Type ui:ReferenceLineRow}">
-      <Grid ToolTip="{Binding FullPath}">
+      <Grid ToolTip="{Binding FullPath}" Margin="{Binding Indent}">
         <Grid.ColumnDefinitions>
-          <ColumnDefinition Width="18" />
-          <ColumnDefinition Width="52" />
-          <ColumnDefinition Width="*" />
           <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="Auto" />
+          <ColumnDefinition Width="*" />
         </Grid.ColumnDefinitions>
-        <TextBlock Grid.Column="1" Text="{Binding Line}" Opacity="0.7" HorizontalAlignment="Right" VerticalAlignment="Center" Margin="0,0,12,0" />
+        <TextBlock x:Name="LineText" Grid.Column="0" Text="{Binding LineLabel}" Opacity="0.7" VerticalAlignment="Center" Margin="0,0,8,0" />
+        <TextBlock x:Name="ContainerText" Grid.Column="1" Text="{Binding ContainerShortName}" MaxWidth="160" Margin="0,0,8,0"
+                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Container}"
+                   ui:KindForeground.Kind="{Binding ContainerKind}"
+                   ui:KindForeground.Plain="{Binding IsSelected, RelativeSource={RelativeSource AncestorType=ListBoxItem}}"
+                   ui:KindForeground.Surface="{Binding Background, RelativeSource={RelativeSource AncestorType=UserControl}}"
+                   ui:KindForeground.Revision="{Binding (ui:SearchPalette.Revision), RelativeSource={RelativeSource AncestorType=UserControl}}" />
         <TextBlock x:Name="CodeText" Grid.Column="2" VerticalAlignment="Center" TextTrimming="CharacterEllipsis"
                    ui:CodeSegments.Before="{Binding Before}"
                    ui:CodeSegments.Match="{Binding Match}"
@@ -117,11 +144,9 @@
                    ui:CodeSegments.Surface="{Binding Background, RelativeSource={RelativeSource AncestorType=UserControl}}"
                    ui:CodeSegments.Revision="{Binding (ui:SearchPalette.Revision), RelativeSource={RelativeSource AncestorType=UserControl}}"
                    ToolTip="{Binding Code}" />
-        <TextBlock x:Name="ContainerText" Grid.Column="3" Text="{Binding Container}" Opacity="0.65" MaxWidth="280" Margin="12,0,4,0"
-                   VerticalAlignment="Center" TextTrimming="CharacterEllipsis" ToolTip="{Binding Container}" />
       </Grid>
       <DataTemplate.Triggers>
-        <DataTrigger Binding="{Binding Container}" Value="">
+        <DataTrigger Binding="{Binding ContainerShortName}" Value="">
           <Setter TargetName="ContainerText" Property="Visibility" Value="Collapsed" />
         </DataTrigger>
       </DataTemplate.Triggers>

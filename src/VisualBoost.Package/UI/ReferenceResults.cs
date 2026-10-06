@@ -4,6 +4,7 @@ using System.ComponentModel;
 using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Windows;
 using VisualBoost.Core.Indexing;
 
 namespace VisualBoost.UI;
@@ -50,17 +51,60 @@ internal sealed class ReferenceResultSet
     public override string ToString() => Title;
 }
 
+/// <summary>
+/// 참조 결과의 프로젝트 머리 행입니다. 모든 프로젝트 모드에서 결과가 둘 이상의 묶음(프로젝트·프로젝트 밖)에 걸칠 때만 둡니다.
+/// XAML 형식별 템플릿이 찾을 수 있게 공개합니다.
+/// </summary>
+public sealed class ReferenceProjectRow
+{
+    internal ReferenceProjectRow(string key, string name, bool isOutside, int count, int total, bool isExpanded)
+    {
+        Key = key;
+        Name = name;
+        IsOutside = isOutside;
+        Count = ReferenceRowText.Count(count, total);
+        IsExpanded = isExpanded;
+    }
+
+    /// <summary>접기 상태와 선택을 기억하는 키입니다. 프로젝트 범위 Id이거나 프로젝트 밖 묶음 키(<see cref="ReferenceResultsModel.OutsideKey"/>)입니다.</summary>
+    public string Key { get; }
+
+    public string Name { get; }
+
+    /// <summary>어느 프로젝트에도 속하지 않은 파일(엔진·소속 미확인)의 묶음입니다.</summary>
+    public bool IsOutside { get; }
+
+    /// <summary>머리 행 아이콘 이름입니다(<see cref="ProductIcons.Symbol"/>).</summary>
+    public string IconKind => IsOutside ? "unknown" : "project";
+
+    public string ToolTip => IsOutside ? "어느 프로젝트에도 속하지 않은 파일(엔진·소속 미확인)" : Name;
+
+    /// <summary>이 묶음의 위치 수입니다. 필터로 일부만 보이면 "보이는 수/전체"입니다.</summary>
+    public string Count { get; }
+
+    public bool IsExpanded { get; }
+
+    public string Glyph => IsExpanded ? "▾" : "▸";
+
+    /// <summary>화면 읽기 프로그램이 읽는 이름입니다.</summary>
+    public override string ToString() => $"{Name}, {Count}개 위치";
+}
+
 /// <summary>참조 결과의 파일 머리 행입니다. XAML 형식별 템플릿이 찾을 수 있게 공개합니다.</summary>
 public sealed class ReferenceFileRow
 {
-    internal ReferenceFileRow(NavigationResultItem first, int count, int total, bool isExpanded)
+    internal ReferenceFileRow(NavigationResultItem first, int count, int total, bool isExpanded, int level = 0)
     {
         FullPath = first.FullPath;
         FileName = first.FileName;
         Folder = first.Folder;
-        Count = count == total ? count.ToString("N0", CultureInfo.CurrentCulture) : $"{count:N0}/{total:N0}";
+        Count = ReferenceRowText.Count(count, total);
         IsExpanded = isExpanded;
+        Indent = ReferenceRowText.Indent(level);
     }
+
+    /// <summary>프로젝트로 묶으면 한 단계 들여씁니다.</summary>
+    public Thickness Indent { get; }
 
     public string FullPath { get; }
 
@@ -79,12 +123,17 @@ public sealed class ReferenceFileRow
     public override string ToString() => $"{FileName}, {Count}개 위치";
 }
 
-/// <summary>참조 위치 한 줄입니다. 항상 파일 머리 행 아래에 오므로 파일 이름은 보이지 않습니다.</summary>
+/// <summary>
+/// 참조 위치 한 줄입니다. 항상 파일 머리 행 아래에 오므로 파일 이름은 보이지 않습니다. 왼쪽부터 줄 번호 · 소속 이름 · 코드 순서라
+/// 행 왼쪽만 훑어도 어디에서 쓰는지 읽힙니다.
+/// </summary>
 public sealed class ReferenceLineRow
 {
-    internal ReferenceLineRow(NavigationResultItem item)
+    internal ReferenceLineRow(NavigationResultItem item, int lineDigits = 0, int fileLevel = 0)
     {
         Item = item;
+        LineLabel = ReferenceRowText.LineLabel(item.Line, lineDigits);
+        Indent = ReferenceRowText.LineIndent(fileLevel);
     }
 
     internal NavigationResultItem Item { get; }
@@ -96,6 +145,21 @@ public sealed class ReferenceLineRow
     public string Folder => Item.Folder;
 
     public string Line => Item.Line;
+
+    /// <summary>
+    /// 결과에서 가장 긴 줄 번호 자릿수에 맞춰 앞을 숫자 폭 공백(U+2007)으로 채운 줄 번호입니다. 숫자 폭이 같은 글꼴에서 행마다 열 너비를
+    /// 따로 재지 않아도 오른쪽 끝이 맞습니다(가상화 목록에서 크기 공유 그룹을 쓰면 스크롤 중 폭이 흔들림).
+    /// </summary>
+    public string LineLabel { get; }
+
+    /// <summary>파일 머리 행의 펼침 표시만큼 더 들여씁니다.</summary>
+    public Thickness Indent { get; }
+
+    /// <summary>소속 이름의 마지막 마디입니다. 전체 이름은 <see cref="Container"/>입니다.</summary>
+    public string ContainerShortName => Item.ContainerShortName;
+
+    /// <summary>소속 이름 색에 쓸 종류입니다. 모르면 null(행 기본 글자색)입니다.</summary>
+    public VisualBoost.Core.Coloring.CodePreviewKind? ContainerKind => Item.ContainerKind;
 
     public string Before => Item.Before;
 
@@ -116,6 +180,24 @@ public sealed class ReferenceLineRow
     public override string ToString() => $"{FileName} {Line}줄: {Code}";
 }
 
+/// <summary>참조 행들이 함께 쓰는 표시 규칙입니다.</summary>
+internal static class ReferenceRowText
+{
+    /// <summary>단계마다 들이는 폭(DIP)입니다.</summary>
+    public const double LevelWidth = 16;
+
+    /// <summary>머리 행의 펼침 표시 열 폭(DIP)입니다. 위치 행은 이만큼 더 들여 줄 번호가 파일 아이콘 아래에서 시작합니다.</summary>
+    public const double GlyphWidth = 18;
+
+    public static string Count(int count, int total) => count == total ? count.ToString("N0", CultureInfo.CurrentCulture) : $"{count:N0}/{total:N0}";
+
+    public static Thickness Indent(int level) => new(level * LevelWidth, 0, 0, 0);
+
+    public static Thickness LineIndent(int fileLevel) => new(fileLevel * LevelWidth + GlyphWidth, 0, 0, 0);
+
+    public static string LineLabel(string line, int digits) => digits > line.Length ? new string('\u2007', digits - line.Length) + line : line;
+}
+
 /// <summary>참조 창이 보일 위치의 범위입니다.</summary>
 internal enum ReferenceScopeMode
 {
@@ -127,8 +209,9 @@ internal enum ReferenceScopeMode
 }
 
 /// <summary>
-/// 도킹 참조 창의 표시 상태입니다. 현재 결과·최근 결과·범위 모드·필터·접힌 파일로 화면에 그릴 행 목록을 만듭니다.
-/// 행은 항상 파일별로 묶고 요청한 파일에서 가까운 순서(<see cref="ReferenceOrder"/>)로 둡니다. UI thread에서만 씁니다.
+/// 도킹 참조 창의 표시 상태입니다. 현재 결과·최근 결과·범위 모드·필터·접힌 묶음으로 화면에 그릴 행 목록을 만듭니다.
+/// 행은 항상 파일별로 묶고 요청한 파일에서 가까운 순서(<see cref="ReferenceOrder"/>)로 둡니다. 모든 프로젝트 모드에서 결과가 둘 이상의
+/// 프로젝트(또는 프로젝트 밖)에 걸치면 그 위를 프로젝트 머리 행으로 한 번 더 묶습니다. UI thread에서만 씁니다.
 /// </summary>
 internal sealed class ReferenceResultsModel : INotifyPropertyChanged
 {
@@ -140,8 +223,19 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
     public const string CurrentProjectTip = "현재 프로젝트 탐색";
     public const string AllProjectsTip = "모든 프로젝트 탐색";
 
+    /// <summary>어느 프로젝트에도 속하지 않은 파일 묶음의 키입니다. 프로젝트 범위 Id와 같은 접두사라 파일 경로와 겹치지 않습니다.</summary>
+    public const string OutsideKey = SymbolSearchScope.ProjectIdPrefix;
+
+    public const string OutsideName = "프로젝트 밖";
+
     private readonly List<ReferenceResultSet> history = new();
+
+    // 접은 파일 경로와 프로젝트 묶음 키입니다. 묶음 키는 'project:'로 시작해 드라이브 문자로 시작하는 경로와 겹치지 않습니다.
     private readonly HashSet<string> collapsed = new(StringComparer.OrdinalIgnoreCase);
+
+    // 현재 결과의 파일마다 정한 프로젝트 묶음(키·이름)입니다. 결과·소속 목록이 바뀔 때 다시 정합니다.
+    private readonly Dictionary<string, (string Key, string Name)> groups = new(StringComparer.OrdinalIgnoreCase);
+    private bool grouped;
     private ReferenceResultSet? current;
     private string filter = string.Empty;
 
@@ -171,6 +265,12 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
     public int VisibleCount => visibleItems.Count;
 
     public ReferenceScopeMode Mode => mode;
+
+    /// <summary>지금 행 목록이 프로젝트 머리 행으로 묶였는지입니다.</summary>
+    public bool IsGrouped => grouped;
+
+    /// <summary>파일이 든 프로젝트 묶음의 키입니다. 현재 결과에 없는 파일이면 null입니다.</summary>
+    public string? GroupKeyOf(string path) => groups.TryGetValue(path, out var group) ? group.Key : null;
 
     /// <summary>현재 결과를 찾은 파일이 속한 프로젝트를 알았는지입니다. 모르면 '현재 프로젝트' 모드에서도 모든 위치를 보입니다.</summary>
     public bool HasCurrentProject => originProjects.Length > 0;
@@ -291,13 +391,14 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
         OnPropertyChanged(nameof(Mode));
     }
 
-    /// <summary>파일 머리 행을 접거나 펼칩니다.</summary>
-    public void SetExpanded(string path, bool expanded)
+    /// <summary>파일 머리 행(파일 경로)이나 프로젝트 머리 행(묶음 키)을 접거나 펼칩니다.</summary>
+    public void SetExpanded(string key, bool expanded)
     {
-        var changed = expanded ? collapsed.Remove(path) : collapsed.Add(path);
+        var changed = expanded ? collapsed.Remove(key) : collapsed.Add(key);
         if (changed) Rebuild();
     }
 
+    /// <summary>모든 파일과 프로젝트 묶음을 펼치거나 접습니다.</summary>
     public void SetAllExpanded(bool expanded)
     {
         if (current is null) return;
@@ -305,12 +406,13 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
         if (!expanded)
         {
             foreach (var item in current.Items) collapsed.Add(item.FullPath);
+            foreach (var group in groups.Values) collapsed.Add(group.Key);
         }
 
         Rebuild();
     }
 
-    public bool IsExpanded(string path) => !collapsed.Contains(path);
+    public bool IsExpanded(string key) => !collapsed.Contains(key);
 
     private static bool IsProject(SymbolSearchScope scope) => scope.Id.StartsWith(SymbolSearchScope.ProjectIdPrefix, StringComparison.Ordinal);
 
@@ -335,6 +437,22 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
             ? Array.Empty<NavigationResultItem>()
             : ReferenceOrder.Sort(current.Items, origin, current.PairPath, originProjects.Any(), InCurrentProject,
                 path => solutionCode?.Includes(path) == true);
+
+        // 파일마다 묶을 프로젝트를 하나 정합니다. 여러 프로젝트에 등록된 공유 파일은 요청한 파일의 프로젝트를, 아니면 목록 순서상 첫 프로젝트를 고릅니다.
+        groups.Clear();
+        if (current is null) return;
+        var projects = catalog?.Where(IsProject).ToArray() ?? Array.Empty<SymbolSearchScope>();
+        foreach (var item in current.Items)
+        {
+            if (groups.ContainsKey(item.FullPath)) continue;
+            var owner = originProjects.FirstOrDefault(project => project.Includes(item.FullPath)) ??
+                        projects.FirstOrDefault(project => project.Includes(item.FullPath));
+            groups[item.FullPath] = owner is null
+                ? (OutsideKey, OutsideName)
+                : (owner.Id, owner.Name.StartsWith(SymbolSearchScope.ProjectNamePrefix, StringComparison.Ordinal)
+                    ? owner.Name.Substring(SymbolSearchScope.ProjectNamePrefix.Length)
+                    : owner.Name);
+        }
     }
 
     private void Rebuild()
@@ -349,18 +467,66 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
             modeCount = inMode.Count;
             var visible = filter.Length == 0 ? inMode : inMode.Where(item => item.Matches(filter)).ToArray();
 
+            // 프로젝트 머리 행은 모든 프로젝트 모드에서 결과가 둘 이상의 묶음에 걸칠 때만 둡니다. 필터를 치는 동안 머리 행이
+            // 나타났다 사라지지 않게 필터 전 위치로 정합니다. 현재 프로젝트 모드는 이미 한 프로젝트라 파일부터 시작해 한 행을 아낍니다.
+            grouped = mode == ReferenceScopeMode.AllProjects &&
+                      inMode.Select(item => GroupKeyOf(item.FullPath)).Distinct(StringComparer.OrdinalIgnoreCase).Skip(1).Any();
+            var fileLevel = grouped ? 1 : 0;
+
+            // 줄 번호 자릿수는 필터와 무관하게 결과 전체로 정해 필터를 바꿔도 열 너비가 흔들리지 않게 합니다.
+            var digits = current.Items.Count == 0 ? 0 : current.Items.Max(item => item.Line.Length);
+
             // 가까운 순서를 지키며 파일 단위로 묶습니다. 위치 수는 범위·필터 전의 그 파일 위치 수와 함께 보입니다.
             var totals = current.Items.GroupBy(item => item.FullPath, StringComparer.OrdinalIgnoreCase)
                 .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
-            foreach (var group in visible.GroupBy(item => item.FullPath, StringComparer.OrdinalIgnoreCase))
+            var files = visible.GroupBy(item => item.FullPath, StringComparer.OrdinalIgnoreCase).Select(group => group.ToArray()).ToArray();
+            visibleFileCount = files.Length;
+
+            void AddFile(NavigationResultItem[] members)
             {
-                var expanded = !collapsed.Contains(group.Key);
-                var members = group.ToArray();
+                var path = members[0].FullPath;
+                var expanded = !collapsed.Contains(path);
                 ordered.AddRange(members);
-                visibleFileCount++;
-                result.Add(new ReferenceFileRow(members[0], members.Length, totals[group.Key], expanded));
-                if (expanded) result.AddRange(members.Select(item => new ReferenceLineRow(item)));
+                result.Add(new ReferenceFileRow(members[0], members.Length, totals[path], expanded, fileLevel));
+                if (expanded) result.AddRange(members.Select(item => new ReferenceLineRow(item, digits, fileLevel)));
             }
+
+            if (!grouped)
+            {
+                foreach (var members in files) AddFile(members);
+            }
+            else
+            {
+                // 묶음은 요청한 파일의 프로젝트가 먼저이고, 나머지는 가까운 순서상 처음 나오는 순서입니다. 묶음 안 파일 순서는 그대로입니다.
+                var originKey = originProjects.FirstOrDefault()?.Id;
+                var groupTotals = current.Items.GroupBy(item => GroupKeyOf(item.FullPath) ?? OutsideKey, StringComparer.OrdinalIgnoreCase)
+                    .ToDictionary(group => group.Key, group => group.Count(), StringComparer.OrdinalIgnoreCase);
+                var byGroup = files.GroupBy(members => GroupKeyOf(members[0].FullPath) ?? OutsideKey, StringComparer.OrdinalIgnoreCase)
+                    .OrderBy(group => string.Equals(group.Key, originKey, StringComparison.OrdinalIgnoreCase) ? 0 : 1);
+                foreach (var group in byGroup)
+                {
+                    var expanded = !collapsed.Contains(group.Key);
+                    var name = groups[group.First()[0].FullPath].Name;
+                    result.Add(new ReferenceProjectRow(group.Key, name, group.Key == OutsideKey, group.Sum(members => members.Length),
+                        groupTotals[group.Key], expanded));
+                    foreach (var members in group)
+                    {
+                        if (expanded)
+                        {
+                            AddFile(members);
+                        }
+                        else
+                        {
+                            // 접힌 묶음의 위치도 보이는 결과(복사 대상)에는 남깁니다.
+                            ordered.AddRange(members);
+                        }
+                    }
+                }
+            }
+        }
+        else
+        {
+            grouped = false;
         }
 
         rows = result;
@@ -433,7 +599,7 @@ internal enum ReferenceMenuCommand
     CopyPath,
     ShowInExplorer,
     CopyVisible,
-    ToggleFile,
+    Toggle,
     ExpandAll,
     CollapseAll,
 }
@@ -466,18 +632,24 @@ internal sealed class ReferenceMenuEntry
 /// <summary>참조 창 우클릭 메뉴의 구성과 복사 형식입니다. 화면과 떼어 두어 행 종류별 항목을 테스트로 고정합니다.</summary>
 internal static class ReferenceMenu
 {
-    /// <summary>
-    /// 메뉴를 연 행(<paramref name="row"/>)에 맞는 항목입니다. null 항목은 구분선입니다. 위치 행은 열기·복사, 파일 머리 행은 접기·펼치기와 경로,
-    /// 빈 곳은 전부 펼치기·접기만 보입니다. 전부 펼치기·접기는 바꿀 파일이 보일 때만 켭니다.
-    /// </summary>
     // 접힌 파일도 범위·필터를 통과했으면 "보이는 결과"에 넣습니다. 이름만 보면 펼친 행만으로 읽힐 수 있어 툴팁으로 알립니다.
     private static readonly ReferenceMenuEntry CopyVisible = new(ReferenceMenuCommand.CopyVisible, "보이는 결과 모두 복사",
         toolTip: "범위·필터를 통과한 위치를 모두 복사합니다. 접힌 파일의 위치도 넣습니다.");
 
+    /// <summary>
+    /// 메뉴를 연 행(<paramref name="row"/>)에 맞는 항목입니다. null 항목은 구분선입니다. 위치 행은 열기·복사, 파일 머리 행은 접기·펼치기와 경로,
+    /// 프로젝트 머리 행은 접기·펼치기, 빈 곳은 전부 펼치기·접기만 보입니다. 전부 펼치기·접기는 바꿀 머리 행이 보일 때만 켭니다.
+    /// </summary>
     public static IReadOnlyList<ReferenceMenuEntry?> Entries(object? row, ReferenceResultsModel model)
     {
         if (model is null) throw new ArgumentNullException(nameof(model));
-        var files = model.Rows.OfType<ReferenceFileRow>().ToArray();
+        // 접고 펼 수 있는 보이는 머리 행(파일·프로젝트)의 펼침 상태입니다. 전부 펼치기·접기는 두 단계 모두에 적용합니다.
+        var heads = model.Rows.Select(item => item switch
+        {
+            ReferenceFileRow file => (bool?)file.IsExpanded,
+            ReferenceProjectRow project => project.IsExpanded,
+            _ => null,
+        }).Where(expanded => expanded is not null).Select(expanded => expanded!.Value).ToArray();
         var result = new List<ReferenceMenuEntry?>();
         switch (row)
         {
@@ -495,8 +667,8 @@ internal static class ReferenceMenu
                 break;
             case ReferenceFileRow file:
                 result.Add(file.IsExpanded
-                    ? new ReferenceMenuEntry(ReferenceMenuCommand.ToggleFile, "접기", "←")
-                    : new ReferenceMenuEntry(ReferenceMenuCommand.ToggleFile, "펼치기", "→"));
+                    ? new ReferenceMenuEntry(ReferenceMenuCommand.Toggle, "접기", "←")
+                    : new ReferenceMenuEntry(ReferenceMenuCommand.Toggle, "펼치기", "→"));
                 result.Add(null);
                 result.Add(new ReferenceMenuEntry(ReferenceMenuCommand.CopyPath, "전체 경로 복사"));
                 result.Add(new ReferenceMenuEntry(ReferenceMenuCommand.ShowInExplorer, "탐색기에서 보기"));
@@ -504,10 +676,18 @@ internal static class ReferenceMenu
                 result.Add(CopyVisible);
                 result.Add(null);
                 break;
+            case ReferenceProjectRow project:
+                result.Add(project.IsExpanded
+                    ? new ReferenceMenuEntry(ReferenceMenuCommand.Toggle, "접기", "←")
+                    : new ReferenceMenuEntry(ReferenceMenuCommand.Toggle, "펼치기", "→"));
+                result.Add(null);
+                result.Add(CopyVisible);
+                result.Add(null);
+                break;
         }
 
-        result.Add(new ReferenceMenuEntry(ReferenceMenuCommand.ExpandAll, "전부 펼치기", isEnabled: files.Any(file => !file.IsExpanded)));
-        result.Add(new ReferenceMenuEntry(ReferenceMenuCommand.CollapseAll, "전부 접기", isEnabled: files.Any(file => file.IsExpanded)));
+        result.Add(new ReferenceMenuEntry(ReferenceMenuCommand.ExpandAll, "전부 펼치기", isEnabled: heads.Any(expanded => !expanded)));
+        result.Add(new ReferenceMenuEntry(ReferenceMenuCommand.CollapseAll, "전부 접기", isEnabled: heads.Any(expanded => expanded)));
         return result;
     }
 

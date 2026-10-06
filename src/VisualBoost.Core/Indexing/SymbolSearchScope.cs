@@ -12,6 +12,9 @@ public sealed class SymbolSearchScope
     public const string ProjectIdPrefix = "project:";
     /// <summary>Solution에 등록된 엔진 밖 코드(프로젝트 코드) 범위의 ID입니다.</summary>
     public const string RegisteredId = "registered";
+
+    /// <summary>프로젝트 범위 이름 앞에 붙는 말입니다. 범위 목록에는 이 말과 함께 보이고, 프로젝트 이름만 필요하면 떼어 씁니다.</summary>
+    public const string ProjectNamePrefix = "프로젝트: ";
     public static SymbolSearchScope All { get; } = new("all", "전체", _ => true);
     private SymbolSearchScope(string id, string name, Func<string, bool> includes)
     { Id = id; Name = name; this.includes = includes; }
@@ -23,7 +26,7 @@ public sealed class SymbolSearchScope
     public static SymbolSearchScope Project(string projectPath, string name, IEnumerable<string> files)
     {
         var members = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-        return new SymbolSearchScope(ProjectIdPrefix + projectPath, "프로젝트: " + name, members.Contains);
+        return new SymbolSearchScope(ProjectIdPrefix + projectPath, ProjectNamePrefix + name, members.Contains);
     }
 
     public static IReadOnlyList<SymbolSearchScope> CreateCatalog(IEnumerable<SymbolSearchScope> projects,

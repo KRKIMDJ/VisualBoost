@@ -188,16 +188,22 @@ public partial class ReferencesControl : UserControl
         }
     }
 
-    /// <summary>지정한 위치나 파일의 행을 고릅니다. 접혀서 없으면 그 파일의 머리 행을, 그것도 없으면 첫 위치를 고릅니다.</summary>
+    /// <summary>
+    /// 지정한 위치·파일·프로젝트 묶음의 행을 고릅니다. 접혀서 없으면 그 파일의 머리 행을, 묶음째 접혔으면 그 프로젝트 머리 행을,
+    /// 그것도 없으면 첫 위치를 고릅니다.
+    /// </summary>
     private void Select(object? keep)
     {
         var rows = model.Rows;
         object? row = keep switch
         {
             NavigationResultItem item => rows.OfType<ReferenceLineRow>().FirstOrDefault(r => ReferenceEquals(r.Item, item)) ??
-                                         (object?)rows.OfType<ReferenceFileRow>().FirstOrDefault(r => SamePath(r.FullPath, item.FullPath)),
+                                         (object?)rows.OfType<ReferenceFileRow>().FirstOrDefault(r => SamePath(r.FullPath, item.FullPath)) ??
+                                         ProjectRowOf(item.FullPath),
+            string key when IsGroupKey(key) => rows.OfType<ReferenceProjectRow>().FirstOrDefault(r => SameKey(r.Key, key)),
             string path => rows.OfType<ReferenceFileRow>().FirstOrDefault(r => SamePath(r.FullPath, path)) ??
-                           (object?)rows.OfType<ReferenceLineRow>().FirstOrDefault(r => SamePath(r.FullPath, path)),
+                           (object?)rows.OfType<ReferenceLineRow>().FirstOrDefault(r => SamePath(r.FullPath, path)) ??
+                           ProjectRowOf(path),
             _ => null,
         };
         row ??= rows.FirstOrDefault(r => r is ReferenceLineRow) ?? rows.FirstOrDefault();
@@ -205,10 +211,18 @@ public partial class ReferencesControl : UserControl
         if (row is not null) ResultsList.ScrollIntoView(row);
     }
 
+    /// <summary>파일이 속한 프로젝트 머리 행입니다. 묶지 않은 결과이면 null입니다.</summary>
+    private ReferenceProjectRow? ProjectRowOf(string path) =>
+        model.IsGrouped && model.GroupKeyOf(path) is { } key ? model.Rows.OfType<ReferenceProjectRow>().FirstOrDefault(r => SameKey(r.Key, key)) : null;
+
+    // 선택 기억 키는 위치 항목·파일 경로·묶음 키 중 하나입니다. 묶음 키는 프로젝트 범위 ID 접두사로 시작해 파일 경로와 겹치지 않습니다.
+    private static bool IsGroupKey(string key) => key.StartsWith(ReferenceResultsModel.OutsideKey, StringComparison.Ordinal);
+
     private object? SelectionKey() => ResultsList.SelectedItem switch
     {
         ReferenceLineRow line => line.Item,
         ReferenceFileRow file => file.FullPath,
+        ReferenceProjectRow project => project.Key,
         _ => null,
     };
 
@@ -285,13 +299,27 @@ public partial class ReferencesControl : UserControl
             case Key.Space:
                 Activate(selected, keepFocus: true);
                 break;
+            case Key.Left when selected is ReferenceProjectRow { IsExpanded: true } project:
+                SetExpanded(project.Key, false);
+                break;
             case Key.Left when selected is ReferenceFileRow { IsExpanded: true } file:
                 SetExpanded(file.FullPath, false);
+                break;
+            case Key.Left when selected is ReferenceFileRow file && ProjectRowOf(file.FullPath) is { } owner:
+                // 접힌 파일에서 왼쪽은 그 프로젝트 머리 행으로 올라갑니다.
+                ResultsList.SelectedItem = owner;
+                FocusSelection();
                 break;
             case Key.Left when selected is ReferenceLineRow line:
                 // 위치 행에서 왼쪽은 그 파일의 머리 행으로 올라갑니다.
                 ResultsList.SelectedItem = model.Rows.OfType<ReferenceFileRow>().FirstOrDefault(r => SamePath(r.FullPath, line.FullPath)) ?? selected;
                 FocusSelection();
+                break;
+            case Key.Right when selected is ReferenceProjectRow { IsExpanded: false } project:
+                SetExpanded(project.Key, true);
+                break;
+            case Key.Right when selected is ReferenceProjectRow project:
+                MoveToFirstChild(project);
                 break;
             case Key.Right when selected is ReferenceFileRow { IsExpanded: false } file:
                 SetExpanded(file.FullPath, true);
@@ -324,9 +352,16 @@ public partial class ReferencesControl : UserControl
     private void OnResultMouseDown(object sender, MouseButtonEventArgs eventArgs)
     {
         // 펼침 표시를 누르면 행을 고르지 않고 바로 접거나 펼칩니다. 두 번째 클릭은 더블클릭 처리와 겹치지 않게 무시합니다.
-        if (eventArgs.OriginalSource is not FrameworkElement { Name: "Glyph", DataContext: ReferenceFileRow file }) return;
+        if (eventArgs.OriginalSource is not FrameworkElement { Name: "Glyph", DataContext: { } row }) return;
+        var head = row switch
+        {
+            ReferenceFileRow file => (Key: file.FullPath, file.IsExpanded),
+            ReferenceProjectRow project => (Key: project.Key, project.IsExpanded),
+            _ => ((string Key, bool IsExpanded)?)null,
+        };
+        if (head is not { } toggle) return;
         eventArgs.Handled = true;
-        if (eventArgs.ClickCount == 1) SetExpanded(file.FullPath, !file.IsExpanded);
+        if (eventArgs.ClickCount == 1) SetExpanded(toggle.Key, !toggle.IsExpanded);
     }
 
     private void OnResultDoubleClick(object sender, MouseButtonEventArgs eventArgs)
@@ -405,8 +440,8 @@ public partial class ReferencesControl : UserControl
             case ReferenceMenuCommand.Preview:
                 Activate(line, keepFocus: true);
                 break;
-            case ReferenceMenuCommand.ToggleFile when row is ReferenceFileRow file:
-                SetExpanded(file.FullPath, !file.IsExpanded);
+            case ReferenceMenuCommand.Toggle when row is ReferenceFileRow or ReferenceProjectRow:
+                Activate(row, keepFocus: true);
                 break;
             case ReferenceMenuCommand.CopyLocation when line is not null:
                 Copy(ReferenceMenu.Location(line.Item), "위치를 복사했습니다.");
@@ -438,11 +473,14 @@ public partial class ReferencesControl : UserControl
         Notify?.Invoke(result, !ReferenceEquals(result, done));
     }
 
-    /// <summary>파일 머리 행은 접거나 펼치고, 위치 행은 편집기에서 엽니다.</summary>
+    /// <summary>프로젝트·파일 머리 행은 접거나 펼치고, 위치 행은 편집기에서 엽니다.</summary>
     private void Activate(object? row, bool keepFocus)
     {
         switch (row)
         {
+            case ReferenceProjectRow project:
+                SetExpanded(project.Key, !project.IsExpanded);
+                break;
             case ReferenceFileRow file:
                 SetExpanded(file.FullPath, !file.IsExpanded);
                 break;
@@ -452,10 +490,20 @@ public partial class ReferencesControl : UserControl
         }
     }
 
-    private void SetExpanded(string path, bool expanded)
+    /// <summary>파일 경로나 묶음 키의 머리 행을 접거나 펼치고 그 머리 행을 고른 채로 둡니다.</summary>
+    private void SetExpanded(string key, bool expanded)
     {
-        model.SetExpanded(path, expanded);
-        Refresh(path, keepScroll: true);
+        model.SetExpanded(key, expanded);
+        Refresh(key, keepScroll: true);
+        FocusSelection();
+    }
+
+    private void MoveToFirstChild(ReferenceProjectRow project)
+    {
+        var rows = model.Rows;
+        var index = rows.TakeWhile(r => !ReferenceEquals(r, project)).Count() + 1;
+        if (index >= rows.Count || rows[index] is not ReferenceFileRow) return;
+        ResultsList.SelectedItem = rows[index];
         FocusSelection();
     }
 
@@ -468,6 +516,8 @@ public partial class ReferencesControl : UserControl
     }
 
     private static bool SamePath(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
+
+    private static bool SameKey(string left, string right) => string.Equals(left, right, StringComparison.OrdinalIgnoreCase);
 
     private static ScrollViewer? ScrollViewerOf(DependencyObject parent)
     {
