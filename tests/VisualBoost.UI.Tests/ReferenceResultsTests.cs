@@ -247,7 +247,7 @@ internal static class ReferenceResultsTests
         FixedHeights(popup, "Alt+M 팝업");
     }
 
-    /// <summary>행·열 머리글은 최소 높이만 둡니다. 고정 높이는 큰 환경 글꼴에서 글자를 자릅니다.</summary>
+    /// <summary>행·열 머리글과 글자를 담는 입력·버튼은 최소 높이만 둡니다. 고정 높이는 큰 환경 글꼴에서 글자를 자릅니다.</summary>
     private static void FixedHeights(XDocument document, string name)
     {
         var fixedRows = document.Descendants()
@@ -255,6 +255,10 @@ internal static class ReferenceResultsTests
             .SelectMany(style => style.Elements())
             .Where(element => element.Name.LocalName == "Setter" && (string?)element.Attribute("Property") == "Height").ToArray();
         Assert(fixedRows.Length == 0, name + ": 행·머리글 고정 높이 없음");
+        var fixedText = document.Descendants()
+            .Where(element => element.Name.LocalName is "TextBox" or "TextBlock" or "ComboBox" or "Button" or "CheckBox" && element.Attribute("Height") is not null)
+            .Select(element => element.Name.LocalName).ToArray();
+        Assert(fixedText.Length == 0, name + ": 글자 요소 고정 높이 없음: " + string.Join(",", fixedText));
     }
 
     private static void Xaml(string root, string output)

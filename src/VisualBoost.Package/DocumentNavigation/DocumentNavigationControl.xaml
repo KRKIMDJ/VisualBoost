@@ -24,7 +24,7 @@
     <!-- 부모 없는 팝업이라 글꼴을 물려받지 않습니다. 결과 목록 창과 같은 환경 글꼴·목록 글씨 크기 하나를 여기서 지정하고,
          글자 렌더링은 열 때 편집기 확대를 보고 정합니다(PopupTextFormatting). -->
     <Grid><Grid.RowDefinitions><RowDefinition Height="Auto"/><RowDefinition Height="Auto"/><RowDefinition Height="*"/><RowDefinition Height="Auto"/></Grid.RowDefinitions>
-     <TextBox x:Name="Search" Margin="0,0,0,7" Height="26" Padding="7,2" TextChanged="OnSearchChanged"
+     <TextBox x:Name="Search" Margin="0,0,0,7" MinHeight="26" Padding="7,2" TextChanged="OnSearchChanged"
        ToolTip="함수 이름 검색 · 공백으로 AND 검색" AutomationProperties.Name="문서 함수 이름 검색"
        Background="{DynamicResource {x:Static vs:VsBrushes.ToolWindowBackgroundKey}}"
        Foreground="{DynamicResource {x:Static vs:VsBrushes.ToolWindowTextKey}}"/>
