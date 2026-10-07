@@ -17,7 +17,6 @@ internal static class Program
 
     private static int Main()
     {
-        Run("주석 심볼 링크", CommentSymbolLinkTests.Run);
         Run("의미 탐색 JSON", SemanticNavigationTests.RunJson);
         Run("의미 탐색 명령줄 분리", SemanticNavigationTests.RunCommandLine);
         Run("의미 탐색 URI·위치 변환", SemanticNavigationTests.RunUri);

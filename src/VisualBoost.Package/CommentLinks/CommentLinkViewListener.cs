@@ -21,7 +21,6 @@ using Microsoft.VisualStudio.Text.Editor;
 using Microsoft.VisualStudio.Utilities;
 using VisualBoost.CodeGeneration;
 using VisualBoost.Core.DocumentNavigation;
-using VisualBoost.Core.Analysis;
 using VisualBoost.Services;
 
 namespace VisualBoost.CommentLinks;
@@ -58,10 +57,9 @@ internal sealed class CommentLinkViewListener : IWpfTextViewCreationListener
         private readonly IAdornmentLayer layer;
         private readonly CommentLinkTooltip tooltip;
         private readonly DispatcherTimer refresh = new(DispatcherPriority.Background) { Interval = TimeSpan.FromMilliseconds(80) };
-        private readonly List<(SnapshotSpan span, CommentFileReference? reference, CommentSymbolReference? symbol)> links = new();
+        private readonly List<(SnapshotSpan span, CommentFileReference reference)> links = new();
         private readonly CancellationTokenSource lifetime = new();
         private bool navigating;
-        private int displayedSymbolCount = -1;
         private Cursor? previousCursor;
         private bool ownsCursor;
         public Session(IWpfTextView view, IClassifier classifier, ITextDocumentFactoryService documents)
@@ -92,32 +90,20 @@ internal sealed class CommentLinkViewListener : IWpfTextViewCreationListener
             try
             {
                 // 보이는 줄만 분류하며 디스크·솔루션 검색은 클릭할 때만 작업 스레드에서 수행합니다.
+                // 링크는 파일 이름(확장자가 있는 이름과 '파일명:줄')에만 둡니다. 주석의 타입·네임스페이스·함수 이름까지 링크로 만들면 주석 대부분이
+                // 밑줄로 덮여 읽기를 방해했습니다(2026-10-07 사용자 결정).
                 var seen = new HashSet<Span>();
-                var known = new Dictionary<string, bool>(StringComparer.Ordinal);
-                var index = CommentLinkRuntime.Index;
-                displayedSymbolCount = index?.GetSnapshot().SymbolCount ?? 0;
-                bool Known(string name)
-                {
-                    if (known.TryGetValue(name, out var value)) return value;
-                    if (known.Count >= 512) return false;
-                    return known[name] = index?.FindSymbol(name).Any(s => s.Name == name && CommentSymbolReferences.IsTypeOrNamespace(s.Kind)) == true;
-                }
                 foreach (var line in view.TextViewLines.Take(200).Where(l => l.Extent.Length <= 16384))
                 foreach (var classified in classifier.GetClassificationSpans(line.Extent))
                 {
                     if (!classified.ClassificationType.IsOfType("comment") && classified.ClassificationType.Classification.IndexOf("comment", StringComparison.OrdinalIgnoreCase) < 0) continue;
                     var intersection = classified.Span.Intersection(line.Extent);
                     if (intersection is null || !seen.Add(intersection.Value.Span)) continue;
-                    var text = intersection.Value.GetText();
-                    var references = CommentFileReferences.Parse(text).Select(f => (start: f.Start, length: f.Length, file: (CommentFileReference?)f, symbol: (CommentSymbolReference?)null));
-                    // 파일 링크는 C++·C# 공통, 심볼 링크는 기존 C++ 인덱스가 제공하는 범위에 한정합니다.
-                    if (view.TextBuffer.ContentType.IsOfType("C/C++"))
-                        references = references.Concat(CommentSymbolReferences.Parse(text, Known).Select(s => (s.Start, s.Length, (CommentFileReference?)null, (CommentSymbolReference?)s)));
-                    foreach (var reference in references)
+                    foreach (var reference in CommentFileReferences.Parse(intersection.Value.GetText()))
                     {
                         if (links.Count >= 256) return;
-                        var span = new SnapshotSpan(view.TextSnapshot, intersection.Value.Start.Position + reference.start, reference.length);
-                        links.Add((span, reference.file, reference.symbol));
+                        var span = new SnapshotSpan(view.TextSnapshot, intersection.Value.Start.Position + reference.Start, reference.Length);
+                        links.Add((span, reference));
                         foreach (var bounds in line.GetNormalizedTextBounds(span))
                         {
                             var dark = view.Background is SolidColorBrush brush && brush.Color.R + brush.Color.G + brush.Color.B < 384;
@@ -131,7 +117,7 @@ internal sealed class CommentLinkViewListener : IWpfTextViewCreationListener
             catch (Exception exception) when (exception is ArgumentException || exception is InvalidOperationException || exception is System.Text.RegularExpressions.RegexMatchTimeoutException)
             { links.Clear(); layer.RemoveAllAdornments(); ActivityLog.LogWarning("VisualBoost/CommentLinks", exception.Message); }
         }
-        private (SnapshotSpan span, CommentFileReference? reference, CommentSymbolReference? symbol)? Hit(Point position)
+        private (SnapshotSpan span, CommentFileReference reference)? Hit(Point position)
         {
             if (!CommentLinkRuntime.Enabled || view.IsClosed || view.TextViewLines is null) return null;
             var line = view.TextViewLines.GetTextViewLineContainingYCoordinate(position.Y + view.ViewportTop);
@@ -142,7 +128,6 @@ internal sealed class CommentLinkViewListener : IWpfTextViewCreationListener
         }
         private void OnMouse(object sender, MouseEventArgs e)
         {
-            if (CommentLinkRuntime.Enabled && (CommentLinkRuntime.Index?.GetSnapshot().SymbolCount ?? 0) != displayedSymbolCount) Schedule();
             var position = e.GetPosition(view.VisualElement); var link = Hit(position);
             tooltip.Update(link is null ? null : link.Value.span.Start.Position + ":" + link.Value.span.Length, position);
             var active = Keyboard.Modifiers == ModifierKeys.Control && link is not null;
@@ -164,8 +149,7 @@ internal sealed class CommentLinkViewListener : IWpfTextViewCreationListener
             e.Handled = true; navigating = true;
             try
             {
-                if (link.Value.symbol is CommentSymbolReference symbol) await NavigateSymbolAsync(link.Value.span, symbol, position);
-                else if (link.Value.reference is CommentFileReference file) await NavigateAsync(link.Value.span, file, position);
+                await NavigateAsync(link.Value.span, link.Value.reference, position);
             }
             catch (OperationCanceledException) when (lifetime.IsCancellationRequested) { }
             catch (Exception exception)
@@ -175,46 +159,6 @@ internal sealed class CommentLinkViewListener : IWpfTextViewCreationListener
                 await StatusAsync("주석 링크를 열지 못했습니다: " + exception.Message);
             }
             finally { navigating = false; if (view.IsClosed) lifetime.Dispose(); }
-        }
-        private async Task NavigateSymbolAsync(SnapshotSpan original, CommentSymbolReference reference, Point position)
-        {
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(lifetime.Token);
-            var index = CommentLinkRuntime.Index;
-            if (index is null || !documents.TryGetTextDocument(view.TextBuffer, out var document)) { await StatusAsync("심볼 링크에는 열린 솔루션과 저장 경로가 필요합니다."); return; }
-            var dte = await AsyncServiceProvider.GlobalProvider.GetServiceAsync(typeof(SDTE)) as DTE2;
-            if (dte is null) return;
-            var source = document.FilePath; var solution = dte.Solution.FullName; var generation = index.Generation;
-            bool Current() => !view.IsClosed && CommentLinkRuntime.Enabled && view.TextSnapshot == original.Snapshot &&
-                document.FilePath == source && dte.Solution.FullName == solution && CommentLinkRuntime.Index == index && index.Generation == generation;
-            await StatusAsync("주석 심볼 확인 중: " + reference.Name);
-            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-            timeout.CancelAfter(TimeSpan.FromSeconds(5));
-            CommentSymbolLinkResult result;
-            try { result = await Task.Run(() => CommentSymbolLinkResolver.Resolve(reference, index, timeout.Token), timeout.Token); }
-            catch (OperationCanceledException) when (!lifetime.IsCancellationRequested)
-            { await StatusAsync("심볼 링크 확인 시간 제한에 도달했습니다. 더 구체적인 한정 이름을 사용하세요."); return; }
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(lifetime.Token);
-            if (!Current()) return;
-            if (result.Targets.Count == 0)
-            { await StatusAsync("심볼의 구현부 또는 타입/네임스페이스를 찾지 못했습니다: " + reference.Name + (result.Limited ? " · 일부 후보 파일은 확인하지 못했습니다." : " · 인덱싱 상태와 한정 이름을 확인하세요.")); return; }
-            var target = result.Targets[0];
-            if (result.Targets.Count > 1 || result.Limited)
-            {
-                var actions = result.Targets.Take(128).Select((s, i) => new DocumentCodeAction(i.ToString(),
-                    s.Description.Replace('\r', ' ').Replace('\n', ' ') + " · " + System.IO.Path.GetFileName(s.Path) + ":" + s.Line,
-                    s.Path + (result.Limited || result.Targets.Count > 128 ? " · 일부 후보만 표시" : ""))).ToArray();
-                var selected = await new DocumentCodeActionMenu().ShowAsync(view.VisualElement, position, actions, lifetime.Token);
-                if (selected is null) return;
-                target = result.Targets[int.Parse(selected.Id)];
-            }
-            var unchanged = await Task.Run(() => File.Exists(target.Path) && result.Stamps.TryGetValue(target.Path, out var stamp) && File.GetLastWriteTimeUtc(target.Path) == stamp, lifetime.Token);
-            await ThreadHelper.JoinableTaskFactory.SwitchToMainThreadAsync(lifetime.Token);
-            if (!Current()) return;
-            if (!unchanged) { await StatusAsync("대상 파일이 변경되었습니다. 주석 링크를 다시 눌러 주세요."); return; }
-            var window = dte.ItemOperations.OpenFile(target.Path, EnvDTE.Constants.vsViewKindTextView); window?.Activate();
-            if (dte.ActiveDocument?.Saved == false) { await StatusAsync("대상 문서에 저장되지 않은 변경이 있어 파일만 열었습니다. 저장 후 다시 눌러 주세요."); return; }
-            if (dte.ActiveDocument?.Selection is TextSelection selection) selection.GotoLine(target.Line, false);
-            await StatusAsync(reference.Name + " → " + System.IO.Path.GetFileName(target.Path) + ":" + target.Line);
         }
         private async Task NavigateAsync(SnapshotSpan original, CommentFileReference reference, Point position)
         {
