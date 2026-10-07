@@ -38,6 +38,9 @@ public partial class FileSearchDialog : DialogWindow
     private DateTime searchStartedUtc;
     // 검색 중 안내가 지금 화면에 보이는지입니다. Esc는 이 안내가 보일 때만 검색을 취소하고, 그 밖에는 "Esc 닫기" 안내대로 창을 닫습니다.
     private bool busyShown;
+    // 사용자가 검색을 취소하면 검색어나 범위를 바꿀 때까지 색인 진행에 따른 자동 재검색을 멈춥니다. 멈추지 않으면 취소한 검색이
+    // 다음 상태 틱에 다시 시작되어 "검색 중"과 Esc 취소가 되풀이됩니다.
+    private bool searchPaused;
     private bool isClosed;
     private int observedFileCount = -1;
     private string? statusNotice;
@@ -162,6 +165,8 @@ public partial class FileSearchDialog : DialogWindow
     private async Task RefreshResultsAsync(bool useDebounce)
     {
         if (isClosed) return;
+        // 멈춘 동안 상태 타이머는 여기로 오지 않으므로, 이 호출은 검색어·범위 변경입니다.
+        searchPaused = false;
         var previousCancellation = searchCancellation;
         var currentCancellation = new CancellationTokenSource();
         searchCancellation = currentCancellation;
@@ -244,7 +249,7 @@ public partial class FileSearchDialog : DialogWindow
     {
         if (isClosed) return;
         UpdateStatus();
-        if (!isSearching && candidatePaths is null && observedFileCount != fileIndex.GetSnapshot().FileCount)
+        if (!isSearching && !searchPaused && candidatePaths is null && observedFileCount != fileIndex.GetSnapshot().FileCount)
             await RefreshResultsAsync(useDebounce: false);
     }
 
@@ -498,6 +503,7 @@ public partial class FileSearchDialog : DialogWindow
 
         searchCancellation?.Cancel();
         isSearching = false;
+        searchPaused = true;
         SetStatusNotice("검색 취소됨");
         if (displayedResultCount > 0)
         {
