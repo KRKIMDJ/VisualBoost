@@ -31,8 +31,13 @@ public partial class SymbolSearchDialog : DialogWindow
     private readonly string? solutionKey;
     private readonly DispatcherTimer statusTimer;
     // 검색이 이 시간을 넘길 때만 "검색 중"을 보입니다. 분석 중에는 상태 타이머가 0.5초마다 다시 검색하므로 바로 바꾸면 상태 글자가
-    // 결과 수와 번갈아 깜박입니다(2026-10-07 사용자 피드백, 파일 탐색 창과 같은 규칙).
+    // 결과 수와 번갈아 깜박입니다(2026-10-07 사용자 피드백, 파일 탐색 창과 같은 규칙). 입력 대기 시간은 검색 시간에 넣지 않습니다.
+    private static readonly TimeSpan BusyDelay = TimeSpan.FromMilliseconds(400);
+    private static readonly TimeSpan InputDelay = TimeSpan.FromMilliseconds(45);
     private readonly DispatcherTimer busyTimer;
+    // "검색 중" 안내가 지금 보이는지입니다. Esc는 이 안내가 보일 때만 검색을 취소하고, 그 밖에는 "Esc 닫기" 안내대로 창을 닫습니다.
+    private bool busyShown;
+    private readonly string idleKeyboardHint;
     private CancellationTokenSource? searchCancellation;
     private bool isSearching;
     private bool isClosed;
@@ -59,14 +64,15 @@ public partial class SymbolSearchDialog : DialogWindow
         UpdateScopes();
         // 로드 전 TextChanged는 무시되고, 첫 검색은 OnLoaded에서 이 검색어로 실행합니다.
         if (!string.IsNullOrEmpty(initialQuery)) SearchBox.Text = initialQuery;
-        KeyboardHintText.ToolTip = ResultListKeys.MoveKeysDescription + "\n" + ResultListKeys.ScopeKeysDescription +
+        idleKeyboardHint = KeyboardHintText.Text;
+        KeyboardHintText.ToolTip =ResultListKeys.MoveKeysDescription + "\n" + ResultListKeys.ScopeKeysDescription +
                                    "\nEnter 열기 · Esc 닫기 · 결과 우클릭으로 이름·경로 복사";
         statusTimer = new DispatcherTimer(DispatcherPriority.Background)
         {
             Interval = TimeSpan.FromMilliseconds(500),
         };
         statusTimer.Tick += OnStatusTimerTick;
-        busyTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(400) };
+        busyTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = BusyDelay };
         busyTimer.Tick += OnBusyTimerTick;
         Loaded += OnLoaded;
         Closing += OnClosing;
@@ -182,6 +188,8 @@ public partial class SymbolSearchDialog : DialogWindow
         if (string.IsNullOrWhiteSpace(query))
         {
             isSearching = false;
+            busyTimer.Stop();
+            SetBusyShown(false);
             ResultsList.ItemsSource = null;
             EmptyStatePanel.Visibility = Visibility.Visible;
             UpdateIdleState(fileIndex.GetSnapshot());
@@ -192,13 +200,15 @@ public partial class SymbolSearchDialog : DialogWindow
 
         var cancellationToken = currentCancellation.Token;
         isSearching = true;
+        // 이미 "검색 중"이 보이면 이어지는 검색 동안 그대로 둡니다.
         busyTimer.Stop();
+        busyTimer.Interval = useDebounce ? BusyDelay + InputDelay : BusyDelay;
         busyTimer.Start();
         try
         {
             if (useDebounce)
             {
-                await Task.Delay(45, cancellationToken);
+                await Task.Delay(InputDelay, cancellationToken);
             }
 
             var matches = await Task.Run(
@@ -230,10 +240,8 @@ public partial class SymbolSearchDialog : DialogWindow
         }
         catch (OperationCanceledException)
         {
-            if (ReferenceEquals(searchCancellation, currentCancellation))
-            {
-                UpdateIdleState(fileIndex.GetSnapshot());
-            }
+            // 새 검색이 앞선 검색을 취소한 경우는 새 검색이 화면을 그립니다. 여기에 오는 것은 Esc 취소와 창 닫기뿐입니다.
+            if (ReferenceEquals(searchCancellation, currentCancellation) && !isClosed) ShowCancelled();
         }
         catch (Exception exception)
         {
@@ -250,6 +258,7 @@ public partial class SymbolSearchDialog : DialogWindow
             {
                 isSearching = false;
                 busyTimer.Stop();
+                if (!isClosed) SetBusyShown(false);
             }
             if (ReferenceEquals(searchCancellation, currentCancellation)) searchCancellation = null;
             currentCancellation.Dispose();
@@ -287,7 +296,32 @@ public partial class SymbolSearchDialog : DialogWindow
     private void OnBusyTimerTick(object? sender, EventArgs eventArgs)
     {
         busyTimer.Stop();
-        if (!isClosed && isSearching) StatusText.Text = "검색 중";
+        if (isClosed || !isSearching) return;
+        StatusText.Text = "검색 중";
+        SetBusyShown(true);
+    }
+
+    private void SetBusyShown(bool shown)
+    {
+        busyShown = shown;
+        KeyboardHintText.Text = shown ? "Esc 검색 취소" : idleKeyboardHint;
+    }
+
+    /// <summary>Esc로 검색을 취소한 상태를 보입니다. 보이던 결과는 그대로 두고, 결과가 없으면 취소 안내를 보입니다.</summary>
+    private void ShowCancelled()
+    {
+        var shown = ResultsList.Items.Count;
+        if (shown == 0)
+        {
+            EmptyStatePanel.Visibility = Visibility.Visible;
+            EmptyStateTitle.Text = "검색을 취소했습니다.";
+            EmptyStateDescription.Text = "검색어를 변경하면 다시 검색합니다.";
+        }
+
+        var snapshot = fileIndex.GetSnapshot();
+        StatusText.Text = $"{shown:N0}개 표시 · 검색 취소됨 · {SelectedScope.Name}{PendingScopeNote()} · 전체 등록 위치 {snapshot.SymbolCount:N0}개" +
+                          AnalysisStatus(snapshot);
+        StatusText.ToolTip = snapshot.AnalysisError;
     }
 
     private void UpdateIdleState(SolutionFileIndexSnapshot snapshot)
@@ -323,7 +357,8 @@ public partial class SymbolSearchDialog : DialogWindow
         if (eventArgs.Key == Key.Escape)
         {
             if (ScopeSelector.IsDropDownOpen) return;
-            if (isSearching)
+            // 안내가 보이기 전의 짧은 검색(입력 대기·분석 중 재검색)은 Esc로 창을 닫으면서 함께 취소됩니다.
+            if (busyShown)
             {
                 searchCancellation?.Cancel();
             }

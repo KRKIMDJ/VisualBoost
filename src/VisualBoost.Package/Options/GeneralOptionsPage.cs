@@ -55,7 +55,7 @@ public sealed class GeneralOptionsPage : DialogPage
 
     [Category("결과 목록")]
     [DisplayName("글씨 크기(%)")]
-    [Description("참조 창·파일 탐색·심볼 탐색·정의 후보·문서 함수 탐색의 글씨 크기입니다. VS 환경 글꼴 크기에 대한 백분율이며 80~200 사이로 맞춥니다.")]
+    [Description("참조 창, 파일·심볼 탐색, 정의 후보, 문서 함수 탐색, 이름 자동완성 목록의 글씨 크기입니다. VS 환경 글꼴에 대한 백분율이며 100이면 메뉴·도구 창 글씨와 같습니다. 80~200 범위로 적용됩니다.")]
     [DefaultValue(UI.ResultListFont.DefaultPercent)]
     public int ResultListFontPercent { get; set; } = UI.ResultListFont.DefaultPercent;
 

@@ -23,7 +23,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     public string ClangdPath { get; set; } = string.Empty;
 
     [Category("정의·참조 탐색"), DisplayName("색인 작업 수"), DefaultValue(0)]
-    [Description("동시에 색인할 파일 수입니다. 0이면 논리 코어의 절반을 쓰되 메모리가 적으면 줄입니다. 값이 클수록 첫 색인이 빨라지고 메모리를 많이 씁니다.")]
+    [Description("동시에 색인할 파일 수입니다. 0이면 자동으로 정합니다(논리 코어의 절반, 메모리가 적으면 더 적게). 값이 클수록 첫 색인이 빨리 끝나지만 CPU와 메모리를 더 씁니다. 0~64 범위로 적용됩니다.")]
     public int WorkerCount
     {
         get => workerCount;

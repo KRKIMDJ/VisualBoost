@@ -33,9 +33,11 @@ public partial class FileSearchDialog : DialogWindow
     private bool isSearching;
 
     // 검색이 이 시간보다 오래 걸릴 때만 "검색 중"·취소 버튼·찾는 중 안내를 보입니다. 키를 칠 때마다나 색인 진행 중 다시 검색할 때
-    // 안내가 켜졌다 꺼지며 깜박이지 않게 합니다(2026-10-07 사용자 피드백).
+    // 안내가 켜졌다 꺼지며 깜박이지 않게 합니다(2026-10-07 사용자 피드백). 입력 대기 시간은 검색 시간에 넣지 않습니다.
     private static readonly TimeSpan BusyDelay = TimeSpan.FromMilliseconds(400);
     private DateTime searchStartedUtc;
+    // 검색 중 안내가 지금 화면에 보이는지입니다. Esc는 이 안내가 보일 때만 검색을 취소하고, 그 밖에는 "Esc 닫기" 안내대로 창을 닫습니다.
+    private bool busyShown;
     private bool isClosed;
     private int observedFileCount = -1;
     private string? statusNotice;
@@ -169,16 +171,17 @@ public partial class FileSearchDialog : DialogWindow
         var query = FileLocationQuery.Parse(SearchBox.Text).SearchText;
         var selectedScope = scope;
         var cancellationToken = currentCancellation.Token;
+        var inputDelay = options.GetInputDelayMilliseconds();
+        var waitsForInput = useDebounce && !string.IsNullOrWhiteSpace(query) && inputDelay > 0;
         isSearching = true;
-        searchStartedUtc = DateTime.UtcNow;
+        searchStartedUtc = DateTime.UtcNow.AddMilliseconds(waitsForInput ? inputDelay : 0);
         statusNotice = null;
         // 보이던 결과와 안내는 새 결과가 올 때까지 그대로 둡니다. 오래 걸리면 상태 타이머가 찾는 중 안내로 바꿉니다.
         UpdateStatus();
 
         try
         {
-            var inputDelay = options.GetInputDelayMilliseconds();
-            if (useDebounce && !string.IsNullOrWhiteSpace(query) && inputDelay > 0)
+            if (waitsForInput)
             {
                 await Task.Delay(inputDelay, cancellationToken);
             }
@@ -253,7 +256,7 @@ public partial class FileSearchDialog : DialogWindow
             statusNotice = null;
         }
 
-        var busy = isSearching && DateTime.UtcNow - searchStartedUtc >= BusyDelay;
+        var busy = busyShown = isSearching && DateTime.UtcNow - searchStartedUtc >= BusyDelay;
         if (busy && displayedResultCount == 0) UpdateEmptyState(FileLocationQuery.Parse(SearchBox.Text).SearchText, isLoading: true);
         var stateText = statusNotice ?? (busy
             ? "검색 중"
@@ -432,7 +435,8 @@ public partial class FileSearchDialog : DialogWindow
     {
         if (eventArgs.Key == Key.Escape)
         {
-            if (CancelActiveSearch())
+            // 안내가 보이기 전의 짧은 검색(입력 대기·색인 진행 중 재검색)은 Esc로 창을 닫으면서 함께 취소됩니다.
+            if (busyShown && CancelActiveSearch())
             {
                 eventArgs.Handled = true;
                 return;
