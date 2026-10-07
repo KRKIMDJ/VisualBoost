@@ -65,9 +65,27 @@ internal static class DiscoveryReuseTests
                 "다시 열기의 검증·준비 단계는 표시하지 않음: " + stage);
         }
         var parsing = new SourceAnalysisProgress(SourceAnalysisStage.Parsing, 0, 2, @"C:\p\A.cpp", refreshing: true);
-        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, parsing, true)) == "VisualBoost: 파싱 중 · 0/2 · A.cpp" &&
-              AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, false, parsing, true)) is null,
-            "다시 열기에서는 바뀐 파일 파싱만 표시");
+        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, parsing, true), out var refreshing) == "VisualBoost: 바뀐 파일 분석 중 · 0/2 · A.cpp" &&
+              refreshing && AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, false, parsing, true)) is null,
+            "다시 열기에서는 바뀐 파일 분석만 증분 문구로 표시");
+        var coldParsing = new SourceAnalysisProgress(SourceAnalysisStage.Parsing, 0, 2, @"C:\p\A.cpp");
+        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, coldParsing, false), out refreshing) == "VisualBoost: 파싱 중 · 0/2 · A.cpp" && !refreshing,
+            "처음 열기는 파싱 문구 유지");
+        VerifyRefreshDelay();
+    }
+
+    private static void VerifyRefreshDelay()
+    {
+        var start = new DateTime(2026, 10, 7, 0, 0, 0, DateTimeKind.Utc);
+        DateTime? since = null;
+        Check(AnalysisStatusText.Delay("처음", false, start, ref since) == "처음" && since is null, "처음 열기 문구는 바로 표시");
+        Check(AnalysisStatusText.Delay("다시", true, start, ref since) is null &&
+              AnalysisStatusText.Delay("다시 2", true, start.AddMilliseconds(750), ref since) is null &&
+              AnalysisStatusText.Delay("다시 3", true, start.AddSeconds(1), ref since) == "다시 3",
+            "다시 열기 문구는 처음 나온 뒤 1초가 지나야 표시");
+        Check(AnalysisStatusText.Delay(null, true, start.AddSeconds(2), ref since) is null && since is null &&
+              AnalysisStatusText.Delay("다시", true, start.AddSeconds(2.5), ref since) is null,
+            "문구가 끝나면 기다린 시간을 지우고 다음 다시 열기는 새로 기다림");
     }
 
     private static void Check(bool value, string message)

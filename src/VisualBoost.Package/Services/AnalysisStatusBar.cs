@@ -23,6 +23,7 @@ internal sealed class AnalysisStatusBar : IDisposable
     private string? written;
     private string? observed;
     private DateTime externalUntil;
+    private DateTime? refreshSince;
 
     /// <param name="secondary">파일 인덱스가 조용할 때 보여 줄 다른 진행 상태(정의·참조 색인 등).</param>
     internal AnalysisStatusBar(SolutionFileIndexService index, IVsStatusbar status, Func<string?>? secondary = null)
@@ -40,7 +41,8 @@ internal sealed class AnalysisStatusBar : IDisposable
         try
         {
             var snapshot = index.GetSnapshot();
-            var text = AnalysisStatusText.Format(snapshot) ?? secondary?.Invoke();
+            var own = AnalysisStatusText.Format(snapshot, out var refreshing);
+            var text = AnalysisStatusText.Delay(own, refreshing, DateTime.UtcNow, ref refreshSince) ?? secondary?.Invoke();
             status.IsFrozen(out var frozen);
             if (frozen != 0) return;
             status.GetText(out var current);
