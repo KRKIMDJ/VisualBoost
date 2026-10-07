@@ -99,18 +99,23 @@ public static class OwnDefinitionReferences
             }
         }
 
+        // 같은 줄 뒤에 붙은 주석(void A::F() // 설명)은 줄 끝으로 봅니다. 주석의 '/'를 나눗셈으로 읽어 정의 머리를 호출로 보지 않게 합니다.
+        var end = text.IndexOf("//", after, StringComparison.Ordinal);
+        var block = text.IndexOf("/*", after, StringComparison.Ordinal);
+        if (end < 0 || (block >= 0 && block < end)) end = block;
+        if (end < 0) end = text.Length;
         var open = SkipSpaces(text, after);
-        if (open >= text.Length || text[open] != '(') return false;
+        if (open >= end || text[open] != '(') return false;
         var depth = 0;
-        for (var i = open; i < text.Length; i++)
+        for (var i = open; i < end; i++)
         {
             if (text[i] == '(') depth++;
             else if (text[i] == ')' && --depth == 0)
             {
                 var next = SkipSpaces(text, i + 1);
-                if (next >= text.Length) return false;
+                if (next >= end) return false;
                 var c = text[next];
-                var following = next + 1 < text.Length ? text[next + 1] : '\0';
+                var following = next + 1 < end ? text[next + 1] : '\0';
                 return c is ';' or ')' or ',' or '.' or ']' or '}' or '?' or '+' or '*' or '/' or '%' or '|' or '^' or '<' or '>' or '!' ||
                        (c == '=' && following == '=') || (c == '-' && following != '>');
             }

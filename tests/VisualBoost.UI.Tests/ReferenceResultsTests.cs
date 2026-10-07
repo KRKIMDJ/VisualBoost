@@ -72,6 +72,7 @@ internal static class ReferenceResultsTests
         Assert(model.Rows.Count == 0, "표식 글자 일부로는 좁히지 않음");
         Assert(tick.RoleText.Length == 0 && Item(Use, 1, string.Empty, "x", NavigationRole.Definition).RoleText == "정의", "역할 없는 위치는 표식 없음");
         model.Filter = string.Empty;
+        RoleFilter();
 
         model.SetExpanded(set.Items[0].FullPath, false);
         Assert(Shape(model) == "F:Use.cpp(3) F:Mod.h(1) L:5 F:Other.cpp(1) L:2", "파일 접기: " + Shape(model));
@@ -618,6 +619,27 @@ internal static class ReferenceResultsTests
     }
 
     /// <summary>모든 프로젝트 모드로 시작한 모델입니다. 기본(현재 프로젝트) 모드와 무관한 표시 규칙을 검증할 때 씁니다.</summary>
+    /// <summary>필터 전체가 표식 글자와 같을 때만 역할로 거르고, 그 밖에는 글자 검색만 합니다(2026-10-07 검토).</summary>
+    private static void RoleFilter()
+    {
+        var model = AllProjectsModel();
+        model.Show(new ReferenceResultSet("F", new[]
+        {
+            Item(Use, 3, "Use", "int F() { return 1; }", NavigationRole.Definition),
+            Item(Use, 9, "Use", "// F의 정의는 위에 있습니다", NavigationRole.None),
+            Item(Other, 2, "Other", "return F();"),
+        }, string.Empty, DateTime.Now, Use));
+        model.Filter = " 정의 ";
+        Assert(model.VisibleCount == 1 && model.VisibleItems[0].Role == NavigationRole.Definition, "역할 필터는 코드에 '정의'가 든 줄을 남기지 않음");
+        model.Filter = "정";
+        Assert(model.VisibleCount == 1 && model.VisibleItems[0].Role == NavigationRole.None, "표식 글자 일부는 코드 글자 검색");
+        model.Filter = "선언";
+        Assert(model.VisibleCount == 0 && model.EmptyMessage == ReferenceResultsModel.NoRoleMatchMessage, "역할 위치가 없으면 표식 안내");
+        model.Filter = "없음";
+        Assert(model.EmptyMessage == ReferenceResultsModel.NoMatchMessage, "글자 검색 결과가 없으면 일반 안내");
+        Assert(Item(Use, 9, "Use", "// 정의", NavigationRole.None).Matches("정의"), "정의 후보 창 등 다른 목록의 글자 검색은 그대로");
+    }
+
     private static ReferenceResultsModel AllProjectsModel()
     {
         var model = new ReferenceResultsModel();

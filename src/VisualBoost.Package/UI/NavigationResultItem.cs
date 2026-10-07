@@ -107,7 +107,10 @@ internal sealed class NavigationResultItem
     /// <summary>참조 위치의 역할(정의·선언)입니다. clangd 근거가 확실할 때만 있고 모르면 <see cref="NavigationRole.None"/>입니다.</summary>
     public NavigationRole Role { get; }
 
-    /// <summary>역할 표식 글자("정의"·"선언")입니다. 역할이 없으면 빈 문자열입니다. 필터에 이 글자를 그대로 치면 그 역할의 위치만 남습니다.</summary>
+    /// <summary>
+    /// 역할 표식 글자("정의"·"선언")입니다. 역할이 없으면 빈 문자열입니다. 참조 창 필터 전체가 이 글자와 같으면 그 역할의 위치만 남습니다
+    /// (<see cref="ReferenceResults.Filter"/>).
+    /// </summary>
     public string RoleText { get; }
 
     /// <summary>
@@ -116,12 +119,12 @@ internal sealed class NavigationResultItem
     /// </summary>
     public IReadOnlyList<CodePreviewSpan> PreviewSpans => previewSpans ??= CreatePreviewSpans();
 
+    /// <summary>파일·폴더·코드·소속 이름 글자 검색입니다. 역할은 보지 않습니다.</summary>
     public bool Matches(string query) =>
         FileName.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Folder.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
         Code.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
-        Container.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0 ||
-        (RoleText.Length > 0 && string.Equals(RoleText, query, StringComparison.Ordinal));
+        Container.IndexOf(query, StringComparison.OrdinalIgnoreCase) >= 0;
 
     private IReadOnlyList<CodePreviewSpan> CreatePreviewSpans()
     {

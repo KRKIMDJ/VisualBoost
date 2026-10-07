@@ -31,6 +31,7 @@ public partial class ReferencesControl : UserControl
     {
         // XAML을 읽는 동안 생기는 변경 이벤트는 아직 만들지 않은 요소를 건드리므로 무시합니다. 첫 Refresh가 끝나면 풀립니다.
         syncing = true;
+        ResultListFont.EnsureTracking();
         InitializeComponent();
         HintText.ToolTip = "Ctrl+Tab/Ctrl+Shift+Tab 현재 프로젝트·모든 프로젝트 전환\nShift+F10 또는 우클릭: 위치·코드 복사, 탐색기에서 보기, 전부 펼치기·접기";
         // 결과를 보인 뒤에 게시되거나 다시 게시된 프로젝트 소속을 반영합니다. 초점 이벤트에서 바로 다시 정렬하면 마우스 처리 도중

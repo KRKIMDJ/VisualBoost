@@ -169,6 +169,10 @@ internal static class SemanticNavigationTests
             ("    return x * AActorX::F(n);", 15, "AActorX::F", "AActorX", 0),
             ("    if (p) p->AActorX::F(1);", 14, "AActorX::F", "AActorX", 0),
             ("void AActorX::F(int n,", 5, "AActorX::F", "AActorX", 1),
+            // 같은 줄 뒤의 주석은 줄 끝으로 봅니다. 매크로로 감싼 정의 머리(Unreal 생성 코드)는 앞 글자 '('로 호출처럼 보여 남습니다.
+            ("void AActorX::F() // 설명", 5, "AActorX::F", "AActorX", 1),
+            ("void AActorX::F() /* 설명 */ {", 5, "AActorX::F", "AActorX", 1),
+            ("DEFINE_FUNCTION(AActorX::execFoo)", 16, "AActorX::execFoo", "AActorX", 0),
             // 연산자 정의 머리는 사슬(operator)과 소속 이름(operator=)이 달라 남습니다.
             ("AActorX& AActorX::operator=(const AActorX& o)", 9, "AActorX::operator=", "AActorX", 0),
         };

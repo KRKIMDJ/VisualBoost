@@ -204,6 +204,7 @@
             <Grid Grid.Column="1">
               <TextBox x:Name="FilterBox" Padding="0,3" BorderThickness="0" Background="Transparent"
                        Foreground="{DynamicResource {x:Static vsshell:VsBrushes.ToolWindowTextKey}}"
+                       ToolTip="'정의'·'선언'을 그대로 입력하면 그 역할의 위치만 남깁니다."
                        TextChanged="OnFilterTextChanged" />
               <TextBlock x:Name="FilterPlaceholder" VerticalAlignment="Center" Opacity="0.6" IsHitTestVisible="False"
                          Text="파일·폴더·코드·함수로 좁히기" />

@@ -43,7 +43,8 @@ internal sealed class ProjectMembershipCache
 
     /// <summary>
     /// 프로젝트 파일의 항목 <c>Include</c> 값에 와일드카드(<c>*</c>·<c>?</c>)가 있는지 봅니다. 읽지 못하면 저장하지 않도록 true입니다.
-    /// 엔진 프로젝트 파일은 수십 MB일 수 있으므로 UI thread 밖에서 부릅니다.
+    /// 엔진 프로젝트 파일은 수십 MB일 수 있으므로 UI thread 밖에서 부릅니다. 큰따옴표 값만 보므로 작은따옴표 값이나 속성 확장
+    /// (<c>Include="$(Sources)"</c>)으로 들어오는 와일드카드는 잡지 못합니다. VS가 쓰는 프로젝트 파일에서는 드문 형태입니다.
     /// </summary>
     public static bool HasWildcardItems(string projectPath)
     {

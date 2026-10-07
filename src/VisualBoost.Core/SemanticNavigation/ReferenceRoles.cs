@@ -85,4 +85,12 @@ public static class ReferenceRoles
         NavigationRole.Declaration => "선언",
         _ => string.Empty,
     };
+
+    /// <summary>필터 글자 전체가 역할 표식 글자와 같으면 그 역할입니다. 아니면 <see cref="NavigationRole.None"/>입니다.</summary>
+    public static NavigationRole FromText(string? text) => text?.Trim() switch
+    {
+        "정의" => NavigationRole.Definition,
+        "선언" => NavigationRole.Declaration,
+        _ => NavigationRole.None,
+    };
 }

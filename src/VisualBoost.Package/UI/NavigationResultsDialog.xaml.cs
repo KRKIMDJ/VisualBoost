@@ -27,6 +27,7 @@ public partial class NavigationResultsDialog : DialogWindow
         this.status = status;
         ThreadHelper.ThrowIfNotOnUIThread();
         EditorCodeStyleSource.EnsureStarted();
+        ResultListFont.EnsureTracking();
         InitializeComponent();
         Title = title;
         HeaderText.Text = header;

@@ -6,6 +6,7 @@ using System.IO;
 using System.Linq;
 using System.Windows;
 using VisualBoost.Core.Indexing;
+using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.UI;
 
@@ -228,6 +229,9 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
 
     public const string NoResultsMessage = "C++ 편집기에서 참조 찾기(Shift+Alt+F)를 실행하면 결과가 여기에 표시됩니다.";
     public const string NoMatchMessage = "필터와 일치하는 위치가 없습니다.";
+
+    /// <summary>역할 필터로 남은 위치가 없을 때의 안내입니다. 색인 중에는 표식이 아직 없어 정의가 없다고 오해하지 않게 합니다.</summary>
+    public const string NoRoleMatchMessage = "정의·선언 표식이 붙은 위치가 없습니다. 표식은 색인 근거가 확실한 위치에만 붙습니다.";
     public const string CurrentProjectTip = "현재 프로젝트 탐색";
     public const string AllProjectsTip = "모든 프로젝트 탐색";
 
@@ -291,6 +295,10 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
     public string CurrentProjectToolTip =>
         current is null ? CurrentProjectTip : CurrentProjectTip + "\n" + (HasCurrentProject ? CurrentProjectNames : ProjectPendingText);
 
+    /// <summary>
+    /// 위치를 좁히는 글자입니다. 앞뒤 공백을 뺀 글자 전체가 역할 표식("정의"·"선언")과 같으면 그 역할의 위치만 남기고, 그 밖에는 파일·폴더·코드·
+    /// 소속 이름 글자로 찾습니다. 역할 검색은 드물어 단추나 숨은 접두어를 두지 않았습니다(2026-10-07 검토).
+    /// </summary>
     public string Filter
     {
         get => filter;
@@ -325,7 +333,8 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
         {
             if (current is null) return NoResultsMessage;
             if (modeCount == 0) return $"현재 프로젝트에는 위치가 없습니다 · 전체 {current.Items.Count:N0}개";
-            return rows.Count == 0 ? NoMatchMessage : string.Empty;
+            if (rows.Count > 0) return string.Empty;
+            return ReferenceRoles.FromText(filter) == NavigationRole.None ? NoMatchMessage : NoRoleMatchMessage;
         }
     }
 
@@ -474,7 +483,10 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
         {
             var inMode = IsNarrowedByProject ? orderedItems.Where(item => InCurrentProject(item.FullPath)).ToArray() : orderedItems;
             modeCount = inMode.Count;
-            var visible = filter.Length == 0 ? inMode : inMode.Where(item => item.Matches(filter)).ToArray();
+            var role = ReferenceRoles.FromText(filter);
+            var visible = filter.Length == 0 ? inMode
+                : role != NavigationRole.None ? inMode.Where(item => item.Role == role).ToArray()
+                : inMode.Where(item => item.Matches(filter)).ToArray();
 
             // 프로젝트 머리 행은 모든 프로젝트 모드에서 결과가 둘 이상의 묶음에 걸칠 때만 둡니다. 필터를 치는 동안 머리 행이
             // 나타났다 사라지지 않게 필터 전 위치로 정합니다. 현재 프로젝트 모드는 이미 한 프로젝트라 파일부터 시작해 한 행을 아낍니다.
