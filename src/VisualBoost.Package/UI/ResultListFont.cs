@@ -58,7 +58,7 @@ public static class ResultListFont
     }
 
     /// <summary>
-    /// 패키지 시작 때 주 창이 없어 임시 요소로 따라가고 있으면 주 창으로 옮깁니다. 옵션을 적용하지 않아도 옮기도록 결과 창을 만들 때 부릅니다
+    /// 패키지 시작 때 주 창이 없어 임시 요소로 따라가고 있으면 주 창으로 옮깁니다. 옵션을 적용하지 않아도 옮기도록 결과 창을 만들 때와 목록 팝업을 열 때 부릅니다
     /// (2026-10-07 검토). UI thread에서 부릅니다.
     /// </summary>
     public static void EnsureTracking()

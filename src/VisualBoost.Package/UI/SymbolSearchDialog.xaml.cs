@@ -62,6 +62,7 @@ public partial class SymbolSearchDialog : DialogWindow
         scopeChoice = SameSolution(rememberedSolution, solutionKey)
             ? new SymbolScopeChoice(rememberedScopeId, rememberedScopeName)
             : new SymbolScopeChoice(null, null);
+        ResultListFont.EnsureTracking();
         InitializeComponent();
         UpdateScopes();
         // 로드 전 TextChanged는 무시되고, 첫 검색은 OnLoaded에서 이 검색어로 실행합니다.

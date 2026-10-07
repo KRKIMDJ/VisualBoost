@@ -68,15 +68,18 @@ internal static class DocumentNavigationSessionTests
         }
     }
     private static void Check(bool value, string message) { if (!value) throw new Exception(message); }
+    // 빌드 직후처럼 CPU가 바쁠 때 백그라운드 분석이 늦어 5초를 넘긴 적이 있습니다(2026-10-07). 상한은 실패할 때만 기다리는 시간이라
+    // 넉넉히 두고, 반복마다 잠깐 양보해 대기 루프가 분석 스레드의 CPU를 빼앗지 않게 합니다.
     private static void Until(Func<bool> condition)
     {
         var watch = System.Diagnostics.Stopwatch.StartNew();
         while (!condition())
         {
-            if (watch.ElapsedMilliseconds > 5000) throw new Exception("문서 탐색 세션 대기 시간 초과");
+            if (watch.ElapsedMilliseconds > 15000) throw new Exception("문서 탐색 세션 대기 시간 초과");
             var frame = new DispatcherFrame();
             Dispatcher.CurrentDispatcher.BeginInvoke(DispatcherPriority.Background, new Action(() => frame.Continue = false));
             Dispatcher.PushFrame(frame);
+            System.Threading.Thread.Sleep(1);
         }
     }
 }

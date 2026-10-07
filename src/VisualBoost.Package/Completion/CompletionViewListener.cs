@@ -153,6 +153,7 @@ internal sealed class CompletionViewListener : IWpfTextViewCreationListener
             var caret = view.Caret;
             popup.HorizontalOffset = Math.Max(0, caret.Left - view.ViewportLeft);
             popup.VerticalOffset = caret.Bottom - view.ViewportTop;
+            UI.ResultListFont.EnsureTracking();
             UI.PopupTextFormatting.Apply(popup.Child, view.VisualElement);
             popup.IsOpen = true;
             guard.Start();

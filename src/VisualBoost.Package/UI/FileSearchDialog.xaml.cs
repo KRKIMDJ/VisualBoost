@@ -70,6 +70,7 @@ public partial class FileSearchDialog : DialogWindow
             .ToArray();
         scope = ParseScope(options.FileSearchScope);
 
+        ResultListFont.EnsureTracking();
         InitializeComponent();
         ConfigureScopeButtons();
         ConfigureMode();
