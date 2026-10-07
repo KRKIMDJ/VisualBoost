@@ -45,6 +45,16 @@ internal static class DiscoveryReuseTests
         var stored = Directory.GetFiles(Path.Combine(root, "cache"), "*.bin").Single();
         File.WriteAllBytes(stored, new byte[] { 1, 2, 3 });
         Check(cache.Load(solution).Count == 0, "깨진 캐시는 빈 목록");
+        // 문자열 길이 부호가 깨지면 BinaryReader가 FormatException을 냅니다. 수집 실패가 아니라 빈 목록이어야 합니다.
+        File.WriteAllBytes(stored, new byte[] { 0xFF, 0xFF, 0xFF, 0xFF, 0xFF });
+        Check(cache.Load(solution).Count == 0, "길이 부호가 깨진 캐시도 빈 목록");
+
+        var wildcard = Path.Combine(root, "Wild.vcxproj");
+        File.WriteAllText(wildcard, "<Project>\n  <ItemGroup>\n    <ClCompile Include=\"Src\\**\\*.cpp\" />\n  </ItemGroup>\n</Project>");
+        Check(ProjectMembershipCache.HasWildcardItems(wildcard) && !ProjectMembershipCache.HasWildcardItems(project) &&
+              ProjectMembershipCache.HasWildcardItems(Path.Combine(root, "Missing.vcxproj")), "와일드카드 항목 판정(읽지 못하면 저장 안 함)");
+        cache.Save(solution, new[] { new ProjectMembership(wildcard, ProjectMembershipCache.Stamp(wildcard)!.Value, files) });
+        Check(cache.Load(solution).Count == 0, "와일드카드 항목을 쓰는 프로젝트는 저장하지 않음");
     }
 
     private static void VerifyStatusText()
@@ -57,20 +67,26 @@ internal static class DiscoveryReuseTests
         var cold = new SourceAnalysisProgress(SourceAnalysisStage.Linking, 5, 10, @"C:\p\A.cpp");
         Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, cold, false)) == "VisualBoost: include 정리 중 · 5/10 · A.cpp",
             "처음 분석은 모든 단계를 표시");
-        foreach (var stage in new[] { SourceAnalysisStage.Waiting, SourceAnalysisStage.CacheChecking, SourceAnalysisStage.Indexing,
-                     SourceAnalysisStage.Linking, SourceAnalysisStage.Saving })
+        // 분석 패스가 진행 값을 낸 뒤에는 분석이 저장된 결과를 재사용하는지로 정합니다. 파일 목록 캐시만 있고 분석 캐시를 쓰지 못한 첫 분석은
+        // 모든 단계를 보입니다.
+        foreach (var stage in new[] { SourceAnalysisStage.CacheChecking, SourceAnalysisStage.Indexing, SourceAnalysisStage.Linking, SourceAnalysisStage.Saving })
         {
             Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, new SourceAnalysisProgress(stage, 1, 2, null, refreshing: true), false)) is null &&
-                  AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, new SourceAnalysisProgress(stage, 1, 2), true)) is null,
-                "다시 열기의 검증·준비 단계는 표시하지 않음: " + stage);
+                  AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, new SourceAnalysisProgress(stage, 1, 2), true)) is not null,
+                "다시 열기의 검증·준비 단계는 숨기고 분석 캐시를 쓰지 못한 첫 분석은 표시: " + stage);
         }
+        var waiting = new SourceAnalysisProgress(SourceAnalysisStage.Waiting, 0, 0);
+        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, waiting, true)) is null &&
+              AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, waiting, false)) == "VisualBoost: 파싱 준비 중",
+            "분석 시작 전 대기는 파일 목록 캐시로 판정");
         var parsing = new SourceAnalysisProgress(SourceAnalysisStage.Parsing, 0, 2, @"C:\p\A.cpp", refreshing: true);
         Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, parsing, true), out var refreshing) == "VisualBoost: 바뀐 파일 분석 중 · 0/2 · A.cpp" &&
               refreshing && AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, false, parsing, true)) is null,
             "다시 열기에서는 바뀐 파일 분석만 증분 문구로 표시");
         var coldParsing = new SourceAnalysisProgress(SourceAnalysisStage.Parsing, 0, 2, @"C:\p\A.cpp");
-        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, coldParsing, false), out refreshing) == "VisualBoost: 파싱 중 · 0/2 · A.cpp" && !refreshing,
-            "처음 열기는 파싱 문구 유지");
+        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, coldParsing, false), out refreshing) == "VisualBoost: 파싱 중 · 0/2 · A.cpp" && !refreshing &&
+              AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, coldParsing, true), out refreshing) == "VisualBoost: 파싱 중 · 0/2 · A.cpp" && !refreshing,
+            "처음 분석(분석 캐시를 쓰지 못한 다시 열기 포함)은 파싱 문구 유지");
         VerifyRefreshDelay();
     }
 

@@ -81,6 +81,33 @@ internal static class ProjectCollectionTests
             System.IO.File.AppendAllText(project, " ");
             var changed = Collect();
             Check(items.Reads > reads && changed.Count == 5, "프로젝트 파일이 바뀌면 다시 열거해 새 항목 반영");
+
+            // 열거 중 실패한 항목이 있던 수집은 일부만 읽은 목록이므로 저장하지 않습니다.
+            items.FailedIndex = 2;
+            System.IO.File.AppendAllText(project, " ");
+            Collect();
+            items.FailedIndex = -1;
+            reads = items.Reads;
+            Collect();
+            Check(items.Reads > reads, "열거 중 실패가 있던 수집은 저장하지 않아 다음 열기에서 다시 열거");
+
+            System.IO.File.WriteAllText(project, "<Project><ItemGroup><ClCompile Include=\"Src\\*.cpp\" /></ItemGroup></Project>");
+            Collect();
+            reads = items.Reads;
+            Collect();
+            Check(items.Reads > reads, "와일드카드 항목을 쓰는 C++ 프로젝트는 저장하지 않고 매번 열거");
+
+            // 큰 프로젝트의 저장한 목록은 나눠 넣어도 빠짐없이 씁니다.
+            var engine = System.IO.Path.Combine(root, "Engine.vcxproj");
+            System.IO.File.WriteAllText(engine, "<Project />");
+            var engineItems = new ProjectItems();
+            for (var i = 0; i < 9000; i++) engineItems.Values.Add(new ProjectItem { FileNames = new[] { "", System.IO.Path.Combine(root, "Engine", "E" + i + ".cpp") } });
+            dte.Solution.Projects.Values.Add(new Project { FullName = engine, Name = "Engine", ProjectItems = engineItems });
+            var withEngine = Collect();
+            var engineReads = engineItems.Reads;
+            var reused = Collect();
+            Check(engineItems.Reads == engineReads && reused.Count == withEngine.Count && reused.Count(p => p.Contains(@"\Engine\")) == 9000,
+                "큰 프로젝트의 저장한 목록을 나눠 넣어 모두 재사용");
         }
         finally { System.IO.Directory.Delete(root, recursive: true); }
     }

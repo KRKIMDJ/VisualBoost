@@ -48,8 +48,14 @@ internal sealed class AnalysisStatusBar : IDisposable
             status.GetText(out var current);
             if (text is null)
             {
-                // 다른 확장·빌드·탐색 명령이 쓴 상태를 분석 완료 시 지우지 않습니다.
-                if (written is not null && IsOwn(current)) status.Clear();
+                // 다른 확장·빌드·탐색 명령이 쓴 상태를 분석 완료 시 지우지 않습니다. VS가 지우기를 늦게 반영하거나 건너뛸 수 있으므로
+                // 표시가 자기 문구가 아니게 될 때까지 최근 문구를 두고 다음 틱에 다시 지웁니다(2026-10-07 검토).
+                if (written is not null && IsOwn(current))
+                {
+                    status.Clear();
+                    return;
+                }
+
                 written = null; observed = current;
                 recent.Clear();
                 return;

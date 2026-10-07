@@ -73,7 +73,8 @@ internal sealed class FileIndexCache
             exception is IOException ||
             exception is UnauthorizedAccessException ||
             exception is SecurityException ||
-            exception is EndOfStreamException)
+            exception is EndOfStreamException ||
+            exception is FormatException)
         {
             return Array.Empty<string>();
         }

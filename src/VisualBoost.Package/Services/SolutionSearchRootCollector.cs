@@ -16,6 +16,9 @@ namespace VisualBoost.Services;
 
 internal static class SolutionSearchRootCollector
 {
+    // 저장한 항목 목록을 UI thread에서 한 번에 넣을 개수입니다.
+    private const int ReusedChunk = 4096;
+
     /// <param name="membershipCache">C++ 프로젝트 항목 목록 캐시입니다. 프로젝트 파일이 그대로인 프로젝트는 자동화로 다시 열거하지 않습니다.</param>
     public static async Task<SolutionIndexDiscoveryResult> CollectAsync(
         DTE2 dte, CancellationToken cancellationToken, Action<IReadOnlyList<string>> publish, ProjectMembershipCache? membershipCache = null)
@@ -80,10 +83,19 @@ internal static class SolutionSearchRootCollector
             {
                 if (stored.TryGetValue(path, out var entry) && entry.Stamp.Equals(stamp))
                 {
-                    foreach (var file in entry.Files)
+                    // 엔진 프로젝트는 항목이 10만 개를 넘으므로 나눠 넣어 UI thread를 한 번에 길게 쓰지 않습니다(2026-10-07 검토).
+                    for (var start = 0; start < entry.Files.Count; start += ReusedChunk)
                     {
-                        members.Add(file);
-                        if (files.Add(file)) batch.Add(file);
+                        var from = start;
+                        pending.Enqueue(() =>
+                        {
+                            for (var i = from; i < Math.Min(from + ReusedChunk, entry.Files.Count); i++)
+                            {
+                                var file = entry.Files[i];
+                                members.Add(file);
+                                if (files.Add(file)) batch.Add(file);
+                            }
+                        });
                     }
                     memberships.Add(entry);
                     reusedProjects++;

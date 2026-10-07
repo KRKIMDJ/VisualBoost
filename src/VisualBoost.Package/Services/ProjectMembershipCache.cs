@@ -14,12 +14,14 @@ namespace VisualBoost.Services;
 /// </summary>
 /// <remarks>
 /// Unreal Solution의 엔진 프로젝트는 항목이 10만 개를 넘어, UI thread에서 자동화로 열거하는 데 열 때마다 약 1분이 걸렸습니다(2026-10-07 측정).
-/// 이 형식은 항목을 프로젝트 파일에 직접 적으므로 항목이 바뀌면 프로젝트 파일도 바뀝니다. 폴더 내용으로 항목을 정하는 SDK 형식 프로젝트는
-/// 프로젝트 파일이 그대로여도 항목이 바뀔 수 있어 저장하지 않습니다. 저장하지 않은 변경이 있는 프로젝트는 호출자가 항상 다시 열거합니다.
+/// 이 형식은 항목을 프로젝트 파일에 직접 적으므로 항목이 바뀌면 프로젝트 파일도 바뀝니다. 폴더 내용으로 항목을 정하는 SDK 형식 프로젝트와
+/// 와일드카드 항목(<c>Include="*.cpp"</c>)을 쓰는 C++ 프로젝트는 프로젝트 파일이 그대로여도 항목이 바뀔 수 있어 저장하지 않습니다(2026-10-07 검토).
+/// 저장하지 않은 변경이 있는 프로젝트는 호출자가 항상 다시 열거합니다.
 /// </remarks>
 internal sealed class ProjectMembershipCache
 {
-    private const int FormatVersion = 1;
+    // 2: 와일드카드 항목 검사. 검사 없이 저장한 1의 목록은 버리고 한 번 다시 열거합니다.
+    private const int FormatVersion = 2;
     private const int MaximumEntries = 10_000;
     private const int MaximumFiles = 5_000_000;
     private const string Magic = "VisualBoost.ProjectMembership";
@@ -38,6 +40,39 @@ internal sealed class ProjectMembershipCache
         return string.Equals(extension, ".vcxproj", StringComparison.OrdinalIgnoreCase) ||
                string.Equals(extension, ".vcxitems", StringComparison.OrdinalIgnoreCase);
     }
+
+    /// <summary>
+    /// 프로젝트 파일의 항목 <c>Include</c> 값에 와일드카드(<c>*</c>·<c>?</c>)가 있는지 봅니다. 읽지 못하면 저장하지 않도록 true입니다.
+    /// 엔진 프로젝트 파일은 수십 MB일 수 있으므로 UI thread 밖에서 부릅니다.
+    /// </summary>
+    public static bool HasWildcardItems(string projectPath)
+    {
+        const string attribute = "Include=\"";
+        try
+        {
+            using var reader = new StreamReader(projectPath, Encoding.UTF8, detectEncodingFromByteOrderMarks: true);
+            string? line;
+            while ((line = reader.ReadLine()) is not null)
+            {
+                for (var at = line.IndexOf(attribute, StringComparison.Ordinal); at >= 0; at = line.IndexOf(attribute, at + 1, StringComparison.Ordinal))
+                {
+                    var start = at + attribute.Length;
+                    var end = line.IndexOf('"', start);
+                    if (end < 0) end = line.Length;
+                    if (line.IndexOfAny(Wildcards, start, end - start) >= 0) return true;
+                }
+            }
+
+            return false;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException ||
+                                          exception is NotSupportedException || exception is SecurityException)
+        {
+            return true;
+        }
+    }
+
+    private static readonly char[] Wildcards = { '*', '?' };
 
     /// <summary>프로젝트 파일의 현재 크기·수정 시각입니다. 읽을 수 없으면 null입니다.</summary>
     public static ProjectStamp? Stamp(string projectPath)
@@ -83,7 +118,7 @@ internal sealed class ProjectMembershipCache
             return result;
         }
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is SecurityException ||
-                                          exception is EndOfStreamException)
+                                          exception is EndOfStreamException || exception is FormatException)
         {
             return empty;
         }
@@ -93,7 +128,7 @@ internal sealed class ProjectMembershipCache
     {
         var cachePath = GetCachePath(solutionPath);
         if (cachePath is null) return;
-        var list = entries.Where(entry => IsCacheable(entry.ProjectPath)).Take(MaximumEntries).ToArray();
+        var list = entries.Where(entry => IsCacheable(entry.ProjectPath) && !HasWildcardItems(entry.ProjectPath)).Take(MaximumEntries).ToArray();
         var temporaryPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {

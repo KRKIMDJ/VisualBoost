@@ -13,11 +13,16 @@ namespace VisualBoost.Core.SemanticNavigation;
 /// <list type="bullet">
 /// <item>멤버 정의 머리의 한정자: <c>void AActor::BeginPlay()</c>, <c>AActor::AActor()</c>의 앞 이름, <c>int AActor::Count = 0;</c>,
 /// <c>void AActor::FInner::Do()</c>. 이름 뒤에 쓰인 <c>::</c> 사슬이 소속 이름의 끝과 같을 때입니다. 함수 몸체 안의 <c>AActor::Get()</c>은
-/// 소속 이름이 감싼 함수라 남습니다. 함수 이름 뒤에는 <c>::</c>가 올 수 없어 찾는 심볼의 종류와 상관없이 적용합니다.</item>
+/// 소속 이름이 감싼 함수라 남습니다. 몸체 안에서 자기 자신을 한정해 부르는 <c>AActor::F(n - 1)</c>·같은 이름 오버로드 호출은 사슬과 소속
+/// 이름이 같으므로 이름 앞뒤 글자로 식 안의 호출인지 가려 남깁니다(2026-10-07 검토). 함수 이름 뒤에는 <c>::</c>가 올 수 없어 찾는
+/// 심볼의 종류와 상관없이 적용합니다.</item>
 /// <item>생성자·소멸자 이름: <c>AActor::AActor()</c>의 뒤 이름, <c>~AActor()</c>, 클래스 본문의 <c>AActor();</c>. 소속 이름이 클래스 자신이고
-/// 이름 뒤가 <c>(</c>일 때입니다. 함수 안의 재귀 호출도 같은 모양이므로 찾는 심볼이 타입일 때만 적용합니다.</item>
+/// 이름 뒤가 <c>(</c>일 때입니다. 생성자·소멸자 몸체와 초기화 목록 안의 위임 생성자 <c>: AActor(0)</c>·임시 객체 <c>AActor(1)</c>은 소속
+/// 이름이 <c>AActor::AActor</c>처럼 그 생성자·소멸자라 남깁니다(clangd 22 확인).
+/// 함수 안의 재귀 호출도 같은 모양이므로 찾는 심볼이 타입일 때만 적용합니다.</item>
 /// </list>
-/// 반환형·매개변수형·변수 선언·정적 멤버 호출·임시 객체 생성처럼 실제로 쓰는 위치는 남깁니다.
+/// 반환형·매개변수형·변수 선언·정적 멤버 호출·임시 객체 생성처럼 실제로 쓰는 위치는 남깁니다. 연산자 정의 머리(<c>A&amp; A::operator=(…)</c>)는
+/// 사슬이 소속 이름과 달라 남습니다.
 /// </remarks>
 public static class OwnDefinitionReferences
 {
@@ -60,13 +65,58 @@ public static class OwnDefinitionReferences
                 if (scopes[offset + 1 + i] != chain[i]) return false;
             }
 
-            return true;
+            return !IsCall(lineText, start, after);
         }
 
-        // 생성자·소멸자 이름: 소속 이름이 클래스 자신이거나 그 클래스의 생성자·소멸자이고 이름 뒤가 여는 괄호입니다.
+        // 생성자·소멸자 이름: 소속 이름이 클래스 자신이고 이름 뒤가 여는 괄호입니다. 소속이 그 클래스의 생성자·소멸자(A::A, A::~A)이면
+        // 몸체·초기화 목록 안의 사용이므로 남깁니다.
         if (!symbolIsType || !Follows(lineText, after, "(")) return false;
         var last = scopes[scopes.Count - 1];
-        return last == name || (scopes.Count >= 2 && scopes[scopes.Count - 2] == name && (last == name || last == "~" + name));
+        return last == name && (scopes.Count == 1 || scopes[scopes.Count - 2] != name);
+    }
+
+    /// <summary>
+    /// 정의 머리와 같은 사슬이 식 안의 호출로 쓰였는지 봅니다. 이름 앞이 식에서만 오는 기호·키워드이거나, 같은 줄에서 인수 괄호를 닫은 뒤
+    /// 식이 이어지면 호출입니다. 정의 머리는 앞에 반환형(이름·<c>*</c>·<c>&amp;</c>·<c>&gt;</c>)이나 줄 시작이 오고 뒤에 <c>{</c>·<c>const</c>·
+    /// <c>:</c>·<c>= default</c>·줄 끝이 옵니다. 판단할 수 없으면 정의 머리로 봅니다.
+    /// </summary>
+    private static bool IsCall(string text, int start, int after)
+    {
+        var before = start - 1;
+        while (before >= 0 && char.IsWhiteSpace(text[before])) before--;
+        if (before >= 0)
+        {
+            var c = text[before];
+            if (c is '(' or ',' or '=' or '!' or '?' or '{' or ';' or '[' or '+' or '-' or '/' or '%' or '|' or '^' or '<') return true;
+            // 포인터 멤버 접근 p->A::F()입니다.
+            if (c == '>' && before > 0 && text[before - 1] == '-') return true;
+            if (IsIdentifier(c))
+            {
+                var wordEnd = before + 1;
+                while (before >= 0 && IsIdentifier(text[before])) before--;
+                var word = text.Substring(before + 1, wordEnd - before - 1);
+                if (word is "return" or "co_return" or "co_await" or "co_yield" or "throw") return true;
+            }
+        }
+
+        var open = SkipSpaces(text, after);
+        if (open >= text.Length || text[open] != '(') return false;
+        var depth = 0;
+        for (var i = open; i < text.Length; i++)
+        {
+            if (text[i] == '(') depth++;
+            else if (text[i] == ')' && --depth == 0)
+            {
+                var next = SkipSpaces(text, i + 1);
+                if (next >= text.Length) return false;
+                var c = text[next];
+                var following = next + 1 < text.Length ? text[next + 1] : '\0';
+                return c is ';' or ')' or ',' or '.' or ']' or '}' or '?' or '+' or '*' or '/' or '%' or '|' or '^' or '<' or '>' or '!' ||
+                       (c == '=' && following == '=') || (c == '-' && following != '>');
+            }
+        }
+
+        return false;
     }
 
     private static bool IsIdentifier(char value) => char.IsLetterOrDigit(value) || value == '_';

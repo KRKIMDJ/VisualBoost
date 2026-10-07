@@ -90,7 +90,7 @@ internal sealed class SourceAnalysisCache
         catch (Exception exception) when (
             exception is IOException || exception is UnauthorizedAccessException ||
             exception is SecurityException || exception is EndOfStreamException ||
-            exception is InvalidDataException)
+            exception is InvalidDataException || exception is FormatException)
         {
             return Empty();
         }

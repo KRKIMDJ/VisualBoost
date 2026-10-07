@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel.Composition;
 using System.Linq;
+using System.Runtime.InteropServices;
 using System.Windows.Input;
 using EnvDTE;
 using EnvDTE80;
@@ -60,11 +61,20 @@ internal sealed class MenuAccessKeyProcessor : KeyProcessor
                 continue;
             }
 
-            if (command.Bindings is not object[] bindings || !bindings.OfType<string>().Any(binding => KeyBindingText.IsAltLetter(binding, letter))) continue;
-            if (!command.IsAvailable) return;
-            object? input = null;
-            object? output = null;
-            dte.Commands.Raise(CommandSet, id, ref input, ref output);
+            // 키 입력 경로이므로 자동화 호출이 거절되면(COMException) 이 키를 처리하지 않고 VS 기본 처리(메뉴)에 넘깁니다(2026-10-07 검토).
+            try
+            {
+                if (command.Bindings is not object[] bindings || !bindings.OfType<string>().Any(binding => KeyBindingText.IsAltLetter(binding, letter))) continue;
+                if (!command.IsAvailable) return;
+                object? input = null;
+                object? output = null;
+                dte.Commands.Raise(CommandSet, id, ref input, ref output);
+            }
+            catch (COMException)
+            {
+                return;
+            }
+
             args.Handled = true;
             return;
         }

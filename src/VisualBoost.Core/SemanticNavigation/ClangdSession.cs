@@ -39,12 +39,12 @@ public sealed class ClangdLaunchOptions
     /// <remarks>
     /// 첫 색인 시간은 작업 수에 거의 비례합니다(clangd가 작업마다 코어 하나를 다 씀). 예전 기본값(코어의 1/4)은 큰 Unreal 프로젝트의 첫 색인이
     /// 너무 오래 걸렸습니다(2026-10-07 사용자 피드백). Unreal TU 하나가 1.4 GiB까지 쓰므로 메모리가 작은 PC에서는 작업 수를 줄입니다.
-    /// 메모리를 모르면(0) 코어 기준만 씁니다.
+    /// 메모리를 모르면(0) 메모리 부족을 피하려고 예전 기본값(코어의 1/4)을 씁니다(2026-10-07 검토).
     /// </remarks>
     public static int DefaultWorkerCount(int processors, long memoryBytes)
     {
+        if (memoryBytes <= 0) return Math.Max(1, processors / 4);
         var byCores = Math.Max(1, processors / 2);
-        if (memoryBytes <= 0) return byCores;
         var gib = memoryBytes / (1024d * 1024 * 1024);
         var byMemory = (int)Math.Floor((gib - 8) / 2.5);
         return Math.Max(1, Math.Min(byCores, byMemory));

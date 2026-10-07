@@ -183,6 +183,10 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         // 편집기 응답성을 우선하고 남는 처리량만 초기 분석에 사용합니다.
         var workers = Math.Min(2, Math.Max(1, Environment.ProcessorCount - 1));
         var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = workers };
+        // 2단계에서 파일마다 처음 보고하는 단계입니다. 처음 분석은 캐시 확인부터 보입니다.
+        var checking = SourceAnalysisStage.CacheChecking;
+        // 1단계에서 없거나 너무 커서 분석하지 않기로 정한 파일입니다. 2단계에서 다시 보지 않습니다.
+        var settled = new ConcurrentDictionary<string, byte>(StringComparer.OrdinalIgnoreCase);
         if (refreshing)
         {
             // 1단계(다시 연 Solution): 저장된 분석을 쓸 수 있는 파일을 먼저 모두 채택합니다. 그래야 2단계의 진행 수가 실제로 다시 파싱할
@@ -193,24 +197,30 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 try
                 {
                     var info = TryGetInfo(file);
-                    if (info is not null && info.Length <= MaximumSourceLength) TryReuse(file, info, SourceAnalysisRank.Engine);
+                    if (info is null || info.Length > MaximumSourceLength) settled[file] = 0;
+                    else TryReuse(file, info, SourceAnalysisRank.Engine);
                 }
                 finally { if (!cancellationToken.IsCancellationRequested) Report(SourceAnalysisStage.CacheChecking, file, completed: true); }
             });
             lock (progressGate)
             {
                 completedFiles = 0;
-                progressTotal = sourceFiles.Length - current.Count;
+                progressTotal = sourceFiles.Length - current.Count - settled.Count;
+                // 하나도 재사용하지 못했으면(분석 형식 변경·캐시 손상 등) 처음 분석과 같으므로 처음 열기 단계로 보입니다(2026-10-07 검토).
+                refreshing = current.Count > 0;
+                // 2단계 파일은 모두 다시 파싱할 파일이므로 캐시 확인과 파싱을 한 단계로 보고합니다. 파일 사이의 캐시 확인 보고가 다시 열기 문구를
+                // 한 틱씩 끊어 상태 표시줄이 깜박이지 않게 합니다(2026-10-07 검토).
+                if (refreshing) checking = SourceAnalysisStage.Parsing;
             }
         }
 
-        // 2단계: 열린 파일 → 같은 프로젝트 → … 순서로 나머지를 분석합니다. 1단계에서 채택한 파일은 건너뜁니다.
+        // 2단계: 열린 파일 → 같은 프로젝트 → … 순서로 나머지를 분석합니다. 1단계에서 채택하거나 정한 파일은 건너뜁니다.
         // 작업자 하나가 예외로 끝나면 다른 작업자도 남은 대기열(엔진 포함)을 계속 비우지 않고 멈춥니다.
         Parallel.For(0, workers, parallelOptions, (_, loop) =>
         {
             while (!loop.ShouldExitCurrentIteration && queue.TryTake(out var file, out var rank))
             {
-                if (refreshing && current.ContainsKey(file)) continue;
+                if (current.ContainsKey(file) || settled.ContainsKey(file)) continue;
                 AnalyzeFile(file, rank);
             }
         });
@@ -233,7 +243,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         void AnalyzeFile(string file, SourceAnalysisRank rank)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            Report(SourceAnalysisStage.CacheChecking, file);
+            Report(checking, file);
             try
             {
                 var info = TryGetInfo(file);
@@ -256,7 +266,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             {
                 // 잠겼거나 사라진 파일은 다음 증분 분석에서 다시 시도합니다.
             }
-            finally { if (!cancellationToken.IsCancellationRequested) Report(SourceAnalysisStage.CacheChecking, file, completed: true); }
+            finally { if (!cancellationToken.IsCancellationRequested) Report(checking, file, completed: true); }
         }
 
         cancellationToken.ThrowIfCancellationRequested();
@@ -405,9 +415,17 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
 
     private static bool IsCppFile(string path) => CppExtensions.Contains(Path.GetExtension(path));
 
+    /// <summary>
+    /// 크기·수정 시각을 이 자리에서 읽어 둔 파일 정보입니다. <see cref="FileInfo"/>는 처음 접근할 때 읽으므로, 확인 뒤 파일이 지워지면
+    /// 나중의 <c>Length</c>가 <see cref="FileNotFoundException"/>을 내 분석 패스 전체를 멈춥니다(2026-10-07 검토). <c>Exists</c>로 미리 읽습니다.
+    /// </summary>
     private static FileInfo? TryGetInfo(string path)
     {
-        try { return File.Exists(path) ? new FileInfo(path) : null; }
+        try
+        {
+            var info = new FileInfo(path);
+            return info.Exists ? info : null;
+        }
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
         {
             return null;

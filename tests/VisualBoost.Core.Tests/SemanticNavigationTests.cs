@@ -109,11 +109,11 @@ internal static class SemanticNavigationTests
     public static void RunWorkerDefaults()
     {
         const long Gib = 1024L * 1024 * 1024;
-        // 코어 절반을 쓰되 VS 몫 8 GiB를 남기고 작업당 2.5 GiB로 제한합니다. 메모리를 모르면 코어 기준만 씁니다.
+        // 코어 절반을 쓰되 VS 몫 8 GiB를 남기고 작업당 2.5 GiB로 제한합니다. 메모리를 모르면 예전 기본값(코어의 1/4)을 씁니다.
         Check(ClangdLaunchOptions.DefaultWorkerCount(16, 64 * Gib) == 8 && ClangdLaunchOptions.DefaultWorkerCount(16, 32 * Gib) == 8 &&
               ClangdLaunchOptions.DefaultWorkerCount(8, 32 * Gib) == 4 && ClangdLaunchOptions.DefaultWorkerCount(32, 16 * Gib) == 3 &&
               ClangdLaunchOptions.DefaultWorkerCount(4, 8 * Gib) == 1 && ClangdLaunchOptions.DefaultWorkerCount(1, 0) == 1 &&
-              ClangdLaunchOptions.DefaultWorkerCount(12, 0) == 6, "clangd 색인 작업 수 기본값");
+              ClangdLaunchOptions.DefaultWorkerCount(12, 0) == 3, "clangd 색인 작업 수 기본값");
         Check(ClangdLaunchOptions.ResolveWorkerCount(3) == 3 && ClangdLaunchOptions.ResolveWorkerCount(0) >= 1, "지정한 작업 수 우선");
     }
 
@@ -149,6 +149,28 @@ internal static class SemanticNavigationTests
             ("template <class T> void TBox<T>::Put(T v) {}", 24, "TBox::Put", "TBox", 1),
             ("template <class T> TBox<T>::TBox() {}", 19, "TBox::TBox<T>", "TBox", 1),
             ("template <class T> TBox<T>::TBox() {}", 28, "TBox", "TBox", 1),
+            // 생성자·소멸자 몸체와 초기화 목록 안의 사용은 소속 이름이 그 생성자·소멸자입니다(clangd 22 확인).
+            ("    AActorX(double d) : AActorX(1) {}", 4, "AActorX", "AActorX", 1),
+            ("    AActorX(double d) : AActorX(1) {}", 24, "AActorX::AActorX", "AActorX", 0),
+            ("AActorX::AActorX() : AActorX(0) {}", 0, "AActorX::AActorX", "AActorX", 1),
+            ("AActorX::AActorX() : AActorX(0) {}", 9, "AActorX", "AActorX", 1),
+            ("AActorX::AActorX() : AActorX(0) {}", 21, "AActorX::AActorX", "AActorX", 0),
+            ("    AActorX Copy = AActorX(1);", 4, "AActorX::AActorX", "AActorX", 0),
+            ("    AActorX Copy = AActorX(1);", 19, "AActorX::AActorX", "AActorX", 0),
+            ("AActorX::~AActorX() { AActorX(2); }", 22, "AActorX::~AActorX", "AActorX", 0),
+            ("AActorX::AActorX(const AActorX&) = default;", 0, "AActorX::AActorX", "AActorX", 1),
+            // 몸체 안에서 자기 자신을 한정해 부르는 호출은 정의 머리와 사슬이 같지만 남깁니다.
+            ("int AActorX::F(int n) { return n ? AActorX::F(n - 1) : AActorX::F(n, 0); }", 4, "AActorX::F", "AActorX", 1),
+            ("int AActorX::F(int n) { return n ? AActorX::F(n - 1) : AActorX::F(n, 0); }", 35, "AActorX::F", "AActorX", 0),
+            ("int AActorX::F(int n) { return n ? AActorX::F(n - 1) : AActorX::F(n, 0); }", 55, "AActorX::F", "AActorX", 0),
+            ("int AActorX::F(int n, int m)", 4, "AActorX::F", "AActorX", 1),
+            ("    AActorX::F(n - 1);", 4, "AActorX::F", "AActorX", 0),
+            ("int* AActorX::F(int n) const {", 5, "AActorX::F", "AActorX", 1),
+            ("    return x * AActorX::F(n);", 15, "AActorX::F", "AActorX", 0),
+            ("    if (p) p->AActorX::F(1);", 14, "AActorX::F", "AActorX", 0),
+            ("void AActorX::F(int n,", 5, "AActorX::F", "AActorX", 1),
+            // 연산자 정의 머리는 사슬(operator)과 소속 이름(operator=)이 달라 남습니다.
+            ("AActorX& AActorX::operator=(const AActorX& o)", 9, "AActorX::operator=", "AActorX", 0),
         };
         var locations = cases.Select((c, i) => new NavigationLocation(@"C:\p\a.h", i, c.Character, i, c.Character + c.Name.Length, c.Container)).ToArray();
         var lines = cases.Select(c => c.Line).ToArray();

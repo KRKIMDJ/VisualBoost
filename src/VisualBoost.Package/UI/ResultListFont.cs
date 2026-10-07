@@ -1,5 +1,4 @@
 using System;
-using System.ComponentModel;
 using System.Windows;
 using System.Windows.Controls;
 using Microsoft.VisualStudio.Shell;
@@ -24,8 +23,12 @@ public static class ResultListFont
 
     private static int percent = DefaultPercent;
 
-    // 환경 글꼴 크기 리소스를 따라가는 숨은 요소입니다. VS가 환경 글꼴을 바꾸면 이 값이 바뀌어 다시 계산합니다.
-    private static TextBlock? tracker;
+    // 환경 글꼴 크기 리소스를 따라가는 연결 속성입니다. WPF는 애플리케이션 리소스가 바뀌면 열린 창의 트리에만 알리므로, 트리 밖 요소에 둔
+    // 리소스 참조는 VS를 다시 시작할 때까지 갱신되지 않습니다(2026-10-07 검토·실험). 늘 열려 있는 VS 주 창에 값만 담아 따라갑니다.
+    private static readonly DependencyProperty EnvironmentSizeProperty = DependencyProperty.RegisterAttached(
+        "EnvironmentSize", typeof(object), typeof(ResultListFont), new PropertyMetadata(null, (_, _) => Update()));
+
+    private static FrameworkElement? tracker;
 
     /// <summary>XAML에서 <c>DynamicResource</c> 키로 씁니다.</summary>
     public static object SizeKey { get; } = new ComponentResourceKey(typeof(ResultListFont), nameof(SizeKey));
@@ -41,11 +44,14 @@ public static class ResultListFont
     {
         percent = Clamp(value);
         if (Application.Current is null) return;
-        if (tracker is null)
+        // 패키지 시작 때 주 창이 아직 없으면 임시 요소에 두었다가 다음 게시(옵션 적용) 때 주 창으로 옮깁니다.
+        var host = (FrameworkElement?)Application.Current.MainWindow;
+        if (tracker is null || (host is not null && !ReferenceEquals(tracker, host)))
         {
-            tracker = new TextBlock();
-            tracker.SetResourceReference(TextBlock.FontSizeProperty, VsFonts.EnvironmentFontSizeKey);
-            DependencyPropertyDescriptor.FromProperty(TextBlock.FontSizeProperty, typeof(TextBlock)).AddValueChanged(tracker, (_, _) => Update());
+            var previous = tracker;
+            tracker = host ?? new TextBlock();
+            tracker.SetResourceReference(EnvironmentSizeProperty, VsFonts.EnvironmentFontSizeKey);
+            previous?.ClearValue(EnvironmentSizeProperty);
         }
 
         Update();
@@ -54,6 +60,7 @@ public static class ResultListFont
     private static void Update()
     {
         if (tracker is null || Application.Current is null) return;
-        Application.Current.Resources[SizeKey] = Size(tracker.FontSize, percent);
+        var environment = tracker.GetValue(EnvironmentSizeProperty) is double size && size > 0 ? size : SystemFonts.MessageFontSize;
+        Application.Current.Resources[SizeKey] = Size(environment, percent);
     }
 }

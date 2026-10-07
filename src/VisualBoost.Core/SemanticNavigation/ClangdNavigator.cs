@@ -270,17 +270,25 @@ public sealed class ClangdNavigator : IDisposable
         SyncOpenDocuments(query);
         documents.Acquire(query.Document);
         // 역할 표식 근거(선언 제외 참조, 정의·선언 이동)는 표시 보조라 본 요청 뒤에 함께 보내고, 본 결과가 온 뒤 정한 시간까지만 기다립니다.
-        // 늦거나 실패하면 그 근거 없이 정합니다. 본 요청이 실패해도 남은 보조 요청은 finally에서 취소합니다.
+        // clangd는 한 파일의 AST 요청을 받은 순서대로 하나씩 처리하고 이미 시작한 요청은 취소로 멈추지 않습니다. 그래서 결과 표시에 꼭 필요한
+        // symbolInfo와 짧은 정의·선언 요청을 본 요청 바로 뒤에 두고, 본 요청만큼 걸릴 수 있는 선언 제외 참조는 맨 뒤에 보냅니다(2026-10-07 검토).
+        // 늦거나 실패하면 그 근거 없이 정합니다. 본 요청이 실패해도 남은 보조 요청은 finally에서 취소하고 예외를 관측합니다.
         using var roleLimit = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
+        var auxiliary = new List<Task>(4);
         try
         {
             var all = session.ReferencesAsync(query.Path, query.Line, query.Character, true, cancellationToken);
-            var uses = Quietly(session.ReferencesAsync(query.Path, query.Line, query.Character, false, roleLimit.Token));
+            var symbolInfo = session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken);
+            auxiliary.Add(symbolInfo);
             var definition = Quietly(session.DefinitionAsync(query.Path, query.Line, query.Character, roleLimit.Token));
+            auxiliary.Add(definition);
             var declaration = Quietly(session.DeclarationAsync(query.Path, query.Line, query.Character, roleLimit.Token));
+            auxiliary.Add(declaration);
+            var uses = Quietly(session.ReferencesAsync(query.Path, query.Line, query.Character, false, roleLimit.Token));
+            auxiliary.Add(uses);
             var locations = await all.ConfigureAwait(false);
             roleLimit.CancelAfter(RoleTimeout);
-            var symbol = await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
+            var symbol = await symbolInfo.ConfigureAwait(false);
             var kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
             var plain = await uses.ConfigureAwait(false);
             // 결과 수 제한에 걸리면 두 참조 결과가 서로 다른 위치에서 잘려 차이가 선언 묶음이 아닙니다.
@@ -293,6 +301,13 @@ public sealed class ClangdNavigator : IDisposable
         finally
         {
             roleLimit.Cancel();
+            // 본 요청이 먼저 실패하면 기다리지 않은 요청이 남습니다. 그 예외를 관측해 미관측 작업 예외로 남기지 않습니다.
+            foreach (var task in auxiliary)
+            {
+                _ = task.ContinueWith(done => _ = done.Exception, CancellationToken.None,
+                    TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+            }
+
             documents.Release(query.Path);
         }
     }
