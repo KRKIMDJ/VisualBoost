@@ -20,6 +20,7 @@ assets/
 CLAUDE.md
 AGENTS.md
 .agents/
+.claude/
 .codex/
 *.agent.md
 *.agent.txt
