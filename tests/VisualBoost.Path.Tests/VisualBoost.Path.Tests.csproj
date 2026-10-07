@@ -20,6 +20,8 @@
     <Compile Include="../../src/VisualBoost.Package/Analysis/SourceAnalysisCache.cs" Link="SourceAnalysisCache.cs" />
     <Compile Include="../../src/VisualBoost.Package/Analysis/CachedSourceAnalysis.cs" Link="CachedSourceAnalysis.cs" />
     <Compile Include="../../src/VisualBoost.Package/UI/CodePreviewNames.cs" Link="CodePreviewNames.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/ProjectMembershipCache.cs" Link="ProjectMembershipCache.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/AnalysisStatusText.cs" Link="AnalysisStatusText.cs" />
     <ProjectReference Include="../../src/VisualBoost.Core/VisualBoost.Core.csproj" />
   </ItemGroup>
 </Project>

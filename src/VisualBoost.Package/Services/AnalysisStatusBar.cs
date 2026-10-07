@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows.Threading;
@@ -15,6 +16,10 @@ internal sealed class AnalysisStatusBar : IDisposable
     private readonly IVsStatusbar status;
     private readonly DispatcherTimer timer;
     private readonly Func<string?>? secondary;
+    // 최근에 쓴 문구들입니다. VS가 연속 갱신 중 일부를 늦게 반영하거나 건너뛰면 표시된 글자가 마지막으로 쓴 글자와 달라지는데,
+    // 이를 다른 기능이 쓴 글자로 오인하면 분석이 끝난 뒤에도 진행 문구가 남습니다(2026-10-07 측정: include 정리 문구가 4분 넘게 남음).
+    private readonly Queue<string> recent = new();
+    private const int RecentLimit = 64;
     private string? written;
     private string? observed;
     private DateTime externalUntil;
@@ -35,47 +40,31 @@ internal sealed class AnalysisStatusBar : IDisposable
         try
         {
             var snapshot = index.GetSnapshot();
-            var text = Format(snapshot) ?? secondary?.Invoke();
+            var text = AnalysisStatusText.Format(snapshot) ?? secondary?.Invoke();
             status.IsFrozen(out var frozen);
             if (frozen != 0) return;
             status.GetText(out var current);
             if (text is null)
             {
                 // 다른 확장·빌드·탐색 명령이 쓴 상태를 분석 완료 시 지우지 않습니다.
-                if (written is not null && current == written) status.Clear();
+                if (written is not null && IsOwn(current)) status.Clear();
                 written = null; observed = current;
+                recent.Clear();
                 return;
             }
-            if (written is not null && current != written && current != observed)
+            if (written is not null && current != observed && !IsOwn(current))
                 externalUntil = DateTime.UtcNow.AddSeconds(3);
             observed = current;
             if (DateTime.UtcNow < externalUntil) return;
             if (current == text) return;
             status.SetText(text); written = text; observed = text;
+            recent.Enqueue(text);
+            while (recent.Count > RecentLimit) recent.Dequeue();
         }
         catch (COMException) { /* 호스트 종료·일시적 상태 표시줄 거절은 다음 틱에서 재확인합니다. */ }
     }
 
-    internal static string? Format(SolutionFileIndexSnapshot snapshot)
-    {
-        if (snapshot.State == SolutionFileIndexState.Building) return $"VisualBoost: 소스 파일 수집 중 · {snapshot.FileCount:N0}개";
-        if (!snapshot.IsAnalyzing || snapshot.State == SolutionFileIndexState.Faulted) return null;
-        var value = snapshot.AnalysisProgress;
-        var stage = value?.Stage switch
-        {
-            SourceAnalysisStage.CacheLoading => "심볼 캐시 읽는 중",
-            SourceAnalysisStage.Waiting => "파싱 준비 중",
-            SourceAnalysisStage.CacheChecking => "파일 캐시 확인 중",
-            SourceAnalysisStage.Parsing => "파싱 중",
-            SourceAnalysisStage.Indexing => "심볼 검색 준비 중",
-            SourceAnalysisStage.Linking => "include 정리 중",
-            SourceAnalysisStage.Saving => "분석 캐시 저장 중",
-            _ => "분석 준비 중",
-        };
-        var count = value is not null && value.Total > 0 ? $" · {value.Completed:N0}/{value.Total:N0}" : "";
-        var file = string.IsNullOrEmpty(value?.Path) ? "" : " · " + Path.GetFileName(value!.Path);
-        return "VisualBoost: " + stage + count + file;
-    }
+    private bool IsOwn(string? current) => current is not null && (current == written || recent.Contains(current));
 
     public void Dispose()
     {

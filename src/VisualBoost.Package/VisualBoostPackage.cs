@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.42.1")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.43.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 // 폴더 열기 작업 영역(CMake 등)은 Solution 존재 상태를 켜지 않으므로 따로 등록합니다.
@@ -48,6 +48,8 @@ public sealed class VisualBoostPackage : AsyncPackage
     public const string PackageGuidString = "d54a4377-4869-4f58-a583-5318b38d77f2";
 
     private readonly SolutionFileIndexService fileIndex = new();
+    // 다시 연 Solution에서 그대로인 C++ 프로젝트의 항목을 자동화로 다시 열거하지 않게 합니다.
+    private readonly ProjectMembershipCache projectMembership = new();
     private SemanticNavigationService? navigation;
     private SolutionEvents? solutionEvents;
     private BuildEvents? buildEvents;
@@ -88,6 +90,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         MigrateLegacyOptions();
         ((CompletionOptionsPage)GetDialogPage(typeof(CompletionOptionsPage))).Publish();
         ((DocumentNavigationOptionsPage)GetDialogPage(typeof(DocumentNavigationOptionsPage))).Publish();
+        GetGeneralOptions().Publish();
         var statusBar = await GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
         await JoinableTaskFactory.SwitchToMainThreadAsync(cancellationToken);
         // 정의·참조 탐색은 Solution 이벤트보다 먼저 만들어 이미 열린 Solution도 처리합니다.
@@ -267,7 +270,9 @@ public sealed class VisualBoostPackage : AsyncPackage
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         Completion.CompletionRuntime.GetSnapshot = () => fileIndex.CompletionSnapshot;
-        fileIndex.Configure(GetIndexingOptions().CreateConfiguration());
+        var configuration = GetIndexingOptions().CreateConfiguration();
+        fileIndex.Configure(configuration);
+        var membership = configuration.UsePersistentFileCache ? projectMembership : null;
         discoveryCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         discoveryCancellation = cancellation;
@@ -280,7 +285,7 @@ public sealed class VisualBoostPackage : AsyncPackage
                 await Task.Delay(200, cancellation.Token);
                 await JoinableTaskFactory.SwitchToMainThreadAsync(cancellation.Token);
                 var discovery = await SolutionSearchRootCollector.CollectAsync(dte, cancellation.Token,
-                    files => fileIndex.PublishDiscoveredFiles(files, cancellation.Token));
+                    files => fileIndex.PublishDiscoveredFiles(files, cancellation.Token), membership);
                 cancellation.Token.ThrowIfCancellationRequested();
                 fileIndex.Start(discovery);
             }

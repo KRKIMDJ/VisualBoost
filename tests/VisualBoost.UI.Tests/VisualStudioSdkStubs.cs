@@ -47,6 +47,7 @@ namespace EnvDTE
         public string Kind { get; set; } = "Cpp";
         public string FullName { get; set; } = @"C:\Fixture\Sample.vcxproj";
         public string Name { get; set; } = "Sample";
+        public bool Saved { get; set; } = true;
         public ProjectItems? ProjectItems { get; set; }
     }
 }

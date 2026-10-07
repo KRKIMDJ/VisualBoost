@@ -248,7 +248,8 @@ internal sealed class ReferenceResultsModel : INotifyPropertyChanged
     private string filter = string.Empty;
 
     // 범위 모드는 Solution과 무관한 선택이라 Solution을 닫아도 유지합니다. 소속 판정에 쓰는 범위 목록은 Solution마다 다시 받습니다.
-    private ReferenceScopeMode mode = ReferenceScopeMode.AllProjects;
+    // 기본은 현재 프로젝트입니다(2026-10-07 사용자 피드백). 소속을 모르는 동안에는 이 모드에서도 모든 위치를 보입니다.
+    private ReferenceScopeMode mode = ReferenceScopeMode.CurrentProject;
     private IReadOnlyList<SymbolSearchScope>? catalog;
     private SymbolSearchScope[] originProjects = Array.Empty<SymbolSearchScope>();
     private IReadOnlyList<NavigationResultItem> orderedItems = Array.Empty<NavigationResultItem>();

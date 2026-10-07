@@ -18,7 +18,7 @@ public sealed class ClangdLaunchOptions
     /// <summary>compile_commands.json이 있는 폴더. clangd는 이 폴더 아래 .cache에 색인을 저장합니다.</summary>
     public string CompileCommandsDirectory { get; set; } = string.Empty;
 
-    /// <summary>0이면 논리 코어 수의 1/4(최소 1)입니다. TU 하나가 수백 MiB~1.4 GiB를 쓰므로 보수적으로 잡습니다.</summary>
+    /// <summary>0이면 <see cref="DefaultWorkerCount"/>로 정합니다.</summary>
     public int WorkerCount { get; set; }
 
     /// <summary>참조 응답 상한. 결과가 상한과 같으면 잘렸을 수 있다고 표시합니다.</summary>
@@ -31,7 +31,59 @@ public sealed class ClangdLaunchOptions
     public PathAliases Paths { get; set; } = PathAliases.None;
 
     public static int ResolveWorkerCount(int requested) =>
-        requested > 0 ? requested : Math.Max(1, Environment.ProcessorCount / 4);
+        requested > 0 ? requested : DefaultWorkerCount(Environment.ProcessorCount, PhysicalMemory.TotalBytes());
+
+    /// <summary>
+    /// 논리 코어의 절반을 쓰되, VS·빌드 몫 8 GiB를 남기고 작업 하나에 2.5 GiB를 잡아 메모리로 다시 제한합니다.
+    /// </summary>
+    /// <remarks>
+    /// 첫 색인 시간은 작업 수에 거의 비례합니다(clangd가 작업마다 코어 하나를 다 씀). 예전 기본값(코어의 1/4)은 큰 Unreal 프로젝트의 첫 색인이
+    /// 너무 오래 걸렸습니다(2026-10-07 사용자 피드백). Unreal TU 하나가 1.4 GiB까지 쓰므로 메모리가 작은 PC에서는 작업 수를 줄입니다.
+    /// 메모리를 모르면(0) 코어 기준만 씁니다.
+    /// </remarks>
+    public static int DefaultWorkerCount(int processors, long memoryBytes)
+    {
+        var byCores = Math.Max(1, processors / 2);
+        if (memoryBytes <= 0) return byCores;
+        var gib = memoryBytes / (1024d * 1024 * 1024);
+        var byMemory = (int)Math.Floor((gib - 8) / 2.5);
+        return Math.Max(1, Math.Min(byCores, byMemory));
+    }
+}
+
+/// <summary>물리 메모리 크기를 읽습니다. Windows가 아니거나 읽지 못하면 0입니다.</summary>
+internal static class PhysicalMemory
+{
+    public static long TotalBytes()
+    {
+        try
+        {
+            var status = new MemoryStatus { Length = (uint)System.Runtime.InteropServices.Marshal.SizeOf(typeof(MemoryStatus)) };
+            return GlobalMemoryStatusEx(ref status) ? (long)Math.Min(status.TotalPhysical, long.MaxValue) : 0;
+        }
+        catch (Exception exception) when (exception is DllNotFoundException || exception is EntryPointNotFoundException)
+        {
+            return 0;
+        }
+    }
+
+    [System.Runtime.InteropServices.StructLayout(System.Runtime.InteropServices.LayoutKind.Sequential)]
+    private struct MemoryStatus
+    {
+        public uint Length;
+        public uint MemoryLoad;
+        public ulong TotalPhysical;
+        public ulong AvailablePhysical;
+        public ulong TotalPageFile;
+        public ulong AvailablePageFile;
+        public ulong TotalVirtual;
+        public ulong AvailableVirtual;
+        public ulong AvailableExtendedVirtual;
+    }
+
+    [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
+    [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
+    private static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
 }
 
 /// <summary>clangd background index의 진행 상태입니다. 진행 알림이 한 번도 없으면 <see cref="Started"/>가 false입니다.</summary>

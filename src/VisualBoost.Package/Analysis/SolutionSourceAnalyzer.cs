@@ -125,6 +125,9 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         var previous = LoadPrevious(solutionPath, cancellationToken);
         var progressGate = new object();
         var completedFiles = 0;
+        // 저장된 분석이 있으면 다시 연 Solution입니다. 진행 표시는 바뀐 파일의 파싱만 셉니다(아래 1단계 참고).
+        var refreshing = previous.Count > 0;
+        var progressTotal = sourceFiles.Length;
         var activeFiles = new Dictionary<string, SourceAnalysisStage>(StringComparer.OrdinalIgnoreCase);
         void Report(SourceAnalysisStage stage, string? path = null, bool completed = false)
         {
@@ -141,7 +144,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 // 병렬 작업 중 다른 파일의 캐시 확인이 실제 파싱 파일 표시를 가리지 않게 합니다.
                 var parsing = activeFiles.FirstOrDefault(p => p.Value == SourceAnalysisStage.Parsing);
                 if (parsing.Key is not null) { stage = parsing.Value; path = parsing.Key; }
-                reportProgress?.Invoke(new SourceAnalysisProgress(stage, completedFiles, sourceFiles.Length, path));
+                reportProgress?.Invoke(new SourceAnalysisProgress(stage, completedFiles, progressTotal, path, refreshing));
             }
         }
         if (previous.Count == 0) symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>(), cancellationToken);
@@ -180,11 +183,52 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         // 편집기 응답성을 우선하고 남는 처리량만 초기 분석에 사용합니다.
         var workers = Math.Min(2, Math.Max(1, Environment.ProcessorCount - 1));
         var parallelOptions = new ParallelOptions { CancellationToken = cancellationToken, MaxDegreeOfParallelism = workers };
+        if (refreshing)
+        {
+            // 1단계(다시 연 Solution): 저장된 분석을 쓸 수 있는 파일을 먼저 모두 채택합니다. 그래야 2단계의 진행 수가 실제로 다시 파싱할
+            // 파일만 세고, 바뀐 파일이 없으면 파싱 진행을 아예 보이지 않습니다(2026-10-07 사용자 피드백: 열 때마다 파싱이 반복되어 보임).
+            Parallel.ForEach(sourceFiles, parallelOptions, file =>
+            {
+                Report(SourceAnalysisStage.CacheChecking, file);
+                try
+                {
+                    var info = TryGetInfo(file);
+                    if (info is not null && info.Length <= MaximumSourceLength) TryReuse(file, info, SourceAnalysisRank.Engine);
+                }
+                finally { if (!cancellationToken.IsCancellationRequested) Report(SourceAnalysisStage.CacheChecking, file, completed: true); }
+            });
+            lock (progressGate)
+            {
+                completedFiles = 0;
+                progressTotal = sourceFiles.Length - current.Count;
+            }
+        }
+
+        // 2단계: 열린 파일 → 같은 프로젝트 → … 순서로 나머지를 분석합니다. 1단계에서 채택한 파일은 건너뜁니다.
         // 작업자 하나가 예외로 끝나면 다른 작업자도 남은 대기열(엔진 포함)을 계속 비우지 않고 멈춥니다.
         Parallel.For(0, workers, parallelOptions, (_, loop) =>
         {
-            while (!loop.ShouldExitCurrentIteration && queue.TryTake(out var file, out var rank)) AnalyzeFile(file, rank);
+            while (!loop.ShouldExitCurrentIteration && queue.TryTake(out var file, out var rank))
+            {
+                if (refreshing && current.ContainsKey(file)) continue;
+                AnalyzeFile(file, rank);
+            }
         });
+
+        // 표시 종류가 아니라 저장된 분석 버전과 파일 변경 여부로 재사용을 판정합니다.
+        bool TryReuse(string file, FileInfo info, SourceAnalysisRank rank)
+        {
+            if (!previous.TryGetValue(file, out var cached) ||
+                cached.Length != info.Length || cached.LastWriteUtcTicks != info.LastWriteTimeUtc.Ticks ||
+                cached.Revision != CachedSourceAnalysis.CurrentRevision)
+            {
+                return false;
+            }
+
+            current[file] = cached;
+            PublishProgress(cached, rank);
+            return true;
+        }
 
         void AnalyzeFile(string file, SourceAnalysisRank rank)
         {
@@ -194,16 +238,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             {
                 var info = TryGetInfo(file);
                 if (info is null || info.Length > MaximumSourceLength) return;
-
-                // 표시 종류가 아니라 저장된 분석 버전과 파일 변경 여부로 재사용을 판정합니다.
-                if (previous.TryGetValue(file, out var cached) &&
-                    cached.Length == info.Length && cached.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks &&
-                    cached.Revision == CachedSourceAnalysis.CurrentRevision)
-                {
-                    current[file] = cached;
-                    PublishProgress(cached, rank);
-                    return;
-                }
+                if (TryReuse(file, info, rank)) return;
 
                 Report(SourceAnalysisStage.Parsing, file);
                 var analysis = CppSourceAnalyzer.Analyze(file, File.ReadAllText(file), cancellationToken);
@@ -263,7 +298,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         foreach (var entry in current.Values)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            reportProgress?.Invoke(new SourceAnalysisProgress(SourceAnalysisStage.Linking, linkedFiles, current.Count, entry.Analysis.Path));
+            reportProgress?.Invoke(new SourceAnalysisProgress(SourceAnalysisStage.Linking, linkedFiles, current.Count, entry.Analysis.Path, refreshing));
             var resolved = entry.Analysis.Includes
                 .Select(include => ResolveSafe(entry.Analysis.Path, include))
                 .Where(path => path is not null)

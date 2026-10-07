@@ -125,12 +125,13 @@ internal sealed class SemanticNavigationCommand
 
         NavigationResult result;
         int referenceLimit;
+        bool limited;
         IReadOnlyList<string> lines = Array.Empty<string>();
         using (var timeout = new CancellationTokenSource(RequestTimeout))
         {
             try
             {
-                (result, referenceLimit, lines) = await Task.Run(async () =>
+                (result, limited, referenceLimit, lines) = await Task.Run(async () =>
                 {
                     var navigator = await service.GetNavigatorAsync(timeout.Token).ConfigureAwait(false);
                     var found = kind == Kind.Definition
@@ -142,7 +143,20 @@ internal sealed class SemanticNavigationCommand
                     var preview = kind == Kind.References || ordered.Count > 1
                         ? SourceLinePreview.LoadLines(ordered, p => openTexts.TryGetValue(p, out var open) ? open.Text : null, timeout.Token)
                         : Array.Empty<string>();
-                    return (found, navigator.ReferenceLimit, preview);
+                    var limited = kind == Kind.References && ordered.Count >= navigator.ReferenceLimit;
+                    if (kind == Kind.References)
+                    {
+                        // 클래스 자신의 멤버 정의 머리(Class::Member)와 생성자·소멸자 이름은 쓰는 곳이 아니므로 뺍니다. 제한 안내는 뺀 전 개수로 판단합니다.
+                        var kept = OwnDefinitionReferences.Kept(ordered, preview, IsType(found.SymbolKind));
+                        if (kept.Count < ordered.Count)
+                        {
+                            ordered = kept.Select(i => ordered[i]).ToArray();
+                            preview = kept.Select(i => preview[i]).ToArray();
+                            found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles);
+                        }
+                    }
+
+                    return (found, limited, navigator.ReferenceLimit, preview);
                 }, timeout.Token);
             }
             catch (SemanticNavigationUnavailableException exception)
@@ -190,7 +204,7 @@ internal sealed class SemanticNavigationCommand
 
         var notes = new List<string>();
         if (kind == Kind.Definition) notes.Add("정의 후보가 여러 개입니다");
-        if (kind == Kind.References && result.Locations.Count >= referenceLimit) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
+        if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
         if (incomplete.Length > 0) notes.Add(incomplete);
         var dte = await package.GetServiceAsync(typeof(Microsoft.VisualStudio.Shell.Interop.SDTE)) as DTE2;
         Assumes.Present(dte);
@@ -219,6 +233,11 @@ internal sealed class SemanticNavigationCommand
             NavigationLocationOpener.Open(package, dialog.SelectedLocation, activate: true);
         }
     }
+
+    // 종류를 모르면(판정 시간 초과 등) 타입으로 보지 않습니다. 생성자 이름 규칙이 재귀 호출을 빼지 않게 하기 위해서입니다.
+    private static bool IsType(Core.Analysis.SourceSymbolKind? kind) =>
+        kind is Core.Analysis.SourceSymbolKind.Type or Core.Analysis.SourceSymbolKind.Class or Core.Analysis.SourceSymbolKind.Struct or
+            Core.Analysis.SourceSymbolKind.Union;
 
     /// <summary>현재 파일을 앞에 두고 경로·위치 순으로 정렬합니다.</summary>
     private static IReadOnlyList<NavigationLocation> Order(IReadOnlyList<NavigationLocation> locations, string currentPath) =>

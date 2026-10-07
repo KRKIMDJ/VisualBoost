@@ -41,6 +41,48 @@ internal static class ProjectCollectionTests
         }
         catch (OperationCanceledException) { }
         Check(calls == 1, "수집 도중 취소 뒤 추가 파일 공개 차단");
+        VerifyMembershipReuse();
+    }
+
+    private static void VerifyMembershipReuse()
+    {
+        var root = System.IO.Path.Combine(System.IO.Path.GetTempPath(), "VisualBoost-Members-" + Guid.NewGuid().ToString("N"));
+        System.IO.Directory.CreateDirectory(root);
+        try
+        {
+            var project = System.IO.Path.Combine(root, "Game.vcxproj");
+            System.IO.File.WriteAllText(project, "<Project />");
+            var items = new ProjectItems();
+            for (var i = 0; i < 3; i++) items.Values.Add(new ProjectItem { FileNames = new[] { "", System.IO.Path.Combine(root, "Src", "Unit" + i + ".cpp") } });
+            var game = new Project { FullName = project, Name = "Game", ProjectItems = items };
+            var toolItems = new ProjectItems();
+            toolItems.Values.Add(new ProjectItem { FileNames = new[] { "", System.IO.Path.Combine(root, "Tool", "Program.cs") } });
+            var tool = new Project { FullName = System.IO.Path.Combine(root, "Tool.csproj"), Name = "Tool", ProjectItems = toolItems };
+            var dte = new DTE2();
+            dte.Solution.FullName = System.IO.Path.Combine(root, "Game.sln");
+            dte.Solution.Projects.Values.Add(game);
+            dte.Solution.Projects.Values.Add(tool);
+            var cache = new ProjectMembershipCache(System.IO.Path.Combine(root, "cache"));
+            IReadOnlyList<string> Collect() =>
+                Task.Run(() => SolutionSearchRootCollector.CollectAsync(dte, CancellationToken.None, _ => { }, cache)).GetAwaiter().GetResult().ExplicitFiles;
+
+            var first = Collect();
+            var reads = items.Reads;
+            var toolReads = toolItems.Reads;
+            var second = Collect();
+            Check(first.Count == 4 && second.OrderBy(p => p).SequenceEqual(first.OrderBy(p => p)) && items.Reads == reads && toolItems.Reads > toolReads,
+                "프로젝트 파일이 그대로인 C++ 프로젝트는 저장한 항목을 쓰고 C# 프로젝트는 다시 열거");
+            game.Saved = false;
+            Collect();
+            Check(items.Reads > reads, "저장하지 않은 변경이 있는 프로젝트는 다시 열거");
+            game.Saved = true;
+            reads = items.Reads;
+            items.Values.Add(new ProjectItem { FileNames = new[] { "", System.IO.Path.Combine(root, "Src", "Added.cpp") } });
+            System.IO.File.AppendAllText(project, " ");
+            var changed = Collect();
+            Check(items.Reads > reads && changed.Count == 5, "프로젝트 파일이 바뀌면 다시 열거해 새 항목 반영");
+        }
+        finally { System.IO.Directory.Delete(root, recursive: true); }
     }
     private static void Check(bool value, string message)
     {
@@ -56,7 +98,8 @@ namespace EnvDTE
         public List<ProjectItem> Values { get; } = new();
         public int Count => Values.Count;
         public int FailedIndex { get; set; } = -1;
-        public ProjectItem Item(int index) => index == FailedIndex ? throw new COMException("Unloaded item") : Values[index - 1];
+        public int Reads { get; private set; }
+        public ProjectItem Item(int index) { Reads++; return index == FailedIndex ? throw new COMException("Unloaded item") : Values[index - 1]; }
     }
     internal sealed class Projects
     {

@@ -26,6 +26,7 @@ namespace Microsoft.VisualStudio.Shell
     {
         public static readonly List<string> Errors = new();
         public static void LogWarning(string source, string message) { }
+        public static void LogInformation(string source, string message) { }
         public static void LogError(string source, string message) { Errors.Add(source + ": " + message); }
     }
     internal static class TaskLogStub

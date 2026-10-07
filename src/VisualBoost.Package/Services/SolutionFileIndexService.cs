@@ -36,6 +36,8 @@ internal sealed class SolutionFileIndexService : IDisposable
     private TimeSpan lastBuildDuration;
     private string? lastError;
     private bool isAnalyzing;
+    // 저장된 파일 목록이 있는 Solution을 다시 수집하는 중입니다. 상태 표시줄은 이때 수집·검증 단계를 띄우지 않습니다.
+    private bool refreshing;
     private string? analysisError;
     private SourceAnalysisProgress? analysisProgress;
     private readonly LinkedList<string> recentFiles = new();
@@ -63,6 +65,10 @@ internal sealed class SolutionFileIndexService : IDisposable
     public long Generation => Interlocked.Read(ref generation);
     public void BeginDiscovery(string path)
     {
+        bool stored;
+        lock (gate) stored = configuration.UsePersistentFileCache;
+        // 잠금 밖에서 디스크를 봅니다. 수집 결과를 저장한 적이 있으면 다시 여는 Solution입니다.
+        stored = stored && cache.Exists(path);
         lock (gate)
         {
             ThrowIfDisposed();
@@ -78,6 +84,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             roots = Array.Empty<string>();
             explicitFiles = Array.Empty<string>();
             solutionPath = path;
+            refreshing = stored;
             symbolScopes = new[] { SymbolSearchScope.All };
             analysisPriority = SourceAnalysisPriority.None;
             index.Clear();
@@ -232,7 +239,8 @@ internal sealed class SolutionFileIndexService : IDisposable
                 lastBuildDuration,
                 lastError,
                 analysisError,
-                analysisProgress);
+                analysisProgress,
+                refreshing);
         }
     }
 
@@ -591,6 +599,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             lastBuildDuration = TimeSpan.Zero;
             lastError = null;
             isAnalyzing = false;
+            refreshing = false;
             analysisError = null;
             analysisProgress = null;
         }

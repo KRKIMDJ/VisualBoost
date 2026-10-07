@@ -25,6 +25,13 @@ internal sealed class FileIndexCache
             "FileIndex");
     }
 
+    /// <summary>이 Solution의 저장된 목록 파일이 있는지만 봅니다(내용 검증은 <see cref="Load"/>가 함).</summary>
+    public bool Exists(string solutionPath)
+    {
+        var cachePath = GetCachePath(solutionPath);
+        return cachePath is not null && File.Exists(cachePath);
+    }
+
     public IReadOnlyList<string> Load(string solutionPath)
     {
         var cachePath = GetCachePath(solutionPath);

@@ -31,6 +31,11 @@ public partial class FileSearchDialog : DialogWindow
     private FileSearchScope scope;
     private int displayedResultCount;
     private bool isSearching;
+
+    // 검색이 이 시간보다 오래 걸릴 때만 "검색 중"·취소 버튼·찾는 중 안내를 보입니다. 키를 칠 때마다나 색인 진행 중 다시 검색할 때
+    // 안내가 켜졌다 꺼지며 깜박이지 않게 합니다(2026-10-07 사용자 피드백).
+    private static readonly TimeSpan BusyDelay = TimeSpan.FromMilliseconds(400);
+    private DateTime searchStartedUtc;
     private bool isClosed;
     private int observedFileCount = -1;
     private string? statusNotice;
@@ -165,9 +170,10 @@ public partial class FileSearchDialog : DialogWindow
         var selectedScope = scope;
         var cancellationToken = currentCancellation.Token;
         isSearching = true;
+        searchStartedUtc = DateTime.UtcNow;
         statusNotice = null;
+        // 보이던 결과와 안내는 새 결과가 올 때까지 그대로 둡니다. 오래 걸리면 상태 타이머가 찾는 중 안내로 바꿉니다.
         UpdateStatus();
-        UpdateEmptyState(query, isLoading: true);
 
         try
         {
@@ -247,7 +253,9 @@ public partial class FileSearchDialog : DialogWindow
             statusNotice = null;
         }
 
-        var stateText = statusNotice ?? (isSearching
+        var busy = isSearching && DateTime.UtcNow - searchStartedUtc >= BusyDelay;
+        if (busy && displayedResultCount == 0) UpdateEmptyState(FileLocationQuery.Parse(SearchBox.Text).SearchText, isLoading: true);
+        var stateText = statusNotice ?? (busy
             ? "검색 중"
             : candidatePaths is not null
                 ? "대응 파일 선택"
@@ -264,8 +272,8 @@ public partial class FileSearchDialog : DialogWindow
         StatusText.Text = (candidatePaths is null
             ? $"{displayedResultCount:N0}개 결과 · {snapshot.FileCount:N0}개 인덱싱 · {stateText}"
             : $"{displayedResultCount:N0}개 후보 · {stateText}") + lineNote;
-        CancelSearchButton.Visibility = isSearching ? Visibility.Visible : Visibility.Collapsed;
-        KeyboardHintText.Text = isSearching
+        CancelSearchButton.Visibility = busy ? Visibility.Visible : Visibility.Collapsed;
+        KeyboardHintText.Text = busy
             ? "Esc 검색 취소"
             : candidatePaths is null
                 ? "↑↓ 선택   Enter 열기   Ctrl+Tab 범위   Esc 닫기"

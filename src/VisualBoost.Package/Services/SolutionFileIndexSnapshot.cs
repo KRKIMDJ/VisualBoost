@@ -23,7 +23,8 @@ internal sealed class SolutionFileIndexSnapshot
         TimeSpan lastBuildDuration,
         string? lastError,
         string? analysisError,
-        SourceAnalysisProgress? analysisProgress = null)
+        SourceAnalysisProgress? analysisProgress = null,
+        bool isRefreshing = false)
     {
         State = state;
         FileCount = fileCount;
@@ -35,6 +36,7 @@ internal sealed class SolutionFileIndexSnapshot
         LastError = lastError;
         AnalysisError = analysisError;
         AnalysisProgress = analysisProgress;
+        IsRefreshing = isRefreshing;
     }
 
     public SolutionFileIndexState State { get; }
@@ -55,4 +57,7 @@ internal sealed class SolutionFileIndexSnapshot
 
     public string? AnalysisError { get; }
     public SourceAnalysisProgress? AnalysisProgress { get; }
+
+    /// <summary>저장된 파일 목록이 있는 Solution을 다시 수집 중입니다(파일 검색은 그동안 수집된 목록으로 동작).</summary>
+    public bool IsRefreshing { get; }
 }

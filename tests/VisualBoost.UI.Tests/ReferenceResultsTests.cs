@@ -42,7 +42,7 @@ internal static class ReferenceResultsTests
     private static void Model()
     {
         var set = Sample("FMod::Compute");
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         var changed = new List<string>();
         model.PropertyChanged += (_, args) => changed.Add(args.PropertyName ?? string.Empty);
         Assert(model.EmptyMessage == ReferenceResultsModel.NoResultsMessage, "결과 전 안내");
@@ -89,7 +89,7 @@ internal static class ReferenceResultsTests
         var set = Sample("FMod::Compute");
         var model = new ReferenceResultsModel();
         model.Show(set);
-        Assert(model.Mode == ReferenceScopeMode.AllProjects && !model.HasCurrentProject, "기본은 모든 프로젝트, 소속 목록 전에는 현재 프로젝트 모름");
+        Assert(model.Mode == ReferenceScopeMode.CurrentProject && !model.HasCurrentProject, "기본은 현재 프로젝트, 소속 목록 전에는 현재 프로젝트 모름");
 
         // 소속 목록이 게시되기 전에는 '현재 프로젝트'를 골라도 모든 위치를 보이고 확인 중임을 알립니다.
         model.SetMode(ReferenceScopeMode.CurrentProject);
@@ -164,7 +164,7 @@ internal static class ReferenceResultsTests
             SymbolSearchScope.Project(Path.Combine(Root, "Source", "Tools", "Tools.vcxproj"), "Tools", new[] { tool }),
         };
         var catalog = SymbolSearchScope.CreateCatalog(projects, new[] { origin, header, near, deeper, tool }, new[] { EngineRoot });
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         model.Show(new ReferenceResultSet("Foo", items, string.Empty, DateTime.Now, origin, header));
         model.SetProjects(catalog);
         var order = string.Join(" ", model.VisibleItems.Select(item => item.FileName + ":" + item.Line));
@@ -173,7 +173,7 @@ internal static class ReferenceResultsTests
 
         // 짝은 명령이 헤더·구현 전환 규칙으로 고른 하나뿐입니다. 이름만 같은 엔진 헤더는 앞에 오지 않습니다.
         var engineFoo = Path.Combine(EngineRoot, "Source", "Runtime", "Foo.h");
-        var sameName = new ReferenceResultsModel();
+        var sameName = AllProjectsModel();
         sameName.Show(new ReferenceResultSet("Foo", items.Append(Item(engineFoo, 6, "", "void Foo();")).ToArray(), string.Empty, DateTime.Now, origin, header));
         sameName.SetProjects(catalog);
         var sameNameOrder = string.Join(" ", sameName.VisibleItems.Select(item => item.FileName + ":" + item.Line));
@@ -192,7 +192,7 @@ internal static class ReferenceResultsTests
                ReferenceOrder.Distance(null, ReferenceOrder.Folders(@"C:\A")) == 0, "폴더 거리");
 
         // 소속 목록 전에도 요청 파일·짝 파일·폴더 거리로 정렬합니다.
-        var early = new ReferenceResultsModel();
+        var early = AllProjectsModel();
         early.Show(new ReferenceResultSet("Foo", items, string.Empty, DateTime.Now, origin, header));
         var earlyOrder = string.Join(" ", early.VisibleItems.Select(item => item.FileName));
         Assert(earlyOrder.StartsWith("Foo.cpp Foo.h Baz.cpp Baz.cpp Bar.cpp", StringComparison.Ordinal), "소속 목록 전 순서: " + earlyOrder);
@@ -201,7 +201,7 @@ internal static class ReferenceResultsTests
     private static void Grouping()
     {
         // 프로젝트 머리 행은 모든 프로젝트 모드에서 결과가 둘 이상의 묶음(프로젝트·프로젝트 밖)에 걸칠 때만 둡니다.
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         model.Show(Sample("FMod::Compute"));
         Assert(!model.IsGrouped && Shape(model).StartsWith("F:", StringComparison.Ordinal), "소속 목록 전에는 한 묶음이라 머리 행 없음: " + Shape(model));
         model.SetProjects(Catalog(withProject: true));
@@ -250,7 +250,7 @@ internal static class ReferenceResultsTests
                model.Rows.OfType<ReferenceLineRow>().All(row => row.Indent.Left == ReferenceRowText.GlyphWidth), "현재 프로젝트 모드는 머리 행 없음: " + Shape(model));
 
         // 결과가 한 프로젝트 안에만 있으면 모든 프로젝트 모드에서도 머리 행을 두지 않습니다.
-        var single = new ReferenceResultsModel();
+        var single = AllProjectsModel();
         single.Show(new ReferenceResultSet("FMod::Compute", new[] { Item(Use, 3, "Use", "return FMod::Compute(1);"), Item(Other, 2, "Other", "return FMod::Compute(2);") },
             string.Empty, DateTime.Now, Use));
         single.SetProjects(Catalog(withProject: true));
@@ -271,7 +271,7 @@ internal static class ReferenceResultsTests
         var items = new[] { Item(shared, 1, "", "int Compute();"), Item(tool, 2, "", "Compute();"), Item(editor, 3, "", "Compute();"), Item(Use, 4, "", "Compute();") };
         string Owners(string origin)
         {
-            var grouped = new ReferenceResultsModel();
+            var grouped = AllProjectsModel();
             grouped.Show(new ReferenceResultSet("Compute", items, string.Empty, DateTime.Now, origin));
             grouped.SetProjects(catalog);
             var owner = string.Empty;
@@ -306,7 +306,7 @@ internal static class ReferenceResultsTests
             "위치 항목의 소속 짧은 이름·전체 이름");
 
         // 줄 번호는 결과 전체의 최대 자릿수로 앞을 숫자 폭 공백으로 채웁니다. 필터로 줄어도 자릿수는 그대로입니다.
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         model.Show(Sample("FMod::Compute"));
         string Labels() => string.Join(",", model.Rows.OfType<ReferenceLineRow>().Select(row => row.LineLabel.Replace('\u2007', '_')));
         Assert(Labels() == "_3,_8,20,_5,_2", "줄 번호 앞 채움: " + Labels());
@@ -356,7 +356,7 @@ internal static class ReferenceResultsTests
 
     private static void Menu()
     {
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         Assert(Describe(ReferenceMenu.Entries(null, model)) == "전부 펼치기(꺼짐) 전부 접기(꺼짐)", "결과 없음: " + Describe(ReferenceMenu.Entries(null, model)));
         model.Show(Sample("FMod::Compute"));
 
@@ -382,7 +382,7 @@ internal static class ReferenceResultsTests
 
     private static void CopyFormats()
     {
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         var set = Sample("FMod::Compute");
         model.Show(set);
         Assert(ReferenceMenu.Location(set.Items[1]) == Use + "(8)", "위치 복사는 전체경로(줄): " + ReferenceMenu.Location(set.Items[1]));
@@ -404,7 +404,7 @@ internal static class ReferenceResultsTests
 
     private static void History()
     {
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         var sets = Enumerable.Range(0, ReferenceResultsModel.MaxHistory + 2).Select(index => Sample("Symbol" + index)).ToArray();
         foreach (var set in sets) model.Show(set);
         Assert(model.History.Count == ReferenceResultsModel.MaxHistory && model.History[0] == sets[^1] &&
@@ -460,6 +460,10 @@ internal static class ReferenceResultsTests
             FixedHeights(document, name);
         }
 
+        // 크기는 VS 환경 글꼴 × 옵션 비율(기본 100%, 80~200%)입니다. PC마다 다른 환경 글꼴을 그대로 따르고 사용자가 키울 수 있습니다.
+        Assert(ResultListFont.DefaultPercent == 100 && ResultListFont.Clamp(50) == 80 && ResultListFont.Clamp(500) == 200 &&
+               ResultListFont.Size(12, 100) == 12 && ResultListFont.Size(12, 125) == 15 && ResultListFont.Size(12, 10) == 9.6, "목록 글씨 크기 비율·범위");
+
         // 문서 함수 트리(Alt+M) 팝업도 표면 하나에서 같은 크기를 정합니다. 글자 렌더링은 열 때 편집기 확대를 보고 정하므로 고정하지 않습니다.
         var popup = XDocument.Load(Path.Combine(root, "src", "VisualBoost.Package", "DocumentNavigation", "DocumentNavigationControl.xaml"));
         var surface = popup.Descendants().Single(element => (string?)element.Attribute(XName.Get("Name", "http://schemas.microsoft.com/winfx/2006/xaml")) == "PopupSurface");
@@ -492,7 +496,7 @@ internal static class ReferenceResultsTests
     {
         var element = Program.LoadXaml(root, "ReferencesControl");
         var window = new Window { Content = element, Width = 1000, Height = 360, Left = -20000, ShowInTaskbar = false };
-        var model = new ReferenceResultsModel();
+        var model = AllProjectsModel();
         // 소속 이름 색을 보려고 이름 판정을 잠시 연결합니다. 항목은 처음 읽을 때 한 번 판정하므로 결과를 만들기 전에 연결합니다.
         CodePreviewStyle.NameKind = name => name is "Tick" or "Use" ? CodePreviewKind.Function : null;
         model.Show(Sample("FMod::Compute"));
@@ -611,6 +615,14 @@ internal static class ReferenceResultsTests
         Save(window, Path.Combine(output, "ReferencesControl-empty-scope.png"));
         window.Close();
         Program.Pump();
+    }
+
+    /// <summary>모든 프로젝트 모드로 시작한 모델입니다. 기본(현재 프로젝트) 모드와 무관한 표시 규칙을 검증할 때 씁니다.</summary>
+    private static ReferenceResultsModel AllProjectsModel()
+    {
+        var model = new ReferenceResultsModel();
+        model.SetMode(ReferenceScopeMode.AllProjects);
+        return model;
     }
 
     private static IReadOnlyList<SymbolSearchScope> Catalog(bool withProject)

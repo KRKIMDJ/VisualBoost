@@ -23,6 +23,7 @@ internal static class Program
             SourceAnalysisRegressionTests.Run();
             AnalysisProgressTests.Run();
             RestartCacheTests.Run();
+            DiscoveryReuseTests.Run();
             ProjectScopeTests.Run();
             ProgressiveIndexTests.Run();
             SymbolScopeTests.Run();

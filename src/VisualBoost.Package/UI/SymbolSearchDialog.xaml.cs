@@ -30,6 +30,9 @@ public partial class SymbolSearchDialog : DialogWindow
     private readonly IReadOnlyList<SolutionProjectInfo> projects;
     private readonly string? solutionKey;
     private readonly DispatcherTimer statusTimer;
+    // 검색이 이 시간을 넘길 때만 "검색 중"을 보입니다. 분석 중에는 상태 타이머가 0.5초마다 다시 검색하므로 바로 바꾸면 상태 글자가
+    // 결과 수와 번갈아 깜박입니다(2026-10-07 사용자 피드백, 파일 탐색 창과 같은 규칙).
+    private readonly DispatcherTimer busyTimer;
     private CancellationTokenSource? searchCancellation;
     private bool isSearching;
     private bool isClosed;
@@ -63,6 +66,8 @@ public partial class SymbolSearchDialog : DialogWindow
             Interval = TimeSpan.FromMilliseconds(500),
         };
         statusTimer.Tick += OnStatusTimerTick;
+        busyTimer = new DispatcherTimer(DispatcherPriority.Normal) { Interval = TimeSpan.FromMilliseconds(400) };
+        busyTimer.Tick += OnBusyTimerTick;
         Loaded += OnLoaded;
         Closing += OnClosing;
         Closed += OnClosed;
@@ -124,6 +129,8 @@ public partial class SymbolSearchDialog : DialogWindow
         isClosed = true;
         statusTimer.Stop();
         statusTimer.Tick -= OnStatusTimerTick;
+        busyTimer.Stop();
+        busyTimer.Tick -= OnBusyTimerTick;
         searchCancellation?.Cancel();
         searchCancellation = null;
         rememberedSolution = solutionKey;
@@ -185,7 +192,8 @@ public partial class SymbolSearchDialog : DialogWindow
 
         var cancellationToken = currentCancellation.Token;
         isSearching = true;
-        StatusText.Text = "검색 중";
+        busyTimer.Stop();
+        busyTimer.Start();
         try
         {
             if (useDebounce)
@@ -241,6 +249,7 @@ public partial class SymbolSearchDialog : DialogWindow
             if (ReferenceEquals(searchCancellation, currentCancellation))
             {
                 isSearching = false;
+                busyTimer.Stop();
             }
             if (ReferenceEquals(searchCancellation, currentCancellation)) searchCancellation = null;
             currentCancellation.Dispose();
@@ -273,6 +282,12 @@ public partial class SymbolSearchDialog : DialogWindow
         }
 
         await RefreshResultsAsync(useDebounce: false);
+    }
+
+    private void OnBusyTimerTick(object? sender, EventArgs eventArgs)
+    {
+        busyTimer.Stop();
+        if (!isClosed && isSearching) StatusText.Text = "검색 중";
     }
 
     private void UpdateIdleState(SolutionFileIndexSnapshot snapshot)

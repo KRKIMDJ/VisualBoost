@@ -31,8 +31,18 @@ internal static class AnalysisProgressTests
                 "include 후처리는 실제 분석된 파일의 별도 진행 수와 경로를 표시");
             states.Clear();
             analyzer.Analyze(Path.Combine(root, "Fixture.sln"), files, Array.Empty<string>(), default, states.Add);
-            Check(!states.Any(p => p.Stage == SourceAnalysisStage.Parsing) && states.Last(p => p.Stage != SourceAnalysisStage.Linking).Completed == 3,
-                "캐시 재사용을 파싱으로 오표시하지 않음");
+            Check(!states.Any(p => p.Stage == SourceAnalysisStage.Parsing) && states.All(p => p.Refreshing) &&
+                  states.Where(p => p.Stage == SourceAnalysisStage.CacheChecking).Max(p => p.Completed) == 3,
+                "캐시 재사용을 파싱으로 오표시하지 않고 다시 열기로 표시");
+            // 다시 열기에서는 저장된 분석을 먼저 모두 채택해, 파싱 진행 수가 다시 읽을 파일(바뀐 A와 읽지 못한 Missing)만 셉니다.
+            File.WriteAllText(files[0], "void FirstChanged() {}\n");
+            File.SetLastWriteTimeUtc(files[0], DateTime.UtcNow.AddMinutes(1));
+            states.Clear();
+            analyzer.Analyze(Path.Combine(root, "Fixture.sln"), files, Array.Empty<string>(), default, states.Add);
+            var parsing = states.Where(p => p.Stage == SourceAnalysisStage.Parsing).ToArray();
+            Check(parsing.Length > 0 && parsing.All(p => p.Refreshing && p.Total == 2 && p.Path == files[0]) &&
+                  states.Where(p => p.Stage == SourceAnalysisStage.CacheChecking && p.Total == 2).Max(p => p.Completed) == 2,
+                "다시 열기의 파싱 진행은 바뀐 파일 수만 셈");
             using var cancellation = new CancellationTokenSource(); cancellation.Cancel();
             states.Clear();
             try { analyzer.Analyze(Path.Combine(root, "Fixture.sln"), files, Array.Empty<string>(), cancellation.Token, states.Add); }

@@ -4,11 +4,22 @@ using System.Linq;
 using System.Threading;
 using VisualBoost.Core.CodeGeneration;
 using VisualBoost.Core.DocumentNavigation;
+using VisualBoost.Core.Input;
 
 namespace VisualBoost.Core.Tests;
 
 internal static class EditorToolsTests
 {
+    public static void RunKeyBindings()
+    {
+        // VS 자동화 바인딩 문자열의 범위 이름은 표시 언어를 따르므로 키 부분만 봅니다.
+        Check(KeyBindingText.IsAltLetter("Text Editor::Alt+G", 'g') && KeyBindingText.IsAltLetter("텍스트 편집기::Alt+G", 'G') &&
+              KeyBindingText.IsAltLetter("Global::alt+o", 'O') && KeyBindingText.IsAltLetter("Alt+M", 'M'), "범위 이름과 대소문자에 무관한 Alt+글자");
+        Check(!KeyBindingText.IsAltLetter("Text Editor::Shift+Alt+F", 'F') && !KeyBindingText.IsAltLetter("Text Editor::Ctrl+G", 'G') &&
+              !KeyBindingText.IsAltLetter("Text Editor::Alt+G, Alt+H", 'G') && !KeyBindingText.IsAltLetter("Text Editor::Alt+H", 'G') &&
+              !KeyBindingText.IsAltLetter(null, 'G') && !KeyBindingText.IsAltLetter("Global::Alt+F1", 'F'), "다른 수식 키·두 단계 키·다른 글자 제외");
+    }
+
     public static void Run()
     {
         const string sourcePath = @"C:\Work\Source\Foo.cpp";

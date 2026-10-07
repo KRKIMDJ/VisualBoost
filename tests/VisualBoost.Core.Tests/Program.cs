@@ -22,6 +22,8 @@ internal static class Program
         Run("의미 탐색 명령줄 분리", SemanticNavigationTests.RunCommandLine);
         Run("의미 탐색 URI·위치 변환", SemanticNavigationTests.RunUri);
         Run("참조 위치의 정의·선언 역할 판정", SemanticNavigationTests.RunReferenceRoles);
+        Run("클래스 자신의 정의 이름 참조 제외", SemanticNavigationTests.RunOwnDefinitionReferences);
+        Run("clangd 색인 작업 수 기본값", SemanticNavigationTests.RunWorkerDefaults);
         Run("링크를 거친 Solution의 clangd 결과 경로 보정", SemanticNavigationTests.RunPathAliases);
         Run("LSP 연결 요청·통지·취소·끊김", SemanticNavigationTests.RunConnection);
         Run("Unreal 응답 파일 compilation database", SemanticNavigationTests.RunUnrealCommands);
@@ -37,6 +39,7 @@ internal static class Program
         Run("독립 문서 색상 스캐너·취소·상한·성능", QuickColorTests.Run);
         Run("일반 C++ 선언·정의 생성", CodeGenerationTests.Run);
         Run("빠른 인클루드 및 주석 파일 링크", EditorToolsTests.Run);
+        Run("편집기 Alt+글자 키 바인딩 해석", EditorToolsTests.RunKeyBindings);
         Run("새 헤더 빠른 인클루드 조회", QuickIncludeLookupTests.Run);
         Run("현재 문서 함수 범위·검색·취소·성능", DocumentNavigationTests.Run);
         Run("심볼 상세 정보 및 입력 보조", SymbolAssistanceTests.Run);

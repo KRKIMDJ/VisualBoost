@@ -53,12 +53,31 @@ public sealed class GeneralOptionsPage : DialogPage
     [DefaultValue("include=src;include=source;inc=src;headers=source")]
     public string DirectoryPairs { get; set; } = "include=src;include=source;inc=src;headers=source";
 
+    [Category("결과 목록")]
+    [DisplayName("글씨 크기(%)")]
+    [Description("참조 창·파일 탐색·심볼 탐색·정의 후보·문서 함수 탐색의 글씨 크기입니다. VS 환경 글꼴 크기에 대한 백분율이며 80~200 사이로 맞춥니다.")]
+    [DefaultValue(UI.ResultListFont.DefaultPercent)]
+    public int ResultListFontPercent { get; set; } = UI.ResultListFont.DefaultPercent;
+
     [Category("진단")]
     [Browsable(false)]
     [DisplayName("탐색 실패 시 인덱스 크기 표시")]
     [Description("대응 파일을 찾지 못했을 때 상태 표시줄에 인덱싱된 파일 개수를 표시합니다.")]
     [DefaultValue(true)]
     public bool ShowIndexCountOnFailure { get; set; } = true;
+
+    /// <summary>화면 설정(결과 목록 글씨 크기)을 적용합니다. UI thread에서 부릅니다.</summary>
+    internal void Publish()
+    {
+        ResultListFontPercent = UI.ResultListFont.Clamp(ResultListFontPercent);
+        UI.ResultListFont.Publish(ResultListFontPercent);
+    }
+
+    protected override void OnApply(PageApplyEventArgs e)
+    {
+        base.OnApply(e);
+        if (e.ApplyBehavior != ApplyKind.Cancel) Publish();
+    }
 
     internal FilePairingOptions CreateFilePairingOptions() =>
         new(ParseList(HeaderExtensions), ParseList(SourceExtensions), ParseDirectoryPairs(DirectoryPairs));

@@ -106,6 +106,70 @@ internal static class SemanticNavigationTests
         Check(typeRoles.Count == 2 && typeRoles[type] == NavigationRole.Definition && typeRoles[forward] == NavigationRole.Declaration, "전방 선언과 타입 정의");
     }
 
+    public static void RunWorkerDefaults()
+    {
+        const long Gib = 1024L * 1024 * 1024;
+        // 코어 절반을 쓰되 VS 몫 8 GiB를 남기고 작업당 2.5 GiB로 제한합니다. 메모리를 모르면 코어 기준만 씁니다.
+        Check(ClangdLaunchOptions.DefaultWorkerCount(16, 64 * Gib) == 8 && ClangdLaunchOptions.DefaultWorkerCount(16, 32 * Gib) == 8 &&
+              ClangdLaunchOptions.DefaultWorkerCount(8, 32 * Gib) == 4 && ClangdLaunchOptions.DefaultWorkerCount(32, 16 * Gib) == 3 &&
+              ClangdLaunchOptions.DefaultWorkerCount(4, 8 * Gib) == 1 && ClangdLaunchOptions.DefaultWorkerCount(1, 0) == 1 &&
+              ClangdLaunchOptions.DefaultWorkerCount(12, 0) == 6, "clangd 색인 작업 수 기본값");
+        Check(ClangdLaunchOptions.ResolveWorkerCount(3) == 3 && ClangdLaunchOptions.ResolveWorkerCount(0) >= 1, "지정한 작업 수 우선");
+    }
+
+    public static void RunOwnDefinitionReferences()
+    {
+        // clangd 22가 클래스 참조로 돌려준 줄·열·소속 이름을 그대로 씁니다. 1은 뺄 위치, 0은 남길 위치입니다.
+        var cases = new (string Line, int Character, string? Container, string Name, int Own)[]
+        {
+            ("class AActorX {", 6, null, "AActorX", 0),
+            ("    AActorX();", 4, "AActorX", "AActorX", 1),
+            ("    ~AActorX();", 5, "AActorX", "AActorX", 1),
+            ("    static AActorX* Get();", 11, "AActorX::Get", "AActorX", 0),
+            ("    AActorX(const AActorX& o) {}", 4, "AActorX", "AActorX", 1),
+            ("    AActorX(const AActorX& o) {}", 18, "AActorX::AActorX", "AActorX", 0),
+            ("    static AActorX Make() { return AActorX(); }", 11, "AActorX::Make", "AActorX", 0),
+            ("    static AActorX Make() { return AActorX(); }", 35, "AActorX::Make", "AActorX", 0),
+            ("int AActorX::Count = 0;", 4, "AActorX::Count", "AActorX", 1),
+            ("AActorX::AActorX() {}", 0, "AActorX::AActorX", "AActorX", 1),
+            ("AActorX::AActorX() {}", 9, "AActorX", "AActorX", 1),
+            ("AActorX::~AActorX() {}", 0, "AActorX::~AActorX", "AActorX", 1),
+            ("AActorX::~AActorX() {}", 10, "AActorX", "AActorX", 1),
+            ("void AActorX::BeginPlay()", 5, "AActorX::BeginPlay", "AActorX", 1),
+            ("    AActorX* Self = AActorX::Get();", 4, "AActorX::BeginPlay", "AActorX", 0),
+            ("    AActorX* Self = AActorX::Get();", 20, "AActorX::BeginPlay", "AActorX", 0),
+            ("void AActorX::FInner::Do() {}", 5, "AActorX::FInner::Do", "AActorX", 1),
+            ("AActorX MakeOne() { return AActorX(); }", 0, "MakeOne", "AActorX", 0),
+            ("AActorX MakeOne() { return AActorX(); }", 27, "MakeOne", "AActorX", 0),
+            ("AActorX* AActorX::Get() { return nullptr; }", 0, "AActorX::Get", "AActorX", 0),
+            ("AActorX* AActorX::Get() { return nullptr; }", 9, "AActorX::Get", "AActorX", 1),
+            ("int C() { AActorX X; return AActorX::Count + ns::Helper(); }", 28, "C", "AActorX", 0),
+            ("void ns::AActorX::Tick(float DeltaTime)", 9, "ns::AActorX::Tick", "AActorX", 1),
+            ("template <class T> struct TBox { void Put(T v); TBox(); };", 48, "TBox", "TBox", 1),
+            ("template <class T> void TBox<T>::Put(T v) {}", 24, "TBox::Put", "TBox", 1),
+            ("template <class T> TBox<T>::TBox() {}", 19, "TBox::TBox<T>", "TBox", 1),
+            ("template <class T> TBox<T>::TBox() {}", 28, "TBox", "TBox", 1),
+        };
+        var locations = cases.Select((c, i) => new NavigationLocation(@"C:\p\a.h", i, c.Character, i, c.Character + c.Name.Length, c.Container)).ToArray();
+        var lines = cases.Select(c => c.Line).ToArray();
+        var kept = OwnDefinitionReferences.Kept(locations, lines, symbolIsType: true);
+        var expected = Enumerable.Range(0, cases.Length).Where(i => cases[i].Own == 0).ToArray();
+        Check(kept.SequenceEqual(expected), "클래스 자신의 정의 이름 제외: " + string.Join(",", Enumerable.Range(0, cases.Length).Where(i => kept.Contains(i) != (cases[i].Own == 0))));
+
+        // 함수 참조: 재귀 호출은 생성자와 모양이 같으므로 타입이 아니면 남깁니다. 함수 정의의 소속 이름은 클래스라 어느 규칙에도 걸리지 않습니다.
+        var recursive = new NavigationLocation(@"C:\p\b.cpp", 0, 26, 0, 29, "AActorX::Get");
+        Check(!OwnDefinitionReferences.IsOwnDefinitionName(recursive, "AActorX* AActorX::Get() { Get(); }", symbolIsType: false), "재귀 호출 유지");
+        var functionDefinition = new NavigationLocation(@"C:\p\b.cpp", 0, 14, 0, 23, "AActorX");
+        Check(!OwnDefinitionReferences.IsOwnDefinitionName(functionDefinition, "void AActorX::BeginPlay()", symbolIsType: false), "함수 정의 유지");
+        // 타입이 아니면 생성자 규칙은 쓰지 않지만 한정자 규칙은 씁니다(함수 이름 뒤에는 ::가 오지 않음).
+        Check(!OwnDefinitionReferences.IsOwnDefinitionName(locations[1], lines[1], symbolIsType: false) &&
+              OwnDefinitionReferences.IsOwnDefinitionName(locations[13], lines[13], symbolIsType: false), "종류를 모를 때");
+        // 소속 이름이 없거나 줄이 범위와 맞지 않으면 빼지 않습니다.
+        Check(!OwnDefinitionReferences.IsOwnDefinitionName(new NavigationLocation(@"C:\p\b.cpp", 0, 5, 0, 12), "void AActorX::BeginPlay()", true) &&
+              !OwnDefinitionReferences.IsOwnDefinitionName(locations[13], "short", true) &&
+              !OwnDefinitionReferences.IsOwnDefinitionName(locations[13], null, true), "근거 부족");
+    }
+
     public static void RunPathAliases()
     {
         // clangd에는 실제 경로를 보내고, 받은 경로는 연 경로로 되돌립니다. 같아진 위치는 처음 것만 남깁니다.
