@@ -1558,19 +1558,21 @@ internal static class SemanticNavigationTests
                 "#pragma once", "struct FBase", "{", "    virtual ~FBase() {}", "    virtual int Tick(int Value);", "};",
                 "struct FDerived : FBase", "{", "    int Tick(int Value) override;", "};",
                 "namespace ns { template <class T> struct TBox { static int Value; }; }",
-                "namespace math { template <class T> struct TVec; }", "using FVec = math::TVec<double>;"
+                "namespace math { template <class T> struct TVec; }", "using FVec = math::TVec<double>;",
+                "struct FTool { FTool(int Value); ~FTool(); int Count = 0; };"
             };
             // using 별칭을 다른 헤더에서 typedef로 다시 선언합니다. 사용 위치에서 찾으면 clangd가 다른 파일의 참조를 모두 빠뜨립니다.
             var vecLines = new[] { "#pragma once", "#include \"Base.h\"", "namespace math { template <class T> struct TVec { static const TVec Zero; }; }", "typedef math::TVec<double> FVec;" };
             var bodyLines = new[]
             {
                 "#include \"Vec.h\"", "int FBase::Tick(int Value) { return Value; }", "int FDerived::Tick(int Value) { return FBase::Tick(Value) + 1; }",
-                "const FVec* BodyVec() { return &FVec::Zero; }"
+                "const FVec* BodyVec() { return &FVec::Zero; }", "FTool::FTool(int Value) : Count(Value) {}", "FTool::~FTool() {}"
             };
             var callerLines = new[]
             {
                 "#include \"Vec.h\"", "int CallBase(FBase& B) { return B.Tick(1); }", "int CallDerived(FDerived& D) { return D.Tick(2); }",
-                "int UseBox() { return ns::TBox<int>::Value + int(sizeof(ns::TBox<char>)); }", "const FVec* CallerVec(FVec& V) { return &V; }"
+                "int UseBox() { return ns::TBox<int>::Value + int(sizeof(ns::TBox<char>)); }", "const FVec* CallerVec(FVec& V) { return &V; }",
+                "int UseTool() { FTool Tool(1); return Tool.Count; }"
             };
             var header = Path.Combine(source, "Base.h");
             var body = Path.Combine(source, "Base.cpp");
@@ -1630,6 +1632,134 @@ internal static class SemanticNavigationTests
                   aliasReferences.Contains(Key("Base.cpp", 3, bodyLines[3].LastIndexOf("FVec", StringComparison.Ordinal))) &&
                   aliasReferences.Contains(Key("Caller.cpp", 4, callerLines[4].LastIndexOf("FVec", StringComparison.Ordinal))),
                 "재선언된 별칭 참조: " + string.Join(",", aliasReferences));
+
+            // 클래스의 참조에는 생성자·소멸자 이름 위치가 들어 있어도 종류는 클래스여야 생성자 이름 제외(D4)가 적용됩니다.
+            var toolResult = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 5, callerLines[5].IndexOf("FTool", StringComparison.Ordinal)),
+                timeout.Token).Result;
+            Check(toolResult.SymbolKind is SourceSymbolKind.Struct or SourceSymbolKind.Class or SourceSymbolKind.Type &&
+                  toolResult.Locations.Any(l => l.Path == body && l.Line == 4 && l.Character == bodyLines[4].LastIndexOf("FTool", StringComparison.Ordinal)),
+                $"생성자 이름이 든 클래스 참조의 종류: {toolResult.SymbolKind} · " + string.Join(",", toolResult.Locations.Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character))));
+            navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    public static void RunGeneratedDefinitionMacros()
+    {
+        Check(GeneratedDefinitionMacros.NameOf("c:Definitions.Game.h@878@macro@GAME_API") == "GAME_API", "정의 헤더 매크로 이름");
+        Check(GeneratedDefinitionMacros.NameOf("c:ObjectMacros.h@52522@macro@UCLASS") is null && GeneratedDefinitionMacros.NameOf("c:@F@GAME_API") is null &&
+              GeneratedDefinitionMacros.NameOf(null) is null, "정의 헤더 밖 매크로·매크로 아님");
+        Check(GeneratedDefinitionMacros.Same("c:Definitions.Game.h@878@macro@GAME_API", "c:Definitions.Tool.h@902@macro@GAME_API") &&
+              !GeneratedDefinitionMacros.Same("c:Definitions.Game.h@878@macro@GAME_API", "c:Definitions.Tool.h@930@macro@TOOL_API") &&
+              GeneratedDefinitionMacros.Same("c:@S@A", "c:@S@A") && !GeneratedDefinitionMacros.Same("c:@S@A", "c:@S@B") && !GeneratedDefinitionMacros.Same("", ""),
+            "같은 이름의 정의 헤더 매크로만 같음");
+        var commands = new[]
+        {
+            new CompileCommand("C:/p", "C:/p/A.cpp", new[] { "clang-cl.exe", "-Xclang", "-include", "-Xclang", "C:/b/Game/Definitions.Game.h", "C:/p/A.cpp" }),
+            new CompileCommand("C:/p", "C:/p/B.cpp", new[] { "clang-cl.exe", "-Xclang", "-include", "-Xclang", "C:/B/game/definitions.game.h", "-Xclang", "-include", "-Xclang",
+                "Tool/Definitions.Tool.h", "/FIDefinitions.h", "C:/p/B.cpp" })
+        };
+        var files = GeneratedDefinitionMacros.FilesIn(commands).Select(f => f.Replace('\\', '/')).ToArray();
+        Check(files.SequenceEqual(new[] { "C:/b/Game/Definitions.Game.h", "C:/p/Tool/Definitions.Tool.h" }), "강제 include한 정의 헤더(대소문자 무시 중복 제거, 상대 경로): " + string.Join(",", files));
+        var text = "// GAME_API\r\n#pragma once\r\n#define GAME_APIX 1\r\n  #  define GAME_API DLLIMPORT\r\n";
+        Check(GeneratedDefinitionMacros.DefineOf(text, "GAME_API") == (3, 12) && GeneratedDefinitionMacros.DefineOf(text, "TOOL_API") is null, "#define 이름 위치");
+    }
+
+    /// <summary>종류 조회가 늦을 때 쓰는 USR 판정과, 색인 파일 기록이 없는 위치의 다른 클래스 가상 함수 선언 판정을 확인합니다.</summary>
+    public static void RunReferenceFallbackRules()
+    {
+        Check(ClangdNavigator.KindFromUsr("c:@S@AToolActor") == SourceSymbolKind.Type &&
+              ClangdNavigator.KindFromUsr("c:@N@UE@N@Math@ST>1#T@TVector") == SourceSymbolKind.Type &&
+              ClangdNavigator.KindFromUsr("c:@SP>1#T@TPair>#t0.0#I") == SourceSymbolKind.Type &&
+              ClangdNavigator.KindFromUsr("c:@S@TArray>#I") == SourceSymbolKind.Type &&
+              ClangdNavigator.KindFromUsr("c:@U@FBits") == SourceSymbolKind.Union &&
+              ClangdNavigator.KindFromUsr("c:@E@EColor") == SourceSymbolKind.Enum, "USR로 본 타입 종류");
+        Check(ClangdNavigator.KindFromUsr("c:@S@AToolActor@F@AToolActor#&1$@S@FInitializer#") is null &&
+              ClangdNavigator.KindFromUsr("c:@F@Make#$@S@FVec#") is null &&
+              ClangdNavigator.KindFromUsr("c:@S@FVec@FI@X") is null &&
+              ClangdNavigator.KindFromUsr("c:@E@EColor@Red") is null &&
+              ClangdNavigator.KindFromUsr("c:@S@FVec@Zero") is null &&
+              ClangdNavigator.KindFromUsr("c:Definitions.Game.h@878@macro@GAME_API") is null &&
+              ClangdNavigator.KindFromUsr("c:@N@UE") is null && ClangdNavigator.KindFromUsr("") is null, "함수·필드·열거자·매크로·네임스페이스는 타입 아님");
+
+        var symbol = new SemanticSymbol("GetKind", "FSphere", "c:@S@FSphere@F@GetKind#1");
+        NavigationLocation At(string line, string? container) =>
+            new("C:/p/A.h", 3, line.IndexOf("GetKind", StringComparison.Ordinal), 3, line.IndexOf("GetKind", StringComparison.Ordinal) + 7, container);
+        var baseLine = "    virtual int GetKind() const PURE_VIRTUAL(FShapeBase::GetKind, return 0;);";
+        var overrideLine = "    virtual int GetKind() const override;";
+        Check(ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(baseLine, "ns::FShapeBase"), baseLine) &&
+              ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(overrideLine, "FOther::GetKind"), overrideLine),
+            "다른 클래스의 기반·재정의 선언");
+        Check(!ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(overrideLine, "FSphere"), overrideLine) &&
+              !ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(overrideLine, "(anonymous namespace)::FSphere"), overrideLine) &&
+              !ClangdNavigator.IsOtherClassVirtualDeclaration(new SemanticSymbol("GetKind", "TSphere<T>", "c:@ST>1#T@TSphere@F@GetKind#1"),
+                  At(overrideLine, "TSphere"), overrideLine) &&
+              !ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(overrideLine, null), overrideLine),
+            "찾은 클래스 자신의 선언·container 없음은 남김");
+        var call = "    virtual void Use() override { Super::GetKind(); Model->GetKind(); }";
+        var superAt = new NavigationLocation("C:/p/A.h", 3, call.IndexOf("GetKind", StringComparison.Ordinal), 3, 0, "FOther::Use");
+        var arrowAt = new NavigationLocation("C:/p/A.h", 3, call.LastIndexOf("GetKind", StringComparison.Ordinal), 3, 0, "FOther::Use");
+        var plain = "    int GetKind() const;";
+        Check(!ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, superAt, call) && !ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, arrowAt, call) &&
+              !ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(plain, "FOther"), plain), "호출·가상 표시 없는 선언은 남김");
+    }
+
+    /// <summary>
+    /// Unreal 모듈 API 매크로는 모듈마다 정의 헤더에 다시 정의되어 정의마다 다른 심볼로 색인되므로, 다른 모듈 명령으로 색인한 파일의 사용처도
+    /// 찾는지 실제 clangd로 확인합니다.
+    /// </summary>
+    public static void RunDefinitionMacroReferencesIntegration()
+    {
+        var clangd = FindClangd();
+        if (clangd is null)
+        {
+            Console.WriteLine("SKIP: 정의 헤더 매크로 참조 통합 시험은 VISUALBOOST_TEST_CLANGD 또는 VS의 C++ Clang 도구가 필요합니다.");
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.DefinitionMacro." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var project = Path.Combine(root, "Game");
+            Write(Path.Combine(project, "Game.uproject"), "{}");
+            var game = Path.Combine(project, "Source", "Game");
+            var tool = Path.Combine(project, "Source", "Tool");
+            Write(Path.Combine(game, "Game.Build.cs"), "");
+            Write(Path.Combine(tool, "Tool.Build.cs"), "");
+            var sharedLines = new[] { "#pragma once", "struct GAME_API FShared { int Value; };" };
+            var gameLines = new[] { "#include \"Shared.h\"", "GAME_API int GameValue = 1;" };
+            var toolLines = new[] { "#include \"Shared.h\"", "extern GAME_API int GameValue;", "int ToolUse() { FShared S{}; return S.Value + GameValue; }" };
+            Write(Path.Combine(game, "Shared.h"), string.Join("\n", sharedLines) + "\n");
+            var gameFile = Path.Combine(game, "GameMain.cpp");
+            var toolFile = Path.Combine(tool, "ToolMain.cpp");
+            var gameText = string.Join("\n", gameLines) + "\n";
+            Write(gameFile, gameText);
+            Write(toolFile, string.Join("\n", toolLines) + "\n");
+            var development = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development");
+            var gameDefinitions = Path.Combine(development, "Game", "Definitions.Game.h");
+            var toolDefinitions = Path.Combine(development, "Tool", "Definitions.Tool.h");
+            Write(gameDefinitions, "#pragma once\n#define GAME_API __declspec(dllexport)\n");
+            Write(toolDefinitions, "#pragma once\n#define GAME_API __declspec(dllimport)\n#define TOOL_API __declspec(dllexport)\n");
+            foreach (var (file, definitions) in new[] { (gameFile, gameDefinitions), (toolFile, toolDefinitions) })
+            {
+                Write(Path.Combine(Path.GetDirectoryName(definitions)!, Path.GetFileName(file) + ".obj.rsp"),
+                    $"\"{file.Replace('\\', '/')}\"\n/I \"{game.Replace('\\', '/')}\"\n/FI\"{definitions.Replace('\\', '/')}\"\n/TP\n/std:c++17\n/c\n");
+            }
+
+            using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
+                EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1
+            }, CancellationToken.None).Result;
+            Check(SpinUntil(() => navigator.Progress.Completed, 60000), "색인 완료");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var found = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(gameFile, gameText, 1), 1, 0), timeout.Token).Result.Locations
+                .Select(l => Path.GetFileName(l.Path) + ":" + l.Line + ":" + l.Character).ToArray();
+            Check(found.Contains("GameMain.cpp:1:0") && found.Contains("ToolMain.cpp:1:7") && found.Contains("Shared.h:1:7"),
+                "다른 모듈 정의 헤더로 색인한 사용처까지: " + string.Join(",", found));
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally

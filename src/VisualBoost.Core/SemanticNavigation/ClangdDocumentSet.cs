@@ -158,6 +158,25 @@ public sealed class ClangdDocumentSet
         }
     }
 
+    /// <summary>
+    /// 열린 문서를 닫았다가 보낸 내용·버전 그대로 다시 엽니다. 임대는 유지합니다. 열려 있지 않으면 아무것도 하지 않고 거짓입니다.
+    /// </summary>
+    /// <remarks>
+    /// 열린 문서의 명령만 바꾸면 clangd 22.1.3은 새 preamble을 만드는 동안 이전 preamble로 만든 분석으로 진단과 요청에 먼저 답합니다
+    /// (2026-10-09 정확도 시험: 공유 PCH를 넣은 뒤에도 PCH 없는 분석의 오류로 결과가 비었음). 다시 열면 새 명령의 preamble이 준비된 뒤에만
+    /// 답합니다.
+    /// </remarks>
+    public bool Reopen(string path)
+    {
+        lock (gate)
+        {
+            if (!entries.TryGetValue(path, out var entry)) return false;
+            close(path);
+            open(path, entry.Text, entry.Version);
+            return true;
+        }
+    }
+
     /// <summary>서버를 다시 시작했을 때 알림 없이 상태만 비웁니다.</summary>
     public void Reset()
     {

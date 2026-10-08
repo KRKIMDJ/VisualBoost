@@ -44,6 +44,9 @@ internal static class Program
         Run("편집기 밖 소스 변경 감시", SemanticNavigationTests.RunSourceChangeMonitor);
         Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진·프로젝트 정의·저장·외부 변경 반영)", SemanticNavigationTests.RunNavigatorIntegration);
         Run("가상 함수 참조 통합(찾은 함수만)", SemanticNavigationTests.RunVirtualReferencesIntegration);
+        Run("Unreal 정의 헤더 매크로 판정", SemanticNavigationTests.RunGeneratedDefinitionMacros);
+        Run("참조 보조 판정(USR 타입 종류·다른 클래스 가상 선언)", SemanticNavigationTests.RunReferenceFallbackRules);
+        Run("정의 헤더 매크로 참조 통합(다른 모듈 정의)", SemanticNavigationTests.RunDefinitionMacroReferencesIntegration);
         Run("독립 문서 색상 스캐너·취소·상한·성능", QuickColorTests.Run);
         Run("일반 C++ 선언·정의 생성", CodeGenerationTests.Run);
         Run("빠른 인클루드 및 주석 파일 링크", EditorToolsTests.Run);

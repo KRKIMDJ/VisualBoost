@@ -517,13 +517,32 @@ public sealed class ClangdSession : IDisposable
         if (known.Count == 0) return null;
         var result = await connection.RequestAsync("workspace/symbol", JsonValue.Object(("query", symbol.QualifiedName)), cancellationToken).ConfigureAwait(false);
         var positions = new HashSet<NavigationLocation>(known);
+        var self = ScopeKey(symbol.QualifiedName);
         foreach (var item in result.Items)
         {
+            // 클래스의 참조에는 생성자·소멸자 이름 위치가 들어 있고 생성자도 같은 이름으로 검색되므로, 이 심볼 안에 든 항목은 이 심볼이 아닙니다
+            // (2026-10-09 정확도 시험: 클래스를 함수로 판정해 생성자 이름 제외가 빠짐).
+            if (string.Equals(ScopeKey(item["containerName"].AsString() ?? string.Empty), self, StringComparison.Ordinal)) continue;
             var location = options.Paths.ToGiven(NavigationLocation.FromLsp(item["location"]));
             if (location.Count == 1 && positions.Contains(location[0])) return SymbolKindOf(item["kind"].AsInt32());
         }
 
         return null;
+    }
+
+    /// <summary>소속 이름 비교용 표기입니다. 템플릿 인수와 익명 네임스페이스는 출처(색인·AST)마다 표기가 달라 뺍니다.</summary>
+    private static string ScopeKey(string scope)
+    {
+        var plain = new StringBuilder(scope.Length);
+        var depth = 0;
+        foreach (var ch in scope.Replace("(anonymous namespace)::", string.Empty))
+        {
+            if (ch == '<') depth++;
+            else if (ch == '>' && depth > 0) depth--;
+            else if (depth == 0) plain.Append(ch);
+        }
+
+        return plain.ToString().Trim(':');
     }
 
     /// <summary>
@@ -683,8 +702,9 @@ public sealed class ClangdSession : IDisposable
         {
             // 문서는 실제 경로로 열었으므로 대기자와 같은 연 경로로 되돌려 비교합니다.
             var path = options.Paths.ToGiven(received);
-            // 버전 없는 진단은 열린 문서가 아니므로 0으로 취급합니다.
-            var version = parameters["version"].AsInt32() ?? 0;
+            // 버전 없는 진단은 닫은 문서의 진단을 지우는 알림입니다. 닫고 바로 다시 연 문서(ClangdDocumentSet.Reopen)에서 이 알림이 새 분석의
+            // 진단처럼 대기를 끝내거나 오류 요약을 지우지 않게 버립니다. 닫은 문서의 상태는 CloseDocument에서 이미 지웠습니다.
+            if (parameters["version"].AsInt32() is not int version) return;
             var errors = DocumentErrors.From(parameters["diagnostics"].Items);
             var undefinedMacros = DocumentErrors.HasUndefinedConditionMacro(parameters["diagnostics"].Items);
             List<DiagnosticsWaiter> ready;

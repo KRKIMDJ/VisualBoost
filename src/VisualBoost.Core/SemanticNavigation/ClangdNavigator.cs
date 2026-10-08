@@ -414,7 +414,8 @@ public sealed class ClangdNavigator : IDisposable
     {
         using var tracked = TrackRequest();
         var (result, definitions) = await ReferencesCoreAsync(query, progress, cancellationToken).ConfigureAwait(false);
-        if (definitions is null || !MayNeedDefinitionFile(definitions) || result.Symbol is not { Definition: null } symbol)
+        // 보조 요청 중 clangd가 종료했으면(ReferencesCoreAsync) 받은 결과만 돌려줍니다.
+        if (definitions is null || HasExited || !MayNeedDefinitionFile(definitions) || result.Symbol is not { Definition: null } symbol)
         {
             return result;
         }
@@ -472,32 +473,50 @@ public sealed class ClangdNavigator : IDisposable
             var inOpen = locations.Count(l => documents.Contains(l.Path));
             var limited = rawCount + inOpen >= ReferenceLimit;
             roleLimit.CancelAfter(RoleTimeout);
-            var symbol = await symbolInfo.ConfigureAwait(false);
-            DeclarationSiteReferences? site = null;
-            if (symbol is not null)
+            // clangd 22.1.3은 일부 매크로 호출 위에서 symbolInfo를 받으면 종료합니다(같은 위치의 본 참조 요청은 응답함, Unreal 엔진 헤더의
+            // 매크로 인수로 넘긴 매크로를 바로 #undef한 호출, 2026-10-09 정확도 시험). 본 결과는 이미 받았으므로 그 뒤 보조 요청 중 연결이 끊기면
+            // 그때까지 정리한 결과를 돌려줍니다. 종료한 clangd는 다음 요청에서 다시 시작합니다.
+            SemanticSymbol? symbol = null;
+            var sites = new List<SiteReferences>();
+            var lost = false;
+            try
             {
-                locations = await WithoutRelatedSymbolsAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
-                if (!limited)
+                symbol = await symbolInfo.ConfigureAwait(false);
+                if (symbol is not null)
                 {
-                    site = await DeclarationSiteReferencesAsync(query, symbol, locations, progress, cancellationToken).ConfigureAwait(false);
-                    if (site is not null)
+                    locations = await WithoutRelatedSymbolsAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
+                    if (!limited)
                     {
-                        locations = site.Locations;
-                        limited = site.Limited;
+                        if (await DeclarationSiteReferencesAsync(query, symbol, locations, progress, cancellationToken).ConfigureAwait(false) is { } site)
+                        {
+                            sites.Add(site);
+                        }
+
+                        sites.AddRange(await OtherDefinitionReferencesAsync(symbol, progress, cancellationToken).ConfigureAwait(false));
+                        if (sites.Count > 0)
+                        {
+                            locations = locations.Concat(sites.SelectMany(s => s.Locations)).Distinct()
+                                .OrderBy(l => l.Path, StringComparer.OrdinalIgnoreCase).ThenBy(l => l.Line).ThenBy(l => l.Character).ToArray();
+                            limited = sites.Any(s => s.Limited);
+                        }
+                    }
+
+                    if (!limited)
+                    {
+                        locations = await WithQualifierUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
+                        locations = await WithMacroArgumentUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
                     }
                 }
-
-                if (!limited)
-                {
-                    locations = await WithQualifierUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
-                    locations = await WithMacroArgumentUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
-                }
+            }
+            catch (LspConnectionClosedException)
+            {
+                lost = true;
             }
 
-            var kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
+            var kind = lost ? null : await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
             var plain = await uses.ConfigureAwait(false);
-            // 선언 위치에서 다시 찾았으면 요청 위치의 선언 제외 결과도 같은 이유로 다른 파일이 빠져 있으므로 선언 위치의 것과 합칩니다.
-            if (site is not null) plain = plain is null || site.Uses is null ? null : plain.Concat(site.Uses).Distinct().ToArray();
+            // 다른 위치에서 더 찾았으면 요청 위치의 선언 제외 결과도 같은 이유로 빠진 곳이 있으므로 그 위치들의 것과 합칩니다.
+            if (sites.Count > 0) plain = plain is null || sites.Any(s => s.Uses is null) ? null : plain.Concat(sites.SelectMany(s => s.Uses!)).Distinct().ToArray();
             // 결과 수 제한에 걸리면 두 참조 결과가 서로 다른 위치에서 잘려 차이가 선언 묶음이 아닙니다.
             if (plain is not null && (limited || plain.Count >= ReferenceLimit)) plain = null;
             var definitions = await definition.ConfigureAwait(false);
@@ -550,35 +569,165 @@ public sealed class ClangdNavigator : IDisposable
             }
 
             var indexed = await Task.Run(() => shards.ReferencesIn(Context.Paths.ToReal(group.Key)), cancellationToken).ConfigureAwait(false);
-            if (indexed is null) continue;
-            var byStart = indexed.ToLookup(r => (r.Line, r.Character));
+            var byStart = indexed?.ToLookup(r => (r.Line, r.Character));
+            string? text = null;
             foreach (var location in group)
             {
-                var here = byStart[(location.Line, location.Character)].ToArray();
-                if (here.Length > 0 && !here.Any(r => targets.Contains(r.SymbolId))) dropped.Add(location);
+                var here = byStart?[(location.Line, location.Character)].ToArray();
+                if (here is { Length: > 0 })
+                {
+                    if (!here.Any(r => targets.Contains(r.SymbolId))) dropped.Add(location);
+                    continue;
+                }
+
+                text ??= SourceLinePreview.ReadText(group.Key) ?? string.Empty;
+                if (IsOtherClassVirtualDeclaration(symbol, location, SourceLinePreview.LineAt(text, location.Line))) dropped.Add(location);
             }
         }
 
         return dropped.Count == 0 ? locations : locations.Where(l => !dropped.Contains(l)).ToArray();
     }
 
-    private sealed class DeclarationSiteReferences
+    /// <summary>
+    /// 색인 파일로 확인하지 못한 위치(그 파일 기록이 아직 없음)가 다른 클래스의 가상 함수 선언인지 봅니다. clangd 색인 파일은 방금 색인한
+    /// TU의 헤더 기록을 색인 뒤 조금 늦게 쓰므로, 바로 묻으면 기반 선언이 남았습니다(2026-10-09 정확도 시험). clangd가 참조마다 주는 container
+    /// (선언은 그 선언이 든 클래스, 재정의 선언은 <c>클래스::함수</c>)가 찾은 함수의 클래스와 다르고, 그 줄이 이름 뒤에 <c>(</c>가 오는
+    /// <c>virtual</c>·<c>override</c>·<c>final</c> 선언이며 이름 앞에 한정자·멤버 접근이 없을 때만 참입니다.
+    /// </summary>
+    /// <remarks>
+    /// 클래스는 마지막 이름만 템플릿 인수를 빼고 비교합니다. 네임스페이스 표기(익명 네임스페이스 등)가 출처마다 달라 찾은 함수 자신의 선언을
+    /// 빼는 일이 없게 하려는 것이며, 이름이 같은 다른 네임스페이스의 클래스는 남깁니다. container가 없으면 남깁니다.
+    /// </remarks>
+    public static bool IsOtherClassVirtualDeclaration(SemanticSymbol symbol, NavigationLocation location, string line)
     {
-        public DeclarationSiteReferences(IReadOnlyList<NavigationLocation> locations, bool limited, IReadOnlyList<NavigationLocation>? uses)
+        if (location.Container is not { } container || symbol.ContainerName.Length == 0 || symbol.Name.Length == 0) return false;
+        if (container.EndsWith("::" + symbol.Name, StringComparison.Ordinal)) container = container.Substring(0, container.Length - symbol.Name.Length - 2);
+        if (string.Equals(LastClassName(container), LastClassName(symbol.ContainerName), StringComparison.Ordinal)) return false;
+        var start = location.Character;
+        if (start < 0 || start + symbol.Name.Length > line.Length || string.CompareOrdinal(line, start, symbol.Name, 0, symbol.Name.Length) != 0) return false;
+        var after = line.Substring(start + symbol.Name.Length).TrimStart();
+        var before = line.Substring(0, start).TrimEnd();
+        if (!after.StartsWith("(", StringComparison.Ordinal) || before.EndsWith("::", StringComparison.Ordinal) ||
+            before.EndsWith(".", StringComparison.Ordinal) || before.EndsWith("->", StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return System.Text.RegularExpressions.Regex.IsMatch(line, @"\b(virtual|override|final)\b");
+    }
+
+    /// <summary><c>ns::TFoo&lt;T&gt;</c>에서 <c>TFoo</c>처럼 마지막 이름을 템플릿 인수 없이 돌려줍니다.</summary>
+    private static string LastClassName(string qualified)
+    {
+        var name = qualified.TrimEnd(':');
+        var depth = 0;
+        var plain = new System.Text.StringBuilder(name.Length);
+        foreach (var ch in name)
+        {
+            if (ch == '<') depth++;
+            else if (ch == '>' && depth > 0) depth--;
+            else if (depth == 0) plain.Append(ch);
+        }
+
+        var text = plain.ToString();
+        var separator = text.LastIndexOf("::", StringComparison.Ordinal);
+        return separator < 0 ? text : text.Substring(separator + 2);
+    }
+
+    /// <summary>요청 위치가 아닌 다른 위치(선언, 다른 정의)에서 같은 심볼을 찾은 참조 결과입니다.</summary>
+    private sealed class SiteReferences
+    {
+        public SiteReferences(IReadOnlyList<NavigationLocation> locations, bool limited, IReadOnlyList<NavigationLocation>? uses)
         {
             Locations = locations;
             Limited = limited;
             Uses = uses;
         }
 
-        /// <summary>요청 위치의 결과와 선언 위치의 결과를 합친 위치입니다.</summary>
+        /// <summary>그 위치에서 찾은 선언 포함 참조입니다.</summary>
         public IReadOnlyList<NavigationLocation> Locations { get; }
 
-        /// <summary>선언 위치의 결과가 결과 수 상한에 걸렸습니다.</summary>
+        /// <summary>그 위치의 결과가 결과 수 상한에 걸렸습니다.</summary>
         public bool Limited { get; }
 
-        /// <summary>선언 위치의 선언 제외 참조 결과입니다. 받지 못했으면 null입니다.</summary>
+        /// <summary>그 위치의 선언 제외 참조 결과입니다. 받지 못했으면 null입니다.</summary>
         public IReadOnlyList<NavigationLocation>? Uses { get; }
+    }
+
+    /// <summary>한 요청에서 다른 모듈 정의 헤더를 열어 확인하는 최대 수입니다. 정의 헤더마다 문서 열기와 참조 요청 하나가 듭니다.</summary>
+    private const int MaxDefinitionFiles = 64;
+
+    private IReadOnlyList<string>? definitionFiles;
+
+    /// <summary>
+    /// Unreal 정의 헤더(<see cref="GeneratedDefinitionMacros"/>)에 정의된 매크로면, 같은 이름을 정의한 다른 모듈의 정의 헤더마다 그
+    /// <c>#define</c> 위치에서 참조를 찾습니다. 정의 헤더 목록은 database 명령이 강제 include하는 파일입니다. 정의 헤더는 매크로 정의뿐이므로
+    /// 컴파일러와 파일만 둔 명령으로 엽니다(명령이 없으면 clangd가 가까운 TU 명령을 빌려 공유 PCH까지 분석). 결과 상한에 걸리면 멈춥니다.
+    /// </summary>
+    private async Task<IReadOnlyList<SiteReferences>> OtherDefinitionReferencesAsync(SemanticSymbol symbol, IProgress<string>? progress,
+        CancellationToken cancellationToken)
+    {
+        if (Context.Kind != CompileContextKind.Unreal || GeneratedDefinitionMacros.NameOf(symbol.Usr) is not { } name) return Array.Empty<SiteReferences>();
+        var own = symbol.PrimaryDeclaration?.Path;
+        var files = (definitionFiles ??= GeneratedDefinitionMacros.FilesIn(Context.Commands))
+            .Where(f => own is null || !string.Equals(Path.GetFullPath(f), Path.GetFullPath(own), StringComparison.OrdinalIgnoreCase))
+            .Take(MaxDefinitionFiles);
+        var found = new List<SiteReferences>();
+        foreach (var file in files)
+        {
+            if (SourceLinePreview.ReadText(file) is not { } text || GeneratedDefinitionMacros.DefineOf(text, name) is not { } define) continue;
+            var site = await ReferencesAtAsync(file, define.Line, define.Character, name, at => GeneratedDefinitionMacros.Same(at.Usr, symbol.Usr),
+                DefinitionsCommand(file), "다른 모듈 정의에서 참조 확인 중", progress, cancellationToken).ConfigureAwait(false);
+            if (site is null) continue;
+            found.Add(site);
+            if (site.Limited) break;
+        }
+
+        return found;
+    }
+
+    /// <summary>정의 헤더를 열 때 쓰는 명령입니다: database 첫 명령의 컴파일러(와 드라이버 모드), C++ 지정, 파일.</summary>
+    private CompileCommand? DefinitionsCommand(string path)
+    {
+        if (Context.Commands.FirstOrDefault()?.Arguments is not { Count: > 0 } sample) return null;
+        var arguments = new List<string> { sample[0] };
+        if (sample.Count > 1 && sample[1].StartsWith("--driver-mode=", StringComparison.Ordinal)) arguments.Add(sample[1]);
+        arguments.Add(arguments.Contains("--driver-mode=cl") ? "/TP" : "-xc++");
+        arguments.Add(path);
+        return new CompileCommand(Path.GetDirectoryName(path)!, path, arguments);
+    }
+
+    /// <summary>
+    /// 다른 파일의 한 위치에서 참조를 찾습니다. 닫혀 있던 파일은 열었다가 닫습니다(<paramref name="command"/>가 있으면 그 명령으로 엶).
+    /// 그 위치의 대표 심볼이 <paramref name="accept"/>를 만족하지 않거나 파일을 읽지 못하면 null입니다.
+    /// </summary>
+    private async Task<SiteReferences?> ReferencesAtAsync(string path, int line, int character, string name, Func<SemanticSymbol, bool> accept,
+        CompileCommand? command, string stage, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        int? version = null;
+        if (documents.AcquireIfOpen(path) is null)
+        {
+            if (SourceLinePreview.ReadText(path) is not { } text) return null;
+            progress?.Report($"{stage}: {Path.GetFileName(path)}");
+            if (command is not null) session.UpdateCompileCommands(new[] { command });
+            version = documents.Acquire(new DocumentText(path, text));
+        }
+
+        try
+        {
+            if (version is { } opened) await AwaitPchCheckAsync(path, opened, progress, cancellationToken).ConfigureAwait(false);
+            var at = await session.SymbolInfoAsync(path, line, character, cancellationToken, name).ConfigureAwait(false);
+            if (at is null || !accept(at)) return null;
+            var uses = Quietly(session.ReferencesAsync(path, line, character, false, cancellationToken));
+            var (more, rawCount) = await session.ReferencesCountedAsync(path, line, character, true, cancellationToken).ConfigureAwait(false);
+            var inOpen = more.Count(l => documents.Contains(l.Path));
+            return new SiteReferences(more, rawCount + inOpen >= ReferenceLimit, await uses.ConfigureAwait(false));
+        }
+        finally
+        {
+            documents.Release(path);
+            if (version is not null) documents.TryClose(path);
+        }
     }
 
     /// <summary>
@@ -592,42 +741,18 @@ public sealed class ClangdNavigator : IDisposable
     /// 보지 않습니다(<see cref="NavigationResult.CurrentFileOnly"/>). 선언 위치의 대표 심볼이 같은 USR일 때만 합치며, 닫혀 있던 선언 파일은
     /// 열었다가 닫습니다. 보완하지 않았으면 null입니다.
     /// </remarks>
-    private async Task<DeclarationSiteReferences?> DeclarationSiteReferencesAsync(NavigationQuery query, SemanticSymbol symbol,
+    private Task<SiteReferences?> DeclarationSiteReferencesAsync(NavigationQuery query, SemanticSymbol symbol,
         IReadOnlyList<NavigationLocation> locations, IProgress<string>? progress, CancellationToken cancellationToken)
     {
         if (symbol.PrimaryDeclaration is not { } declaration || symbol.Usr.Length == 0 || NavigationResult.IsNamespace(symbol.Usr) ||
             string.Equals(declaration.Path, query.Path, StringComparison.OrdinalIgnoreCase) ||
             locations.Any(l => !string.Equals(l.Path, query.Path, StringComparison.OrdinalIgnoreCase)))
         {
-            return null;
+            return Task.FromResult<SiteReferences?>(null);
         }
 
-        var path = declaration.Path;
-        int? version = null;
-        if (documents.AcquireIfOpen(path) is null)
-        {
-            if (SourceLinePreview.ReadText(path) is not { } text) return null;
-            progress?.Report($"선언 파일에서 참조 확인 중: {Path.GetFileName(path)}");
-            version = documents.Acquire(new DocumentText(path, text));
-        }
-
-        try
-        {
-            if (version is { } opened) await AwaitPchCheckAsync(path, opened, progress, cancellationToken).ConfigureAwait(false);
-            var at =await session.SymbolInfoAsync(path, declaration.Line, declaration.Character, cancellationToken, symbol.Name).ConfigureAwait(false);
-            if (at is null || !string.Equals(at.Usr, symbol.Usr, StringComparison.Ordinal)) return null;
-            var uses = Quietly(session.ReferencesAsync(path, declaration.Line, declaration.Character, false, cancellationToken));
-            var (more, rawCount) = await session.ReferencesCountedAsync(path, declaration.Line, declaration.Character, true, cancellationToken).ConfigureAwait(false);
-            var inOpen = more.Count(l => documents.Contains(l.Path));
-            var merged = locations.Concat(more).Distinct()
-                .OrderBy(l => l.Path, StringComparer.OrdinalIgnoreCase).ThenBy(l => l.Line).ThenBy(l => l.Character).ToArray();
-            return new DeclarationSiteReferences(merged, rawCount + inOpen >= ReferenceLimit, await uses.ConfigureAwait(false));
-        }
-        finally
-        {
-            documents.Release(path);
-            if (version is not null) documents.TryClose(path);
-        }
+        return ReferencesAtAsync(declaration.Path, declaration.Line, declaration.Character, symbol.Name,
+            at => string.Equals(at.Usr, symbol.Usr, StringComparison.Ordinal), null, "선언 파일에서 참조 확인 중", progress, cancellationToken);
     }
 
     /// <summary>
@@ -834,16 +959,38 @@ public sealed class ClangdNavigator : IDisposable
         limit.CancelAfter(SymbolKindTimeout);
         try
         {
-            return await session.SymbolKindAsync(symbol, locations, limit.Token).ConfigureAwait(false);
+            return await session.SymbolKindAsync(symbol, locations, limit.Token).ConfigureAwait(false) ?? KindFromUsr(symbol.Usr);
         }
         catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested)
         {
-            return null;
+            return KindFromUsr(symbol.Usr);
         }
         catch (Exception exception) when (exception is LspRequestException || exception is LspConnectionClosedException)
         {
-            return null;
+            return KindFromUsr(symbol.Usr);
         }
+    }
+
+    private static readonly System.Text.RegularExpressions.Regex RecordUsr = new(
+        @"@(?<kind>S|U|E|ST>[^@]*|SP>[^@]*)@[A-Za-z_][A-Za-z0-9_]*(?:>[^@]*)?$", System.Text.RegularExpressions.RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// <c>workspace/symbol</c>로 종류를 정하지 못했을 때(1초 상한, 방금 연 파일의 심볼이 색인에 아직 없음) clang USR의 마지막 구성 요소로
+    /// 클래스·구조체(<c>@S@</c>, 클래스 템플릿 <c>@ST&gt;</c>, 부분 특수화 <c>@SP&gt;</c>. USR로는 class와 struct를 구분할 수 없어 <see cref="SourceSymbolKind.Type"/>),
+    /// 공용체(<c>@U@</c>), 열거형(<c>@E@</c>)만 알아봅니다. 함수·필드 USR은 매개변수 형식 등에 <c>@S@…</c>가 들어갈 수 있으므로 먼저 뺍니다.
+    /// 종류가 늦어 생성자·소멸자 이름 거름(타입일 때만 적용)이 빠지던 문제(2026-10-09 정확도 시험)에 대응합니다.
+    /// </summary>
+    public static SourceSymbolKind? KindFromUsr(string usr)
+    {
+        if (usr.Contains("@F@") || usr.Contains("@FT@") || usr.Contains("@FI@") || usr.Contains("@macro@")) return null;
+        var match = RecordUsr.Match(usr);
+        if (!match.Success) return null;
+        return match.Groups["kind"].Value switch
+        {
+            "U" => SourceSymbolKind.Union,
+            "E" => SourceSymbolKind.Enum,
+            _ => SourceSymbolKind.Type
+        };
     }
 
     /// <summary>편집기에서 활성화한 문서를 미리 열어 첫 요청 전에 분석을 시작합니다.</summary>
@@ -1046,7 +1193,11 @@ public sealed class ClangdNavigator : IDisposable
             var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
             Observe(reparsed);
             pchReparses[path] = reparsed;
-            pchSwitches[path] = Task.Run(() => SendSwitched(new[] { choice.Command }));
+            pchSwitches[path] = Task.Run(() =>
+            {
+                SendSwitched(new[] { choice.Command });
+                ReopenQuietly(path);
+            });
         }
     }
 
@@ -1210,6 +1361,23 @@ public sealed class ClangdNavigator : IDisposable
         try
         {
             session.UpdateCompileCommands(commands);
+        }
+        catch (Exception exception) when (exception is LspConnectionClosedException || exception is ObjectDisposedException)
+        {
+            // 종료되면 다음 시작 때 판단 기록으로 같은 명령을 씁니다.
+        }
+    }
+
+    /// <summary>
+    /// 명령을 바꾼 열린 문서를 다시 엽니다(<see cref="ClangdDocumentSet.Reopen"/>). 명령만 바꾸면 clangd가 이전 preamble의 분석으로 먼저 답해
+    /// 공유 PCH를 넣은 뒤의 요청도 PCH 없는 분석으로 답받았습니다.
+    /// </summary>
+    private void ReopenQuietly(string path)
+    {
+        if (lifetime.IsCancellationRequested) return;
+        try
+        {
+            documents.Reopen(path);
         }
         catch (Exception exception) when (exception is LspConnectionClosedException || exception is ObjectDisposedException)
         {
