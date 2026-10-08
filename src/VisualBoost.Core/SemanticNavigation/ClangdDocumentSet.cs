@@ -115,6 +115,18 @@ public sealed class ClangdDocumentSet
         }
     }
 
+    /// <summary>이미 열린 문서만 임대하고 clangd에 보낸 내용을 돌려줍니다. 열려 있지 않으면 임대하지 않고 null입니다.</summary>
+    public string? AcquireIfOpen(string path)
+    {
+        lock (gate)
+        {
+            if (!entries.TryGetValue(path, out var entry)) return null;
+            entry.Leases++;
+            entry.LastUse = ++clock;
+            return entry.Text;
+        }
+    }
+
     /// <summary>이미 열린 문서만 더 새 내용으로 갱신합니다. 열려 있으면 현재 버전을 돌려줍니다.</summary>
     public int? Update(DocumentText document)
     {

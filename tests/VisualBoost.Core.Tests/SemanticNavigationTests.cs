@@ -182,7 +182,11 @@ internal static class SemanticNavigationTests
         {
             Directory.CreateDirectory(shards);
             File.WriteAllText(Path.Combine(shards, "a.idx"), "x");
-            Check(ClangdNavigator.IndexWrittenSince(shards, DateTime.UtcNow.AddMinutes(-1)) && !ClangdNavigator.IndexWrittenSince(shards, DateTime.UtcNow.AddMinutes(1)) &&
+            var written = DateTime.UtcNow;
+            // clangd가 시작할 때마다 다시 쓰는 .gitignore는 색인으로 보지 않습니다.
+            File.WriteAllText(Path.Combine(shards, ".gitignore"), "*");
+            File.SetLastWriteTimeUtc(Path.Combine(shards, ".gitignore"), written.AddMinutes(5));
+            Check(!ClangdNavigator.IndexWrittenSince(shards, written.AddMinutes(1)) && ClangdNavigator.IndexWrittenSince(shards, DateTime.UtcNow.AddMinutes(-1)) && !ClangdNavigator.IndexWrittenSince(shards, DateTime.UtcNow.AddMinutes(1)) &&
                   !ClangdNavigator.IndexWrittenSince(Path.Combine(shards, "none"), DateTime.MinValue), "세션 뒤 쓴 색인 파일 판단");
         }
         finally
@@ -268,6 +272,237 @@ internal static class SemanticNavigationTests
         Check(!OwnDefinitionReferences.IsOwnDefinitionName(new NavigationLocation(@"C:\p\b.cpp", 0, 5, 0, 12), "void AActorX::BeginPlay()", true) &&
               !OwnDefinitionReferences.IsOwnDefinitionName(locations[13], "short", true) &&
               !OwnDefinitionReferences.IsOwnDefinitionName(locations[13], null, true), "근거 부족");
+    }
+
+    /// <summary>참조 결과를 거르는 근거(조건식 매크로, 매크로가 펼친 위치, 정의되지 않은 조건 매크로 진단, clangd 색인 파일)를 확인합니다.</summary>
+    public static void RunReferenceFilters()
+    {
+        var used = ConditionMacros.Used(
+            "#define LOCAL_FLAG 1\n" +
+            "#if WITH_EDITOR && !defined(UE_BUILD_SHIPPING) // WITH_COMMENT\n" +
+            "#elif PLATFORM_WINDOWS || \\\n    WITH_CONTINUED\n" +
+            "#  if UE_VERSION_NEWER_THAN(5, 3, NOT_A_MACRO) and __has_include(<x.h>) && _MSC_VER >= 1930 && LOCAL_FLAG\n" +
+            "#if true /* WITH_BLOCK */ || WITH_EDITOR\n" +
+            "#ifdef IGNORED_IFDEF\n#undef UNDEFINED_HERE\n#if UNDEFINED_HERE\n#endif\n");
+        Check(used.SequenceEqual(new[] { "WITH_EDITOR", "PLATFORM_WINDOWS", "WITH_CONTINUED", "UE_VERSION_NEWER_THAN" }),
+            "조건식 매크로(defined·인수·예약·키워드·주석·파일 안 정의 제외, 줄 이음 포함): " + string.Join(",", used));
+
+        // 매크로가 펼친 위치: 범위 글자가 찾는 이름과 다른 식별자일 때만 뺍니다.
+        var fname = new NavigationLocation(@"C:\p\a.h", 3, 1, 3, 15);
+        Check(OwnDefinitionReferences.IsMacroExpansion(fname, "\tGENERATED_BODY()", "FName") &&
+              !OwnDefinitionReferences.IsMacroExpansion(new NavigationLocation(@"C:\p\a.h", 3, 1, 3, 6), "\tFName X;", "FName") &&
+              !OwnDefinitionReferences.IsMacroExpansion(fname, "\tGENERATED_BODY()", "operator==") &&
+              !OwnDefinitionReferences.IsMacroExpansion(new NavigationLocation(@"C:\p\a.h", 3, 1, 3, 3), "\t==", "FName") &&
+              !OwnDefinitionReferences.IsMacroExpansion(fname, null, "FName") && !OwnDefinitionReferences.IsMacroExpansion(fname, "short", "FName"),
+            "매크로가 펼친 위치 판단");
+        var kept = OwnDefinitionReferences.Kept(new[] { fname, new NavigationLocation(@"C:\p\a.h", 4, 1, 4, 6) }, new[] { "\tGENERATED_BODY()", "\tFName X;" }, true, "FName");
+        Check(kept.SequenceEqual(new[] { 1 }), "이름을 주면 매크로가 펼친 위치를 뺌");
+        // 요청 위치에 쓰인 이름: symbolInfo의 대표 항목(별칭·매크로)을 고르는 근거입니다.
+        const string Spelled = "int a;\r\n  using FPair = TTuple<int>; x2 = 1;\n";
+        Check(ClangdNavigator.IdentifierAt(Spelled, 1, 8) == "FPair" && ClangdNavigator.IdentifierAt(Spelled, 1, 13) == "FPair" &&
+              ClangdNavigator.IdentifierAt(Spelled, 1, 14) is null && ClangdNavigator.IdentifierAt(Spelled, 1, 30) == "x2" && ClangdNavigator.IdentifierAt(Spelled, 1, 99) is null &&
+              ClangdNavigator.IdentifierAt(Spelled, 5, 0) is null && ClangdNavigator.IdentifierAt("a 12b", 0, 3) is null, "요청 위치의 식별자");
+        // 한정자 후보: 이름 뒤에 (템플릿 인수를 건너뛰고) ::가 오는 위치. 다른 이름의 일부는 후보가 아닙니다.
+        var qualified = "std::vector<int> a; // std::x\r\nint b = Ostd::y + std ::z + TBox<int, TPair<a, b>>::F() + TBox<int> c + std;\n";
+        var second = qualified.Split('\n')[1];
+        Check(ClangdNavigator.QualifierCandidates(qualified, "std").SequenceEqual(new[] { (0, 0), (0, qualified.IndexOf("std::x", StringComparison.Ordinal)), (1, second.IndexOf("std ::", StringComparison.Ordinal)) }) &&
+              ClangdNavigator.QualifierCandidates(qualified, "TBox").SequenceEqual(new[] { (1, second.IndexOf("TBox", StringComparison.Ordinal)) }),
+            "한정자 후보: " + string.Join(",", ClangdNavigator.QualifierCandidates(qualified, "std")));
+        // 코드 안의 이름: 주석·문자열·문자·원시 문자열은 빼고, 전처리 줄(이어진 줄 포함)은 표시합니다.
+        var words = "int TEXT_x; // TEXT\n#define M(x) TEXT(x) \\\n   TEXT\n/* TEXT\n TEXT */ auto s = TEXT(\"TEXT\"); char c = 'T'; auto r = R\"(TEXT)\"; TEXT\r\n" +
+                    "#if X\n#elif Y\n#  else\n#endif\n#include \"a.h\"\n";
+        var wordLines = words.Split('\n');
+        var foundWords = CodeWords.Find(words, "TEXT").Select(w => (w.Line, w.Character, w.Directive)).ToArray();
+        Check(foundWords.SequenceEqual(new[]
+              {
+                  (1, wordLines[1].IndexOf("TEXT", StringComparison.Ordinal), true), (2, 3, true),
+                  (4, wordLines[4].IndexOf("TEXT(", StringComparison.Ordinal), false), (4, wordLines[4].LastIndexOf("TEXT", StringComparison.Ordinal), false)
+              }) && CodeWords.ConditionalLines(words).SequenceEqual(new[] { 5, 6, 7, 8 }),
+            "코드 안의 이름과 조건부 지시문 줄: " + string.Join(",", foundWords));
+
+        Check(DocumentErrors.HasUndefinedConditionMacro(JsonValue.Parse("[{\"severity\":2,\"code\":\"-Wundef\",\"message\":\"'X' is not defined, evaluates to 0\"}]").Items) &&
+              !DocumentErrors.HasUndefinedConditionMacro(JsonValue.Parse("[{\"severity\":2,\"code\":\"unused_variable\"},{\"severity\":2}]").Items),
+            "정의되지 않은 조건 매크로 진단");
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.IndexShards." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var source = Path.Combine(root, "src", "Use.cpp");
+            var other = Path.Combine(root, "src", "Other", "Use.cpp");
+            Write(source, "int x;\n");
+            Write(other, "int y;\n");
+            var index = Path.Combine(root, "index");
+            Directory.CreateDirectory(index);
+            var references = new[] { (0x0102030405060708UL, (byte)13, 2, 4, 9), (0x0102030405060708UL, (byte)4, 5, 0, 5), (0xA0B0C0D0E0F00011UL, (byte)12, 7, 2, 6) };
+            var plain = IndexShard(ClangdIndexShards.FormatVersion, DocumentUri.FromPath(source), false, references);
+            var parsed = ClangdIndexShards.Parse(plain)!;
+            Check(parsed.Count == 3 && parsed[0].SymbolId == "0102030405060708" && parsed[0].Kind == 13 && parsed[0].Spelled && parsed[0].Line == 2 &&
+                  parsed[0].Character == 4 && parsed[0].EndCharacter == 9 && !parsed[1].Spelled && parsed[2].SymbolId == "A0B0C0D0E0F00011" &&
+                  string.Equals(Path.GetFullPath(parsed[0].Path), source, StringComparison.OrdinalIgnoreCase), "색인 파일 참조 읽기");
+            Check(ClangdIndexShards.Parse(IndexShard(ClangdIndexShards.FormatVersion, DocumentUri.FromPath(source), true, references))!.Select(r => r.Line)
+                  .SequenceEqual(new[] { 2, 5, 7 }), "압축한 문자열 표");
+            Check(ClangdIndexShards.Parse(IndexShard(ClangdIndexShards.FormatVersion + 1, DocumentUri.FromPath(source), false, references)) is null, "다른 형식 버전은 읽지 않음");
+            Check(Throws<InvalidDataException>(() => ClangdIndexShards.Parse(plain.Take(plain.Length - 9).ToArray())) &&
+                  Throws<InvalidDataException>(() => ClangdIndexShards.Parse(Encoding.ASCII.GetBytes("RIFF\0\0\0\0XXXX"))), "깨진 색인 파일");
+
+            // 같은 이름의 다른 파일 색인은 경로로 가르고, 원본보다 오래된 색인 파일은 믿지 않습니다.
+            var shard = Path.Combine(index, "Use.cpp.0123456789ABCDEF.idx");
+            File.WriteAllBytes(shard, plain);
+            File.WriteAllBytes(Path.Combine(index, "Use.cpp.FEDCBA9876543210.idx"), IndexShard(ClangdIndexShards.FormatVersion, DocumentUri.FromPath(other), false, references[2]));
+            var shards = new ClangdIndexShards(index);
+            Check(shards.ReferencesIn(source) is { Count: 3 } && shards.ReferencesIn(other) is { Count: 1 } && shards.ReferencesIn(Path.Combine(root, "src", "None.cpp")) is null,
+                "파일별 색인 참조");
+            File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddMinutes(5));
+            Check(shards.ReferencesIn(source) is null, "원본이 더 새로우면 읽지 않음");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    /// <summary>clangd background index 색인 파일(RIFF <c>CdIx</c>)을 참조 표만 담아 만듭니다. 모든 참조의 파일은 문자열 0번입니다.</summary>
+    private static byte[] IndexShard(uint version, string fileUri, bool compressStrings, params (ulong Id, byte Kind, int Line, int Character, int EndCharacter)[] references)
+    {
+        var body = new MemoryStream();
+        void Chunk(string id, byte[] data)
+        {
+            body.Write(Encoding.ASCII.GetBytes(id));
+            body.Write(BitConverter.GetBytes((uint)data.Length));
+            body.Write(data);
+            if ((data.Length & 1) != 0) body.WriteByte(0);
+        }
+
+        Chunk("meta", BitConverter.GetBytes(version));
+        var raw = Encoding.UTF8.GetBytes(fileUri + "\0");
+        if (compressStrings)
+        {
+            var compressed = new MemoryStream();
+            using (var zlib = new System.IO.Compression.ZLibStream(compressed, System.IO.Compression.CompressionLevel.Optimal, true)) zlib.Write(raw);
+            Chunk("stri", BitConverter.GetBytes((uint)raw.Length).Concat(compressed.ToArray()).ToArray());
+        }
+        else
+        {
+            Chunk("stri", BitConverter.GetBytes(0u).Concat(raw).ToArray());
+        }
+
+        var refs = new MemoryStream();
+        void Var(int value)
+        {
+            var v = (uint)value;
+            while (v >= 0x80)
+            {
+                refs.WriteByte((byte)(v | 0x80));
+                v >>= 7;
+            }
+
+            refs.WriteByte((byte)v);
+        }
+
+        foreach (var group in references.GroupBy(r => r.Id))
+        {
+            refs.Write(BitConverter.GetBytes(group.Key).Reverse().ToArray());
+            Var(group.Count());
+            foreach (var reference in group)
+            {
+                refs.WriteByte(reference.Kind);
+                Var(0);
+                Var(reference.Line);
+                Var(reference.Character);
+                Var(reference.Line);
+                Var(reference.EndCharacter);
+                refs.Write(new byte[8]);
+            }
+        }
+
+        Chunk("refs", refs.ToArray());
+        var content = body.ToArray();
+        return Encoding.ASCII.GetBytes("RIFF").Concat(BitConverter.GetBytes((uint)(content.Length + 4))).Concat(Encoding.ASCII.GetBytes("CdIx")).Concat(content).ToArray();
+    }
+
+    /// <summary>
+    /// 모듈 규칙 파일로 만든 근사 명령을 확인합니다: 의존 사슬의 공개 경로, 엔진끼리만 보는 Internal, 짧은 이름 생성 폴더, 경로 변수,
+    /// 의존 모듈 API 매크로와 공개 정의, 생성 소스 대체 파일.
+    /// </summary>
+    public static void RunUnrealModuleGraph()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.ModuleGraph." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var engineRoot = Path.Combine(root, "Engine Root");
+            var runtime = Path.Combine(engineRoot, "Engine", "Source", "Runtime");
+            string Module(string directory, string name, string rules, params string[] folders)
+            {
+                var path = Path.Combine(directory, name);
+                Write(Path.Combine(path, name + ".Build.cs"), rules);
+                foreach (var folder in folders) Directory.CreateDirectory(Path.Combine(path, folder));
+                return path;
+            }
+
+            var core = Module(runtime, "Core", "PublicDefinitions.Add(\"WITH_CORE_FLAG=1\");\nPublicDefinitions.Add(\"WITH_COMPUTED=\" + (Target.bX ? \"1\" : \"0\"));", "Public", "Internal");
+            var renderCore = Module(runtime, "RenderCore", "", "Public");
+            var renderer = Module(runtime, "Renderer", "PublicDependencyModuleNames.Add(\"RenderCore\");", "Public", "Private");
+            var unused = Module(runtime, "Unused", "", "Public");
+            var engineModule = Module(runtime, "Engine",
+                "PublicDependencyModuleNames.AddRange(new string[] { \"Core\" });\n// PublicDependencyModuleNames.Add(\"Unused\");\n" +
+                "PrivateDependencyModuleNames.Add(\"Renderer\");\nstring Extra = Path.Combine(ModuleDirectory, \"Extra\");\nPublicIncludePaths.Add(Extra);",
+                "Public", "Private", "Extra");
+            var plugin = Path.Combine(engineRoot, "Engine", "Plugins", "Group", "Material");
+            Write(Path.Combine(plugin, "Material.uplugin"), "{}");
+            var editor = Module(Path.Combine(plugin, "Source"), "MaterialEditorTools", "ShortName = \"MatEd\";\nPrivateDependencyModuleNames.Add(\"Engine\");", "Public", "Private");
+            var generated = Path.Combine(plugin, "Intermediate", "Build", "Win64", "UnrealEditor", "Inc", "MatEd", "UHT");
+            Directory.CreateDirectory(generated);
+            var widget = Path.Combine(editor, "Private", "Widget.cpp");
+            Write(widget, "#include \"Widget.h\"\n#include UE_INLINE_GENERATED_CPP_BY_NAME(Widget)\n");
+
+            var project = Path.Combine(root, "Game");
+            var gameModule = Module(Path.Combine(project, "Source"), "Game", "PublicDependencyModuleNames.Add(\"Engine\");", "Private");
+            var graph = UnrealModuleGraph.For(engineRoot, project);
+            graph.Prepare();
+            Check(graph.DirectoryOf("Renderer") == renderer && graph.DirectoryOf("Missing") is null && graph.RulesOf("MaterialEditorTools")!.ShortName == "MatEd",
+                "모듈 위치와 짧은 이름");
+
+            var environment = graph.Environment("MaterialEditorTools", editor);
+            var includes = environment.IncludeDirectories.ToList();
+            int At(string directory) => includes.FindIndex(d => string.Equals(d, directory, StringComparison.OrdinalIgnoreCase));
+            Check(At(Path.Combine(editor, "Private")) == 0 && At(generated) > 0 && At(Path.Combine(engineModule, "Public")) > 0 && At(Path.Combine(engineModule, "Extra")) > 0 &&
+                  At(Path.Combine(core, "Public")) > 0 && At(Path.Combine(core, "Internal")) > 0 && At(Path.Combine(renderer, "Public")) < 0 &&
+                  At(Path.Combine(engineModule, "Private")) < 0 && At(Path.Combine(unused, "Public")) < 0,
+                "공개 의존 사슬만 전파(비공개 의존의 의존·주석 제외), 엔진 플러그인은 엔진 Internal을 봄: " + string.Join(" | ", includes.Select(d => d.Substring(root.Length))));
+            Check(At(Path.GetDirectoryName(editor)!) > At(Path.Combine(core, "Public")), "상위 폴더 경로는 뒤에");
+            Check(environment.ApiModules.SequenceEqual(new[] { "MaterialEditorTools", "Engine", "Core" }) && environment.Definitions.SequenceEqual(new[] { "WITH_CORE_FLAG=1" }),
+                "API 모듈과 상수 정의(계산식 제외): " + string.Join(",", environment.ApiModules) + " / " + string.Join(",", environment.Definitions));
+            var engineEnvironment = graph.Environment("Engine", engineModule);
+            Check(engineEnvironment.IncludeDirectories.Contains(Path.Combine(core, "Internal")) && engineEnvironment.IncludeDirectories.Contains(Path.Combine(renderer, "Public")) &&
+                  engineEnvironment.IncludeDirectories.Contains(Path.Combine(renderCore, "Public")), "엔진 모듈은 Internal과 비공개 의존의 공개 사슬");
+            Check(!graph.Environment("Game", gameModule).IncludeDirectories.Contains(Path.Combine(core, "Internal")), "프로젝트 모듈은 엔진 Internal을 보지 않음");
+
+            // 근사 명령: 의존 경로는 프로젝트 명령의 경로보다 앞, 재정의 헤더는 의존 API·정의를 채우고, 생성 소스는 빈 대체 파일로 찾습니다.
+            var gameSource = Path.Combine(gameModule, "Private", "Game.cpp");
+            Write(gameSource, "int G;");
+            var projectCommand = new CompileCommand(Path.Combine(engineRoot, "Engine", "Source"), gameSource.Replace('\\', '/'),
+                new[] { "clang-cl.exe", "--driver-mode=cl", "/DGAME=1", "/I", "Runtime/Core/Public", gameSource.Replace('\\', '/') });
+            var overrides = Path.Combine(root, "modules");
+            var command = UnrealCompileCommands.Synthesize(widget, new[] { projectCommand }, overrides, graph: graph)!;
+            var arguments = command.Arguments.ToList();
+            var leading = arguments.IndexOf(Path.Combine(editor, "Private").Replace('\\', '/'));
+            Check(leading > 0 && leading < arguments.IndexOf("Runtime/Core/Public") && arguments.Count(a => string.Equals(a, Path.Combine(core, "Public").Replace('\\', '/'),
+                      StringComparison.OrdinalIgnoreCase)) == 0, "의존 경로는 기존 경로 앞, 기존 경로와 같은 폴더는 다시 넣지 않음: " + string.Join(" ", arguments));
+            var header = File.ReadAllText(Path.Combine(overrides, "MaterialEditorTools.h"));
+            Check(header.Contains("#define MATERIALEDITORTOOLS_API\n") && header.Contains("#ifndef ENGINE_API\n#define ENGINE_API\n#endif\n") &&
+                  header.Contains("#ifndef WITH_CORE_FLAG\n#define WITH_CORE_FLAG 1\n#endif\n") && header.Contains("#define UE_IS_ENGINE_MODULE 1") &&
+                  !header.Contains("WITH_COMPUTED"), "재정의 헤더: " + header);
+            var stubs = Path.Combine(overrides, "generated-stubs");
+            Check(File.Exists(Path.Combine(stubs, "Widget.gen.cpp")) && arguments[arguments.Count - 2] == stubs.Replace('\\', '/') && arguments[arguments.Count - 3] == "/I",
+                "생성 소스 대체 파일 폴더는 마지막 포함 경로");
+            Check(UnrealCompileCommands.Synthesize(gameSource, new[] { projectCommand }, overrides, graph: graph) is not null &&
+                  File.ReadAllText(Path.Combine(overrides, "Game.h")) is var gameHeader && !gameHeader.Contains("UE_IS_ENGINE_MODULE") &&
+                  gameHeader.Contains("#ifndef ENGINE_API\n"), "프로젝트 모듈 재정의 헤더는 엔진 표시 없이 의존 API만");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
     }
 
     public static void RunPathAliases()
@@ -764,6 +999,7 @@ internal static class SemanticNavigationTests
         {
             var engine = Path.Combine(root, "Engine Root");
             var (project, source, build) = WritePchProject(root);
+            File.AppendAllText(Path.Combine(source, "U2.cpp"), "#if WITH_GAME_FLAG\n#endif\n");
             var solution = Path.Combine(project, "Game.sln");
             var cache = Path.Combine(root, "cache");
             string Source(string name) => Path.Combine(source, name).Replace('\\', '/');
@@ -782,13 +1018,18 @@ internal static class SemanticNavigationTests
             var wrapper = units[0].File;
             Check(wrapper.EndsWith("/units/Module.Game.1.cpp", StringComparison.Ordinal) && plan.MarkNeedsPch(new[] { Source("Solo.cpp") }).Count == 0,
                 "합성 TU가 아닌 경로는 무시");
+            // PCH 없는 합성 TU는 구성원 조건식의 매크로가 정의되지 않으면 분석 오류를 내고, PCH 없이 여는 문서는 그 경고를 받습니다.
+            Check(File.ReadAllText(wrapper).Contains("#if !defined(WITH_GAME_FLAG)\n#error ") && !File.ReadAllText(Database(auto)[1].File).Contains("#error") &&
+                  u1.Command.Arguments.Contains("-Wundef") && !plan.DocumentCommand(Source("U1.cpp"), pch: true)!.Command.Arguments.Contains("-Wundef"),
+                "조건식 매크로 확인(PCH 없는 단위·문서만)");
             var switched = plan.MarkNeedsPch(new[] { wrapper.Replace('/', '\\').ToUpperInvariant() });
             var pchWrapper = Path.Combine(auto.Directory, "units", "Module.Game.1.pch.cpp").Replace('\\', '/');
             var rewritten = Database(auto);
             Check(switched.Count == 1 && switched[0].File == pchWrapper && HasPch(switched[0].Arguments) && switched[0].Arguments.Last() == pchWrapper &&
                   File.Exists(pchWrapper) && !File.Exists(wrapper) && rewritten.Any(c => c.File == pchWrapper && HasPch(c.Arguments)) &&
-                  rewritten.Count(c => HasPch(c.Arguments)) == 1 && File.Exists(Path.Combine(auto.Directory, "pch-units.json")),
-                "실패한 단위만 새 경로의 PCH 합성 TU로: " + string.Join(",", rewritten.Select(c => Path.GetFileName(c.File))));
+                  rewritten.Count(c => HasPch(c.Arguments)) == 1 && File.Exists(Path.Combine(auto.Directory, "pch-units.json")) &&
+                  !File.ReadAllText(pchWrapper).Contains("#error"),
+                "실패한 단위만 새 경로의 PCH 합성 TU로(조건식 확인 없음): " + string.Join(",", rewritten.Select(c => Path.GetFileName(c.File))));
             // 문서는 단위 판단과 상관없이 PCH 없이 시작합니다(혼자 실패하면 진단을 보고 다시 분석).
             Check(plan.UnitUsesPch(Source("U2.cpp")) && plan.DocumentCommand(Source("U1.cpp"))!.WithoutPch && !plan.UnitUsesPch(Source("U4.cpp")) &&
                   plan.MarkNeedsPch(new[] { pchWrapper }).Count == 0 && plan.PchUnitCount == 1, "전환한 단위만 PCH, 문서는 PCH 없이 시작, 다시 알려도 그대로");
@@ -866,6 +1107,11 @@ internal static class SemanticNavigationTests
         try
         {
             var (project, source, _) = WritePchProject(root);
+            // 공유 PCH가 정의하는 매크로로 감싼 헤더: PCH 없이 열면 오류 없이 그 구역이 비활성이 되므로 정의되지 않은 조건 매크로 경고로 PCH 전환합니다.
+            File.AppendAllText(Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "GameEditor", "Development", "UnrealEd", "SharedPCH.UnrealEd.h"),
+                "#define WITH_SHARED_FLAG 1\n");
+            var flag = Path.Combine(source, "Flag.h");
+            Write(flag, "#pragma once\n#include \"Calc.h\"\n#if WITH_SHARED_FLAG\ninline int FlagInline() { return Twice(7); }\n#endif\n");
             var options = new ClangdNavigatorOptions
             {
                 ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
@@ -909,6 +1155,14 @@ internal static class SemanticNavigationTests
                   SpinUntil(() => navigator.ErrorsOf(u5) is null, 10000) && reports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
                 "혼자 실패하는 구성원 문서는 PCH로 다시 분석: " + string.Join(",", definition.Locations) + " / " + navigator.ErrorsOf(u5)?.FirstMessage + " / " +
                 string.Join("|", reports));
+
+            var flagText = File.ReadAllText(flag);
+            var flagLine = flagText.Split('\n')[3];
+            var flagReports = new List<string>();
+            var twice = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(flag, flagText, 1), 3, flagLine.IndexOf("Twice", StringComparison.Ordinal)),
+                new CollectProgress(flagReports), timeout.Token).Result;
+            Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                "PCH가 정의하는 조건 매크로에 기대는 문서는 PCH로 다시 분석: " + string.Join(",", twice.Locations) + " / " + string.Join("|", flagReports));
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally
@@ -1044,6 +1298,17 @@ internal static class SemanticNavigationTests
             Check(File.Exists(Path.Combine(context.Directory, CompileCommandDatabase.FileName)) && context.Directory.StartsWith(cache, StringComparison.Ordinal),
                 "database는 캐시 폴더에만 기록");
             Check(!CompileContextBuilder.Prepare(Path.Combine(cmake, "App.sln"), cache, null, "clang-cl.exe").Changed, "같은 내용이면 다시 쓰지 않음");
+
+            // 색인 형식 번호가 없거나 다르면 이전 clangd 색인 파일을 지우고, 같으면 둡니다.
+            var shard = Path.Combine(context.Directory, ".cache", "clangd", "index", "main.cpp.0123456789ABCDEF.idx");
+            var stamp = Path.Combine(context.Directory, CompileContextBuilder.IndexFormatFileName);
+            Write(shard, "x");
+            CompileContextBuilder.Prepare(Path.Combine(cmake, "App.sln"), cache, null, "clang-cl.exe");
+            Check(File.Exists(shard), "같은 색인 형식이면 색인 파일 유지");
+            File.WriteAllText(stamp, "1");
+            CompileContextBuilder.Prepare(Path.Combine(cmake, "App.sln"), cache, null, "clang-cl.exe");
+            Check(!File.Exists(shard) && File.ReadAllText(stamp) == CompileContextBuilder.IndexFormat.ToString(System.Globalization.CultureInfo.InvariantCulture),
+                "색인 형식이 바뀌면 이전 색인 파일 삭제");
 
             var game = Path.Combine(root, "game");
             Write(Path.Combine(game, "Game.uproject"), "{}");
@@ -1258,6 +1523,91 @@ internal static class SemanticNavigationTests
                 "분석 오류 요약(첫 오류 줄·메시지): " + useErrors?.FirstLine + " " + useErrors?.FirstMessage);
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             Check(navigator.HasExited, "정상 종료");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    /// <summary>
+    /// 가상 함수 참조는 찾은 함수만 남는지 실제 clangd로 확인합니다. clangd는 재정의 함수를 찾으면 기반 함수의 참조를, 기반 함수를 찾으면
+    /// 재정의 함수의 선언·정의를 더해 돌려주므로 요청 문서는 symbolInfo로, 다른 파일은 색인 파일로 걸러야 합니다.
+    /// </summary>
+    public static void RunVirtualReferencesIntegration()
+    {
+        var clangd = FindClangd();
+        if (clangd is null)
+        {
+            Console.WriteLine("SKIP: 가상 함수 참조 통합 시험은 VISUALBOOST_TEST_CLANGD 또는 VS의 C++ Clang 도구가 필요합니다.");
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.Virtual." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var project = Path.Combine(root, "Game");
+            Write(Path.Combine(project, "Game.uproject"), "{}");
+            var source = Path.Combine(project, "Source", "Game");
+            Write(Path.Combine(source, "Game.Build.cs"), "");
+            var headerLines = new[]
+            {
+                "#pragma once", "struct FBase", "{", "    virtual ~FBase() {}", "    virtual int Tick(int Value);", "};",
+                "struct FDerived : FBase", "{", "    int Tick(int Value) override;", "};",
+                "namespace ns { template <class T> struct TBox { static int Value; }; }"
+            };
+            var bodyLines = new[] { "#include \"Base.h\"", "int FBase::Tick(int Value) { return Value; }", "int FDerived::Tick(int Value) { return FBase::Tick(Value) + 1; }" };
+            var callerLines = new[]
+            {
+                "#include \"Base.h\"", "int CallBase(FBase& B) { return B.Tick(1); }", "int CallDerived(FDerived& D) { return D.Tick(2); }",
+                "int UseBox() { return ns::TBox<int>::Value + int(sizeof(ns::TBox<char>)); }"
+            };
+            var header = Path.Combine(source, "Base.h");
+            var body = Path.Combine(source, "Base.cpp");
+            var caller = Path.Combine(source, "Caller.cpp");
+            Write(header, string.Join("\n", headerLines) + "\n");
+            Write(body, string.Join("\n", bodyLines) + "\n");
+            var callerText = string.Join("\n", callerLines) + "\n";
+            Write(caller, callerText);
+            var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
+            foreach (var file in new[] { body, caller })
+            {
+                Write(Path.Combine(build, Path.GetFileName(file) + ".obj.rsp"), $"\"{file.Replace('\\', '/')}\"\n/I \"{source.Replace('\\', '/')}\"\n/TP\n/std:c++17\n/c\n");
+            }
+
+            using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
+                EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1
+            }, CancellationToken.None).Result;
+            Check(SpinUntil(() => navigator.Progress.Completed, 60000), "색인 완료");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            string Key(string file, int line, int character) => file + ":" + line + ":" + character;
+            string[] Found(int line) => navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), line, callerLines[line].IndexOf(".Tick", StringComparison.Ordinal) + 1),
+                timeout.Token).Result.Locations.Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character)).OrderBy(k => k, StringComparer.Ordinal).ToArray();
+
+            var derived = Found(2);
+            var expectedDerived = new[]
+            {
+                Key("Base.h", 8, headerLines[8].IndexOf("Tick", StringComparison.Ordinal)), Key("Base.cpp", 2, bodyLines[2].IndexOf("Tick", StringComparison.Ordinal)),
+                Key("Caller.cpp", 2, callerLines[2].IndexOf("Tick", StringComparison.Ordinal))
+            }.OrderBy(k => k, StringComparer.Ordinal);
+            Check(derived.SequenceEqual(expectedDerived), "재정의 함수 참조에 기반 함수 위치 없음: " + string.Join(",", derived));
+            var baseReferences = Found(1);
+            var expectedBase = new[]
+            {
+                Key("Base.h", 4, headerLines[4].IndexOf("Tick", StringComparison.Ordinal)), Key("Base.cpp", 1, bodyLines[1].IndexOf("Tick", StringComparison.Ordinal)),
+                Key("Base.cpp", 2, bodyLines[2].LastIndexOf("Tick", StringComparison.Ordinal)), Key("Caller.cpp", 1, callerLines[1].IndexOf("Tick", StringComparison.Ordinal))
+            }.OrderBy(k => k, StringComparer.Ordinal);
+            Check(baseReferences.SequenceEqual(expectedBase), "기반 함수 참조에 재정의 함수 선언·정의 없음: " + string.Join(",", baseReferences));
+
+            // 템플릿 인수가 붙은 이름 앞의 한정자는 clang 색인이 빠뜨리므로 요청 문서에서 AST로 확인해 더합니다.
+            var namespaceReferences = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 3, callerLines[3].IndexOf("ns::", StringComparison.Ordinal)),
+                timeout.Token).Result.Locations.Where(l => l.Path == caller).Select(l => (l.Line, l.Character)).ToArray();
+            Check(namespaceReferences.Contains((3, callerLines[3].IndexOf("ns::", StringComparison.Ordinal))) &&
+                  namespaceReferences.Contains((3, callerLines[3].LastIndexOf("ns::", StringComparison.Ordinal))),
+                "템플릿 앞 한정자 보완: " + string.Join(",", namespaceReferences));
+            navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally
         {

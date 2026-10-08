@@ -46,7 +46,7 @@ public sealed class CompileCommandSources
 public sealed class CompileContext
 {
     public CompileContext(CompileContextKind kind, string directory, IReadOnlyList<CompileCommand> commands, string summary, string? reason,
-        string? engineRoot, bool changed, PathAliases? paths = null, UnrealIndexPlan? plan = null)
+        string? engineRoot, bool changed, PathAliases? paths = null, UnrealIndexPlan? plan = null, UnrealModuleGraph? moduleGraph = null)
     {
         Kind = kind;
         Directory = directory;
@@ -57,6 +57,7 @@ public sealed class CompileContext
         Changed = changed;
         Paths = paths ?? PathAliases.None;
         Plan = plan;
+        ModuleGraph = moduleGraph;
     }
 
     public CompileContextKind Kind { get; }
@@ -71,6 +72,9 @@ public sealed class CompileContext
 
     /// <summary>Unreal 프로젝트의 색인 단위와 공유 PCH 사용 판단입니다. 다른 문맥이면 null입니다.</summary>
     public UnrealIndexPlan? Plan { get; }
+
+    /// <summary>Unreal 엔진·프로젝트 모듈 규칙입니다. 명령이 없는 모듈 파일의 근사 명령에 씁니다. 다른 문맥이면 null입니다.</summary>
+    public UnrealModuleGraph? ModuleGraph { get; }
 
     public string Summary { get; }
 
@@ -159,6 +163,7 @@ public static class CompileContextBuilder
     {
         var solutionDirectory = WorkspaceDirectory(solutionPath);
         var directory = CacheDirectory(cacheRoot, solutionPath);
+        ResetIndexIfFormatChanged(directory);
         // 링크를 거쳐 연 작업 영역이면 clangd에는 실제 경로를 줍니다(PathAliases 참고).
         var paths = PathAliases.ForRoots(new[] { solutionDirectory, engineRoot });
         string? unrealReason = null;
@@ -187,7 +192,8 @@ public static class CompileContextBuilder
                                   PchSummary(plan) +
                                   (result.Supplemented > 0 ? $", 빌드 기록 없는 파일 {result.Supplemented:N0}개 보완" : string.Empty) +
                                   (result.UnreadableDirectories > 0 ? $", 읽지 못해 건너뛴 소스 폴더 {result.UnreadableDirectories:N0}개" : string.Empty) + ")";
-                    return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths, plan);
+                    return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths, plan,
+                        UnrealModuleGraph.For(engineRoot, solutionDirectory));
                 }
 
                 unrealReason = $"Unreal 빌드 응답 파일({variant})에서 컴파일 명령을 만들지 못했습니다.";
@@ -238,6 +244,38 @@ public static class CompileContextBuilder
 
         return new CompileContext(CompileContextKind.None, directory, Array.Empty<CompileCommand>(), string.Empty,
             unrealReason ?? toolReason ?? "compile_commands.json을 찾지 못했습니다.", engineRoot, false);
+    }
+
+    /// <summary>
+    /// VisualBoost가 clangd에 주는 색인 단위의 분석 결과가 달라지는 변경마다 올리는 번호입니다. 2: PCH 없는 단위의 조건식 매크로 확인과
+    /// 엔진 모듈 규칙 근사 명령.
+    /// </summary>
+    public const int IndexFormat = 2;
+
+    public const string IndexFormatFileName = "index-format.txt";
+
+    /// <summary>
+    /// 색인 형식 번호가 다르면 clangd 색인 파일을 지웁니다. clangd background index는 내용이 같은 파일의 색인 파일을 이전 색인에 분석 오류가
+    /// 있었을 때만 다시 씁니다(clangd Background.cpp). 그래서 색인 단위가 바뀌어 같은 파일을 더 완전히 분석해도(예: PCH 없이 조건부 구역이
+    /// 오류 없이 꺼졌던 파일) 이전의 빈 색인 파일이 남습니다(2026-10-09 정확도 시험). clangd를 띄우기 전에 부르며, 지우지 못하면 번호를
+    /// 쓰지 않아 다음 준비에서 다시 시도합니다.
+    /// </summary>
+    internal static void ResetIndexIfFormatChanged(string directory)
+    {
+        var stamp = Path.Combine(directory, IndexFormatFileName);
+        var current = IndexFormat.ToString(System.Globalization.CultureInfo.InvariantCulture);
+        try
+        {
+            if (File.Exists(stamp) && File.ReadAllText(stamp).Trim() == current) return;
+            var index = Path.Combine(directory, ".cache", "clangd", "index");
+            if (Directory.Exists(index)) Directory.Delete(index, true);
+            Directory.CreateDirectory(directory);
+            File.WriteAllText(stamp, current);
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            // 다른 프로세스가 색인 파일을 쓰는 중이면 다음 준비에서 다시 시도합니다.
+        }
     }
 
     private static string PchSummary(UnrealIndexPlan plan)

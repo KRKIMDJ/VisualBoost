@@ -150,21 +150,22 @@ internal sealed class SemanticNavigationCommand
                         ? await navigator.DefinitionAsync(query, progress, request.Token).ConfigureAwait(false)
                         : await navigator.ReferencesAsync(query, request.Token, progress).ConfigureAwait(false);
                     var ordered = Order(found.Locations, path);
-                    found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles);
+                    found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles, found.Limited);
                     // 결과가 하나인 정의 이동은 미리보기가 필요 없습니다.
                     var preview = kind == Kind.References || ordered.Count > 1
                         ? SourceLinePreview.LoadLines(ordered, p => openTexts.TryGetValue(p, out var open) ? open.Text : null, timeout.Token)
                         : Array.Empty<string>();
-                    var limited = kind == Kind.References && ordered.Count >= navigator.ReferenceLimit;
+                    // clangd가 보낸 원래 항목 수로 판단합니다. 겹친 위치를 합친 뒤의 개수는 상한보다 작을 수 있습니다.
+                    var limited = kind == Kind.References && found.Limited;
                     if (kind == Kind.References)
                     {
-                        // 클래스 자신의 멤버 정의 머리(Class::Member)와 생성자·소멸자 이름은 쓰는 곳이 아니므로 뺍니다. 제한 안내는 뺀 전 개수로 판단합니다.
-                        var kept = OwnDefinitionReferences.Kept(ordered, preview, IsType(found.SymbolKind));
+                        // 클래스 자신의 멤버 정의 머리(Class::Member)와 생성자·소멸자 이름, 찾는 이름이 쓰이지 않은 매크로 자리는 쓰는 곳이 아니므로 뺍니다.
+                        var kept = OwnDefinitionReferences.Kept(ordered, preview, IsType(found.SymbolKind), found.Symbol?.Name);
                         if (kept.Count < ordered.Count)
                         {
                             ordered = kept.Select(i => ordered[i]).ToArray();
                             preview = kept.Select(i => preview[i]).ToArray();
-                            found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles);
+                            found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles, found.Limited);
                         }
                     }
 

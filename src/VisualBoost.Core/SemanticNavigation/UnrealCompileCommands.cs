@@ -270,7 +270,7 @@ public static class UnrealCompileCommands
             }
         }
 
-        var (supplemented, unreadable) = SupplementMissing(projectDirectory, commands, overrideDirectory, cancellationToken);
+        var (supplemented, unreadable) = SupplementMissing(projectDirectory, commands, overrideDirectory, UnrealModuleGraph.For(engineRoot, projectDirectory), cancellationToken);
         return new UnrealCompileCommandResult(commands.Values.OrderBy(c => c.File, StringComparer.OrdinalIgnoreCase).ToArray(), variant,
             modules, responseFiles, unityMembers, skippedGenerated, missingSources, supplemented, unreadable, units);
     }
@@ -286,7 +286,7 @@ public static class UnrealCompileCommands
     /// 후보·참조에 섞임), <c>ThirdParty</c> 폴더와 <c>ModuleType.External</c> 모듈(외부 라이브러리 소스까지 색인하면 메모리·CPU가 늘어남).
     /// </remarks>
     private static (int Added, int Unreadable) SupplementMissing(string projectDirectory, Dictionary<string, CompileCommand> commands,
-        string? overrideDirectory, CancellationToken cancellationToken)
+        string? overrideDirectory, UnrealModuleGraph graph, CancellationToken cancellationToken)
     {
         // 모듈 판정은 폴더마다 *.Build.cs를 찾으므로 폴더 단위로 기억합니다.
         var owners = new Dictionary<string, (string Directory, string Module)?>(StringComparer.OrdinalIgnoreCase);
@@ -342,7 +342,7 @@ public static class UnrealCompileCommands
                 }
                 else if (overrideDirectory is not null && built.Length > 0 && !IsExternal(directory, module))
                 {
-                    command = Synthesize(source, built, overrideDirectory, sharedPrecompiledHeader: true);
+                    command = Synthesize(source, built, overrideDirectory, sharedPrecompiledHeader: true, graph: graph);
                 }
 
                 if (command is null) continue;
@@ -401,18 +401,20 @@ public static class UnrealCompileCommands
     }
 
     /// <summary>
-    /// 명령이 없는 엔진 파일에 프로젝트 명령을 바탕으로 소속 모듈 경로를 더한 근사 명령을 만듭니다.
-    /// 설치형 엔진은 엔진 모듈 응답 파일을 제공하지 않기 때문입니다. 소속 모듈의 비공개 의존 경로는
-    /// 알 수 없어 일부 진단이 남을 수 있으므로 정의 위치 확정처럼 오차를 견디는 용도로만 씁니다.
-    /// 프로젝트 정의 헤더가 의존 모듈 API 매크로를 dllimport로 정의하므로, 소속 모듈 매크로는 그 뒤에
-    /// 강제 include하는 작은 헤더(<paramref name="overrideDirectory"/>/&lt;Module&gt;.h)에서 다시 비웁니다.
+    /// 명령이 없는 모듈 파일(설치형 엔진의 엔진 모듈, 이 대상으로 빌드하지 않은 프로젝트 모듈)에 프로젝트 명령을 바탕으로 소속 모듈의
+    /// 포함 경로·정의를 더한 근사 명령을 만듭니다. 설치형 엔진은 엔진 모듈 응답 파일을 제공하지 않기 때문입니다.
+    /// <paramref name="graph"/>가 있으면 모듈 규칙의 의존 사슬로 의존 모듈 헤더 경로·API 매크로·공개 정의를 채우고(프로젝트가 쓰지 않는
+    /// 엔진 모듈도 분석됨), 없으면 소속 모듈 경로만 더합니다. 규칙 파일의 조건·계산식은 해석하지 않으므로 일부 진단이 남을 수 있습니다.
+    /// 프로젝트 정의 헤더가 의존 모듈 API 매크로를 dllimport로 정의하므로, 소속 모듈 매크로는 그 뒤에 강제 include하는 작은
+    /// 헤더(<paramref name="overrideDirectory"/>/&lt;Module&gt;.h)에서 다시 비우고, 정의되지 않은 의존 모듈 매크로를 비워 정의합니다.
+    /// 헤더는 C++로 분석하게 합니다(<c>/TP</c>).
     /// </summary>
     /// <param name="sharedPrecompiledHeader">
     /// 프로젝트 명령의 공유 PCH 헤더(<c>SharedPCH.*</c>)를 남깁니다. 같은 프로젝트의 빌드하지 않은 모듈처럼 공유 PCH에 기댈 수 있는
     /// 소스에 씁니다. 엔진 cpp는 include를 스스로 갖추므로 빼서 정의 확정 분석 시간을 줄입니다. 다른 모듈의 전용 PCH(<c>PCH.*</c>)는 항상 뺍니다.
     /// </param>
     public static CompileCommand? Synthesize(string file, IReadOnlyList<CompileCommand> projectCommands, string overrideDirectory,
-        string platform = "Win64", string target = "UnrealEditor", bool sharedPrecompiledHeader = false)
+        string platform = "Win64", string target = "UnrealEditor", bool sharedPrecompiledHeader = false, UnrealModuleGraph? graph = null)
     {
         if (projectCommands.Count == 0 || OwningModule(file) is not (string moduleDirectory, string module))
         {
@@ -421,6 +423,24 @@ public static class UnrealCompileCommands
 
         var baseCommand = projectCommands.OrderByDescending(c => c.Arguments.Count(a => a == "/I")).First();
         var head = WithoutPrecompiledHeaders(baseCommand.Arguments.Take(baseCommand.Arguments.Count - 1).ToArray(), sharedPrecompiledHeader);
+        var environment = graph?.Environment(module, moduleDirectory, platform, target);
+        var known = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        for (var i = 0; i + 1 < head.Count; i++)
+        {
+            if (head[i] == "/I") known.Add(FullIn(baseCommand.Directory, head[i + 1]));
+        }
+
+        // 소속 모듈과 의존 모듈 경로를 프로젝트 명령의 경로보다 앞에 둡니다. 같은 이름의 헤더가 여러 모듈에 있으면 앞의 것을 찾기 때문입니다.
+        var leading = new List<string>();
+        foreach (var include in environment?.IncludeDirectories ?? Array.Empty<string>())
+        {
+            if (known.Add(Path.GetFullPath(include)))
+            {
+                leading.Add("/I");
+                leading.Add(Normalize(include));
+            }
+        }
+
         var plugin = Ancestors(moduleDirectory).FirstOrDefault(d => SafeFiles(d, "*.uplugin").Any());
         var engineDirectory = Ancestors(moduleDirectory).FirstOrDefault(d => string.Equals(Path.GetFileName(d), "Engine", StringComparison.OrdinalIgnoreCase));
         var generatedRoot = Path.Combine(plugin ?? engineDirectory ?? moduleDirectory, "Intermediate", "Build", platform, target, "Inc", module);
@@ -432,7 +452,7 @@ public static class UnrealCompileCommands
                      Path.GetDirectoryName(file)!, Path.Combine(generatedRoot, "UHT"), generatedRoot
                  })
         {
-            if (Directory.Exists(include))
+            if (Directory.Exists(include) && known.Add(Path.GetFullPath(include)))
             {
                 extra.Add("/I");
                 extra.Add(Normalize(include));
@@ -441,16 +461,106 @@ public static class UnrealCompileCommands
 
         Directory.CreateDirectory(overrideDirectory);
         var overrideHeader = Path.Combine(overrideDirectory, module + ".h");
-        var api = module.ToUpperInvariant() + "_API";
-        var content = $"#undef {api}\n#define {api}\n#undef UE_MODULE_NAME\n#define UE_MODULE_NAME \"{module}\"\n";
+        var content = OverrideHeader(module, engineDirectory is not null, environment);
         if (!File.Exists(overrideHeader) || File.ReadAllText(overrideHeader) != content)
         {
             File.WriteAllText(overrideHeader, content);
         }
 
         extra.AddRange(new[] { "-Xclang", "-include", "-Xclang", Normalize(overrideHeader) });
+        if (GeneratedSourceStubs(file, overrideDirectory) is { } stubs)
+        {
+            // 맨 뒤에 두어 실제 생성 소스가 있으면 그것을 찾게 합니다.
+            extra.Add("/I");
+            extra.Add(Normalize(stubs));
+        }
+
+        if (DefinitionCandidates.IsHeader(file) && !head.Contains("/TP")) extra.Add("/TP");
         var normalizedFile = Normalize(file);
-        return new CompileCommand(baseCommand.Directory, normalizedFile, head.Concat(extra).Concat(new[] { normalizedFile }).ToArray());
+        var firstInclude = head.ToList().IndexOf("/I");
+        var arguments = firstInclude < 0
+            ? head.Concat(leading).Concat(extra)
+            : head.Take(firstInclude).Concat(leading).Concat(head.Skip(firstInclude)).Concat(extra);
+        return new CompileCommand(baseCommand.Directory, normalizedFile, arguments.Concat(new[] { normalizedFile }).ToArray());
+    }
+
+    /// <summary>
+    /// 근사 명령이 프로젝트 정의 헤더 뒤에 강제 include하는 헤더 내용입니다. 소속 모듈 API 매크로를 비우고, 볼 수 있는 모듈의 API 매크로와
+    /// 공개 정의 중 프로젝트 정의 헤더가 정하지 않은 것을 정합니다. 프로젝트가 쓰지 않는 모듈의 매크로가 없으면 그 헤더의 선언 전체가
+    /// 분석 오류로 사라지기 때문입니다.
+    /// </summary>
+    private static string OverrideHeader(string module, bool engineModule, UnrealModuleEnvironment? environment)
+    {
+        var api = module.ToUpperInvariant();
+        var text = new System.Text.StringBuilder();
+        text.Append($"#undef {api}_API\n#define {api}_API\n#undef {api}_NON_ATTRIBUTED_API\n#define {api}_NON_ATTRIBUTED_API\n");
+        text.Append($"#undef UE_MODULE_NAME\n#define UE_MODULE_NAME \"{module}\"\n");
+        if (environment is null) return text.ToString();
+        if (engineModule) text.Append("#undef UE_IS_ENGINE_MODULE\n#define UE_IS_ENGINE_MODULE 1\n");
+        foreach (var name in environment.ApiModules.Skip(1).Select(m => m.ToUpperInvariant()).Distinct(StringComparer.Ordinal))
+        {
+            if (!IsIdentifier(name)) continue;
+            text.Append($"#ifndef {name}_API\n#define {name}_API\n#endif\n#ifndef {name}_NON_ATTRIBUTED_API\n#define {name}_NON_ATTRIBUTED_API\n#endif\n");
+        }
+
+        var defined = new HashSet<string>(StringComparer.Ordinal);
+        foreach (var definition in environment.Definitions)
+        {
+            var equals = definition.IndexOf('=');
+            var name = equals < 0 ? definition : definition.Substring(0, equals);
+            if (!IsIdentifier(name) || !defined.Add(name)) continue;
+            var value = equals < 0 ? "1" : definition.Substring(equals + 1).Replace("\\\"", "\"");
+            text.Append($"#ifndef {name}\n#define {name} {value}\n#endif\n");
+        }
+
+        return text.ToString();
+    }
+
+    private static readonly Regex InlineGeneratedSource = new(@"UE_INLINE_GENERATED_CPP_BY_NAME\s*\(\s*(\w+)\s*\)", RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 파일이 <c>UE_INLINE_GENERATED_CPP_BY_NAME(이름)</c>으로 포함하는 UHT 생성 소스(<c>이름.gen.cpp</c>)의 빈 대체 파일을 두고 그 폴더를
+    /// 돌려줍니다. 설치형 엔진은 생성 소스를 제공하지 않아 포함 오류가 나기 때문입니다. 반사 등록 코드만 빠지므로 탐색에는 영향이 없습니다.
+    /// 그런 포함이 없거나 파일을 읽지 못하면 null입니다.
+    /// </summary>
+    private static string? GeneratedSourceStubs(string file, string overrideDirectory)
+    {
+        string text;
+        try
+        {
+            text = File.ReadAllText(file);
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            return null;
+        }
+
+        var names = InlineGeneratedSource.Matches(text).Cast<Match>().Select(m => m.Groups[1].Value).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        if (names.Length == 0) return null;
+        var folder = Path.Combine(overrideDirectory, "generated-stubs");
+        Directory.CreateDirectory(folder);
+        foreach (var name in names)
+        {
+            var stub = Path.Combine(folder, name + ".gen.cpp");
+            if (!File.Exists(stub)) File.WriteAllText(stub, string.Empty);
+        }
+
+        return folder;
+    }
+
+    private static bool IsIdentifier(string name) =>
+        name.Length > 0 && (char.IsLetter(name[0]) || name[0] == '_') && name.All(c => char.IsLetterOrDigit(c) || c == '_');
+
+    private static string FullIn(string directory, string path)
+    {
+        try
+        {
+            return Path.GetFullPath(Path.IsPathRooted(path) ? path : Path.Combine(directory, path));
+        }
+        catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException)
+        {
+            return path;
+        }
     }
 
     /// <summary>UBT가 만든 PCH 래퍼 헤더(<c>SharedPCH.*</c>, 모듈 전용 <c>PCH.*</c>)의 강제 include를 모두 뺍니다.</summary>

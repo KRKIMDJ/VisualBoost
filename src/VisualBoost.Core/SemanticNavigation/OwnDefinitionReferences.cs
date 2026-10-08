@@ -28,17 +28,47 @@ public static class OwnDefinitionReferences
 {
     /// <summary>뺄 위치를 제외한 위치의 순번을 입력 순서대로 돌려줍니다.</summary>
     /// <param name="lines">위치마다의 원래 줄 글자(<see cref="SourceLinePreview.LoadLines"/>)입니다.</param>
-    public static IReadOnlyList<int> Kept(IReadOnlyList<NavigationLocation> locations, IReadOnlyList<string> lines, bool symbolIsType)
+    /// <param name="symbolName">찾는 심볼 이름입니다. 주면 그 이름이 쓰이지 않은 위치(<see cref="IsMacroExpansion"/>)도 뺍니다.</param>
+    public static IReadOnlyList<int> Kept(IReadOnlyList<NavigationLocation> locations, IReadOnlyList<string> lines, bool symbolIsType, string? symbolName = null)
     {
         if (locations is null) throw new ArgumentNullException(nameof(locations));
         if (lines is null) throw new ArgumentNullException(nameof(lines));
         var kept = new List<int>(locations.Count);
         for (var i = 0; i < locations.Count; i++)
         {
-            if (!IsOwnDefinitionName(locations[i], i < lines.Count ? lines[i] : null, symbolIsType)) kept.Add(i);
+            var line = i < lines.Count ? lines[i] : null;
+            if (!IsOwnDefinitionName(locations[i], line, symbolIsType) && !IsMacroExpansion(locations[i], line, symbolName)) kept.Add(i);
         }
 
         return kept;
+    }
+
+    /// <summary>
+    /// 찾는 이름이 쓰이지 않고 매크로가 펼쳐 만든 참조인지 봅니다. clangd는 매크로 본문 안의 참조를 매크로를 쓴 자리로 돌려줍니다
+    /// (예: <c>FName</c>의 참조로 <c>GENERATED_BODY()</c>, <c>IModuleInterface</c>의 참조로 <c>IMPLEMENT_MODULE(…)</c>). 그 자리에는 찾는 이름이
+    /// 없어 사용처로 볼 수 없으므로 뺍니다(2026-10-09 정확도 시험). 위치 글자가 식별자이고 찾는 이름(식별자)과 다를 때만 그렇게 보며,
+    /// 연산자·소멸자·변환 함수처럼 이름이 식별자가 아니면 판단하지 않습니다.
+    /// </summary>
+    public static bool IsMacroExpansion(NavigationLocation location, string? lineText, string? symbolName)
+    {
+        if (location is null) throw new ArgumentNullException(nameof(location));
+        if (lineText is null || symbolName is not { Length: > 0 } || !IsIdentifierText(symbolName) || location.EndLine != location.Line) return false;
+        var start = location.Character;
+        var end = location.EndCharacter;
+        if (start < 0 || end <= start || end > lineText.Length) return false;
+        var written = lineText.Substring(start, end - start);
+        return IsIdentifierText(written) && !string.Equals(written, symbolName, StringComparison.Ordinal);
+    }
+
+    private static bool IsIdentifierText(string text)
+    {
+        if (text.Length == 0 || char.IsDigit(text[0])) return false;
+        foreach (var c in text)
+        {
+            if (!IsIdentifier(c)) return false;
+        }
+
+        return true;
     }
 
     /// <param name="location">참조 위치입니다. 이름 범위가 한 줄 안에 있어야 합니다.</param>

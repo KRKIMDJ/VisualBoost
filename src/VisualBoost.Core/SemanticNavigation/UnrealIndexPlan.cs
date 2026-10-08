@@ -192,6 +192,9 @@ public sealed class UnrealIndexPlan
         var hasPch = stripped.Count != head.Length;
         var withPch = pch ?? (Mode == UnrealPchMode.Always || Mode == UnrealPchMode.Auto && !header && SingleUnitUsesPch(source));
         var arguments = new List<string>(withPch || !hasPch ? head : stripped);
+        // PCH 없이 열면 조건식의 정의되지 않은 매크로를 경고로 받아, PCH가 정의하던 매크로에 기대는 문서도 PCH로 다시 분석하게 합니다
+        // (분석 오류가 없어 그 구역이 조용히 비활성이 되기 때문, ConditionMacros 참고).
+        if (hasPch && !withPch) arguments.Add("-Wundef");
         // 문서 경로 그대로 씁니다. clangd는 명령을 바꾼 열린 문서를 경로 문자열이 같을 때만 다시 분석합니다(ClangdSession.UpdateCompileCommands).
         var file = FullPath(path);
         if (header && !arguments.Contains("/TP"))
@@ -369,11 +372,37 @@ public sealed class UnrealIndexPlan
             text.Append("#include \"").Append(paths.ToReal(member)).Append("\"\n");
         }
 
+        if (Mode == UnrealPchMode.Auto && unit.Switchable && !UsesPch(unit)) AppendConditionChecks(text, unit.Members);
         var path = WrapperPath(unit);
         var content = text.ToString();
         if (File.Exists(path) && File.ReadAllText(path) == content) return;
         Directory.CreateDirectory(Path.GetDirectoryName(path)!);
         File.WriteAllText(path, content);
+    }
+
+    /// <summary>
+    /// 구성원의 조건식(<c>#if</c>)에 쓴 매크로가 TU 끝에서 정의되지 않았으면 <c>#error</c>를 내게 합니다. PCH가 정의하던 매크로(예:
+    /// <c>WITH_AUTOMATION_TESTS</c>)가 없으면 clang은 그 구역을 오류 없이 비활성으로 분석해 정의·참조를 잃으므로, 분석 오류로 알려
+    /// PCH 단위로 바꾸게 합니다(<see cref="ConditionMacros"/>). PCH 단위의 합성 TU에는 넣지 않습니다.
+    /// </summary>
+    private static void AppendConditionChecks(StringBuilder text, IEnumerable<string> members)
+    {
+        var names = new List<string>();
+        foreach (var member in members)
+        {
+            var source = SourceLinePreview.ReadText(member);
+            if (source is null) continue;
+            foreach (var name in ConditionMacros.Used(source))
+            {
+                if (!names.Contains(name)) names.Add(name);
+            }
+        }
+
+        for (var i = 0; i < names.Count; i += 16)
+        {
+            text.Append("#if ").Append(string.Join(" || ", names.Skip(i).Take(16).Select(n => "!defined(" + n + ")"))).Append('\n')
+                .Append("#error VisualBoost: condition macro undefined without shared PCH\n#endif\n");
+        }
     }
 
     /// <summary>이번에 쓰지 않은 합성 TU를 지웁니다. 지우지 못해도 database에 없으므로 색인에는 영향이 없어 건너뜁니다.</summary>

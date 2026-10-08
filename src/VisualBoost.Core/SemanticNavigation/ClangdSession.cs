@@ -108,6 +108,14 @@ public sealed class DocumentErrors
     /// <summary>그 오류 메시지의 첫 줄입니다.</summary>
     public string FirstMessage { get; }
 
+    /// <summary>
+    /// 조건식(<c>#if</c>)에 정의되지 않은 매크로를 썼다는 진단이 있는지 봅니다. clangd는 경고 옵션이 있는 진단의 코드를 옵션 이름(<c>-Wundef</c>)으로,
+    /// 오류로 올린 경우(<c>-Werror=undef</c>)도 같은 이름으로 보냅니다(clangd 22.1 확인). 옵션 없이 진단 이름만 보내는 경우를 위해
+    /// <c>pp_undef_identifier</c>도 받습니다.
+    /// </summary>
+    public static bool HasUndefinedConditionMacro(IReadOnlyList<JsonValue> diagnostics) =>
+        diagnostics.Any(d => d["code"].AsString() is "-Wundef" or "pp_undef_identifier");
+
     /// <summary>JSON 진단 배열에서 오류(severity 1)만 요약합니다. 오류가 없으면 null입니다.</summary>
     public static DocumentErrors? From(IReadOnlyList<JsonValue> diagnostics)
     {
@@ -145,14 +153,29 @@ public readonly struct BackgroundIndexProgress
 /// <summary>clangd <c>textDocument/symbolInfo</c> 확장 응답의 일부입니다.</summary>
 public sealed class SemanticSymbol
 {
-    public SemanticSymbol(string name, string containerName, string usr, NavigationLocation? declaration = null, NavigationLocation? definition = null)
+    public SemanticSymbol(string name, string containerName, string usr, NavigationLocation? declaration = null, NavigationLocation? definition = null,
+        IReadOnlyList<string>? ids = null, IReadOnlyList<string>? usrs = null, string? id = null)
     {
+        Id = id ?? string.Empty;
         Name = name;
         ContainerName = containerName;
         Usr = usr;
         Declaration = declaration;
         Definition = definition;
+        Ids = ids ?? Array.Empty<string>();
+        Usrs = usrs ?? (usr.Length > 0 ? new[] { usr } : Array.Empty<string>());
     }
+
+    /// <summary>
+    /// 응답의 모든 항목의 심볼 ID(대문자 16진수)입니다. clangd는 별칭의 대상·using 선언의 대상·위치의 매크로도 함께 돌려줍니다.
+    /// </summary>
+    public IReadOnlyList<string> Ids { get; }
+
+    /// <summary>응답의 모든 항목의 USR입니다(응답 순서).</summary>
+    public IReadOnlyList<string> Usrs { get; }
+
+    /// <summary>대표 항목의 심볼 ID(대문자 16진수)입니다. clangd 색인 파일의 심볼 ID와 같은 표기이며, 없으면 빈 문자열입니다.</summary>
+    public string Id { get; }
 
     /// <summary>요청 파일 AST가 아는 대표 선언 위치(<c>declarationRange</c>)입니다. 응답에 없거나 심볼이 여럿이면 null입니다.</summary>
     public NavigationLocation? Declaration { get; }
@@ -228,10 +251,11 @@ public sealed class ClangdSession : IDisposable
     public event Action<string>? TranslationUnitIndexed;
 
     /// <summary>
-    /// 열린 문서의 최신 진단이 도착했습니다. 인수는 연 경로와 오류 요약(없으면 null)입니다. 그 버전을 기다리는 호출자보다 먼저 호출됩니다.
+    /// 열린 문서의 최신 진단이 도착했습니다. 인수는 연 경로, 오류 요약(없으면 null), 조건식에 정의되지 않은 매크로를 쓴 경고(<c>-Wundef</c>)가
+    /// 있는지입니다. 그 버전을 기다리는 호출자보다 먼저 호출됩니다.
     /// LSP 읽기 스레드에서 호출되므로 잠금을 오래 잡거나 clangd에 쓰지 않습니다. 쓰기는 동기식이라 clangd 출력이 차 있으면 서로 기다립니다.
     /// </summary>
-    public event Action<string, DocumentErrors?>? DiagnosticsPublished;
+    public event Action<string, DocumentErrors?, bool>? DiagnosticsPublished;
 
     public BackgroundIndexProgress Progress
     {
@@ -433,19 +457,34 @@ public sealed class ClangdSession : IDisposable
     public async Task<IReadOnlyList<NavigationLocation>> DeclarationAsync(string path, int line, int character, CancellationToken cancellationToken) =>
         options.Paths.ToGiven(NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/declaration", Position(path, line, character), cancellationToken).ConfigureAwait(false)));
 
-    public async Task<IReadOnlyList<NavigationLocation>> ReferencesAsync(string path, int line, int character, bool includeDeclaration, CancellationToken cancellationToken)
+    public async Task<IReadOnlyList<NavigationLocation>> ReferencesAsync(string path, int line, int character, bool includeDeclaration, CancellationToken cancellationToken) =>
+        (await ReferencesCountedAsync(path, line, character, includeDeclaration, cancellationToken).ConfigureAwait(false)).Locations;
+
+    /// <summary>
+    /// 참조와 clangd가 보낸 원래 항목 수입니다. 같은 위치가 겹쳐 오면 결과에서 하나로 합치므로, 결과가 상한에 걸렸는지는 원래 항목 수로
+    /// 판단해야 합니다(<see cref="ReferenceLimit"/>).
+    /// </summary>
+    public async Task<(IReadOnlyList<NavigationLocation> Locations, int RawCount)> ReferencesCountedAsync(string path, int line, int character, bool includeDeclaration,
+        CancellationToken cancellationToken)
     {
         var parameters = JsonValue.Object(
             ("textDocument", JsonValue.Object(("uri", ToUri(path)))),
             ("position", JsonValue.Object(("line", line), ("character", character))),
             ("context", JsonValue.Object(("includeDeclaration", includeDeclaration))));
-        return options.Paths.ToGiven(NavigationLocation.FromLsp(await connection.RequestAsync("textDocument/references", parameters, cancellationToken).ConfigureAwait(false)));
+        var result = await connection.RequestAsync("textDocument/references", parameters, cancellationToken).ConfigureAwait(false);
+        return (options.Paths.ToGiven(NavigationLocation.FromLsp(result)), result.Items.Count);
     }
 
-    public async Task<SemanticSymbol?> SymbolInfoAsync(string path, int line, int character, CancellationToken cancellationToken)
+    /// <param name="spelled">요청 위치에 쓰인 식별자입니다. 주면 그 이름의 항목을 대표로 씁니다.</param>
+    public async Task<SemanticSymbol?> SymbolInfoAsync(string path, int line, int character, CancellationToken cancellationToken, string? spelled = null)
     {
         var result = await connection.RequestAsync("textDocument/symbolInfo", Position(path, line, character), cancellationToken).ConfigureAwait(false);
-        var first = result.Items.FirstOrDefault();
+        // 대표 항목은 요청 위치에 쓰인 이름의 항목입니다. symbolInfo는 별칭이 가리키는 원래 선언(예: TTuple, typedef 사슬의 앞 typedef)을
+        // 별칭보다 앞에, 매크로를 맨 뒤에 두지만, clangd는 그 위치의 정의·참조를 쓰인 이름의 심볼(별칭, 매크로)로 찾습니다(2026-10-09 정확도
+        // 시험: 대표 이름이 달라 결과가 모두 빠짐). 같은 이름이 여럿이면(typedef A::X X) 마지막이 쓰인 선언입니다(clangd FindTarget의 보고
+        // 순서). 이름을 모르면 매크로 항목, 그다음 첫 항목입니다.
+        var first = (spelled is null ? null : result.Items.LastOrDefault(i => string.Equals(i["name"].AsString(), spelled, StringComparison.Ordinal)))
+                    ?? result.Items.LastOrDefault(i => i["usr"].AsString()?.Contains("@macro@") == true) ?? result.Items.FirstOrDefault();
         if (first is null || first["name"].AsString() is not string name)
         {
             return null;
@@ -455,7 +494,10 @@ public sealed class ClangdSession : IDisposable
         // 선언·정의 범위는 역할 표식 근거라 심볼 하나로 정해질 때만 씁니다.
         NavigationLocation? Range(string field) =>
             result.Items.Count == 1 ? options.Paths.ToGiven(NavigationLocation.FromLsp(first[field])).FirstOrDefault() : null;
-        return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty, Range("declarationRange"), Range("definitionRange"));
+        var ids = result.Items.Select(i => i["id"].AsString()).Where(i => !string.IsNullOrEmpty(i)).Select(i => i!.ToUpperInvariant()).Distinct().ToArray();
+        var usrs = result.Items.Select(i => i["usr"].AsString()).Where(u => !string.IsNullOrEmpty(u)).Select(u => u!).Distinct().ToArray();
+        return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty, Range("declarationRange"), Range("definitionRange"), ids, usrs,
+            first["id"].AsString()?.ToUpperInvariant());
     }
 
     /// <summary>
@@ -637,6 +679,7 @@ public sealed class ClangdSession : IDisposable
             // 버전 없는 진단은 열린 문서가 아니므로 0으로 취급합니다.
             var version = parameters["version"].AsInt32() ?? 0;
             var errors = DocumentErrors.From(parameters["diagnostics"].Items);
+            var undefinedMacros = DocumentErrors.HasUndefinedConditionMacro(parameters["diagnostics"].Items);
             List<DiagnosticsWaiter> ready;
             bool publish;
             lock (stateLock)
@@ -656,7 +699,7 @@ public sealed class ClangdSession : IDisposable
                 foreach (var waiter in ready) diagnosticsWaiters.Remove(waiter);
             }
 
-            if (publish) DiagnosticsPublished?.Invoke(path, errors);
+            if (publish) DiagnosticsPublished?.Invoke(path, errors, undefinedMacros);
             foreach (var waiter in ready) waiter.Completion.TrySetResult(true);
         }
     }

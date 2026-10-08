@@ -86,8 +86,9 @@ public sealed class NavigationQuery
 public sealed class NavigationResult
 {
     public NavigationResult(IReadOnlyList<NavigationLocation> locations, SemanticSymbol? symbol, BackgroundIndexProgress progress, bool resolvedOnDemand,
-        SourceSymbolKind? symbolKind = null, IReadOnlyDictionary<NavigationLocation, NavigationRole>? roles = null)
+        SourceSymbolKind? symbolKind = null, IReadOnlyDictionary<NavigationLocation, NavigationRole>? roles = null, bool limited = false)
     {
+        Limited = limited;
         Locations = locations;
         Symbol = symbol;
         Progress = progress;
@@ -113,6 +114,9 @@ public sealed class NavigationResult
 
     /// <summary>결과 목록에서 이름을 색칠할 심볼 종류입니다. 목록을 보이지 않는 결과(정의 하나)나 판정하지 못하면 null입니다.</summary>
     public SourceSymbolKind? SymbolKind { get; }
+
+    /// <summary>참조가 상한(<see cref="ClangdNavigator.ReferenceLimit"/>)에 걸려 일부만 받았습니다.</summary>
+    public bool Limited { get; }
 }
 
 /// <summary>
@@ -142,6 +146,7 @@ public sealed class ClangdNavigator : IDisposable
     private readonly Queue<string> touchOrder = new();
     private readonly Dictionary<string, DocumentText> touchTexts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> attemptedCandidates = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ClangdIndexShards shards;
     // Context.Commands의 파일별 명령입니다. 여러 요청이 동시에 처음 만들어도 같은 내용이라 잠그지 않습니다.
     private volatile Dictionary<string, CompileCommand>? commandsByFile;
     // 명령을 덮어쓰기로 준 문서입니다. ClangdDocumentSet이 잠금 안에서 여는 콜백에서만 쓰므로 그 잠금으로 보호됩니다.
@@ -172,6 +177,7 @@ public sealed class ClangdNavigator : IDisposable
         this.options = options;
         Context = context;
         this.session = session;
+        shards = new ClangdIndexShards(Path.Combine(context.Directory, ".cache", "clangd", "index"));
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () =>
         {
@@ -327,6 +333,8 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         var navigator = new ClangdNavigator(options, context, session);
+        // 엔진 파일 근사 명령에 쓸 모듈 위치를 미리 훑어 첫 요청이 기다리지 않게 합니다.
+        if (context.ModuleGraph is { } graph) Observe(Task.Run(graph.Prepare));
         try
         {
             await navigator.StartBackgroundIndexAsync(cancellationToken).ConfigureAwait(false);
@@ -358,7 +366,7 @@ public sealed class ClangdNavigator : IDisposable
             var resolved = false;
             if (MayNeedDefinitionFile(locations))
             {
-                symbol = await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
+                symbol = await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken, Spelled(query)).ConfigureAwait(false);
                 // 요청 파일의 AST가 정의를 알면(헤더의 인라인 정의 등) 다른 파일을 열지 않습니다.
                 if (symbol is { Definition: null })
                 {
@@ -375,7 +383,7 @@ public sealed class ClangdNavigator : IDisposable
             if (locations.Count > 1)
             {
                 // 후보 목록을 보일 때만 종류를 찾습니다. 하나면 바로 이동하므로 추가 요청을 하지 않습니다.
-                symbol ??= await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
+                symbol ??= await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken, Spelled(query)).ConfigureAwait(false);
                 kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
             }
 
@@ -403,14 +411,26 @@ public sealed class ClangdNavigator : IDisposable
             return result;
         }
 
-        var found = await ResolveDefinitionFileAsync(query, symbol, definitions[0].Path, progress, cancellationToken).ConfigureAwait(false);
+        // 확정 뒤 요청 문서에 정의를 다시 물으므로, 후보 파일을 여는 동안 요청 문서가 열린 문서 상한으로 닫히지 않게 붙잡아 둡니다
+        // (2026-10-09 정확도 시험: 닫힌 문서에 요청해 참조 탐색 전체가 실패).
+        documents.Acquire(query.Document);
+        IReadOnlyList<NavigationLocation>? found;
+        try
+        {
+            found = await ResolveDefinitionFileAsync(query, symbol, definitions[0].Path, progress, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            documents.Release(query.Path);
+        }
+
         if (found is null)
         {
             return result;
         }
 
         var (again, _) = await ReferencesCoreAsync(query, progress, cancellationToken).ConfigureAwait(false);
-        return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles);
+        return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles, again.Limited);
     }
 
     private async Task<(NavigationResult Result, IReadOnlyList<NavigationLocation>? Definitions)> ReferencesCoreAsync(NavigationQuery query,
@@ -427,8 +447,8 @@ public sealed class ClangdNavigator : IDisposable
         try
         {
             await AwaitPchCheckAsync(query.Path, opened, progress, cancellationToken).ConfigureAwait(false);
-            var all = session.ReferencesAsync(query.Path, query.Line, query.Character, true, cancellationToken);
-            var symbolInfo = session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken);
+            var all = session.ReferencesCountedAsync(query.Path, query.Line, query.Character, true, cancellationToken);
+            var symbolInfo = session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken, Spelled(query));
             auxiliary.Add(symbolInfo);
             var definition = Quietly(session.DefinitionAsync(query.Path, query.Line, query.Character, roleLimit.Token));
             auxiliary.Add(definition);
@@ -436,18 +456,34 @@ public sealed class ClangdNavigator : IDisposable
             auxiliary.Add(declaration);
             var uses = Quietly(session.ReferencesAsync(query.Path, query.Line, query.Character, false, roleLimit.Token));
             auxiliary.Add(uses);
-            var locations = await all.ConfigureAwait(false);
+            var (locations, rawCount) = await all.ConfigureAwait(false);
+            // clangd는 상한까지 색인에 물은 뒤 일부를 버립니다: 요청 문서 위치(AST 결과를 먼저 넣음)와, 열린 문서의 위치(열린 문서의 참조는
+            // 열린 AST 쪽 색인에서 따로 받음, clangd MergedIndex). 그래서 상한에 걸려도 결과가 상한보다 열린 문서의 참조 수만큼 적을 수 있고,
+            // LSP 응답에는 잘렸다는 표시가 없습니다(2026-10-09 정확도 시험: 상한 5000에 4995개·4459개). 열린 문서의 참조 수만큼 여유를 두고
+            // 판단합니다. 실제 개수가 상한 바로 아래면 잘리지 않았어도 표시될 수 있습니다.
+            var inOpen = locations.Count(l => documents.Contains(l.Path));
+            var limited = rawCount + inOpen >= ReferenceLimit;
             roleLimit.CancelAfter(RoleTimeout);
             var symbol = await symbolInfo.ConfigureAwait(false);
+            if (symbol is not null)
+            {
+                locations = await WithoutRelatedSymbolsAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
+                if (!limited)
+                {
+                    locations = await WithQualifierUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
+                    locations = await WithMacroArgumentUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
+                }
+            }
+
             var kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
             var plain = await uses.ConfigureAwait(false);
             // 결과 수 제한에 걸리면 두 참조 결과가 서로 다른 위치에서 잘려 차이가 선언 묶음이 아닙니다.
-            if (plain is not null && (locations.Count >= ReferenceLimit || plain.Count >= ReferenceLimit)) plain = null;
+            if (plain is not null && (limited || plain.Count >= ReferenceLimit)) plain = null;
             var definitions = await definition.ConfigureAwait(false);
             var roles = ReferenceRoles.Classify(locations, plain, symbol?.Definition, symbol?.Declaration,
                 definitions, await declaration.ConfigureAwait(false));
             cancellationToken.ThrowIfCancellationRequested();
-            return (new NavigationResult(locations, symbol, Progress, false, kind, roles), definitions);
+            return (new NavigationResult(locations, symbol, Progress, false, kind, roles, limited), definitions);
         }
         finally
         {
@@ -461,6 +497,224 @@ public sealed class ClangdNavigator : IDisposable
 
             documents.Release(query.Path);
         }
+    }
+
+    /// <summary>
+    /// clangd가 가상 함수의 참조에 더하는 다른 심볼의 위치를 뺍니다. clangd는 가상 함수를 찾으면 그 함수가 재정의한 기반 함수의 모든 참조
+    /// (기반 선언, <c>Super::F()</c> 호출, 기반 포인터로 부른 곳)와 재정의한 함수들의 선언·정의를 함께 돌려주고 끄는 옵션이 없습니다
+    /// (clangd 22.1 XRefs.cpp). 참조 목록은 찾은 그 함수만 보이므로(2026-10-09 정확도 시험) 위치마다 실제 심볼을 확인합니다.
+    /// </summary>
+    /// <remarks>
+    /// 요청 문서 안의 위치는 열린 AST에 symbolInfo로 묻고, 다른 파일은 clangd 색인 파일의 그 위치 참조 기록을 봅니다(<see cref="ClangdIndexShards"/>).
+    /// 그 위치에 다른 심볼의 기록만 있을 때만 빼고, 기록이 없거나 색인 파일을 믿을 수 없으면(원본이 더 새로움, 형식이 다름) 남깁니다.
+    /// 가상 함수가 아니면 clangd가 더하는 위치가 없으므로 확인하지 않습니다.
+    /// </remarks>
+    private async Task<IReadOnlyList<NavigationLocation>> WithoutRelatedSymbolsAsync(NavigationQuery query, SemanticSymbol symbol,
+        IReadOnlyList<NavigationLocation> locations, CancellationToken cancellationToken)
+    {
+        if (symbol.Ids.Count == 0 || locations.Count == 0 || !IsVirtualFunction(symbol)) return locations;
+        var targets = new HashSet<string>(symbol.Ids, StringComparer.OrdinalIgnoreCase);
+        var dropped = new HashSet<NavigationLocation>();
+        foreach (var group in locations.GroupBy(l => l.Path, StringComparer.OrdinalIgnoreCase))
+        {
+            if (string.Equals(group.Key, query.Path, StringComparison.OrdinalIgnoreCase))
+            {
+                foreach (var location in group)
+                {
+                    var at = await session.SymbolInfoAsync(location.Path, location.Line, location.Character, cancellationToken).ConfigureAwait(false);
+                    if (at is { Ids.Count: > 0 } && !at.Ids.Any(targets.Contains)) dropped.Add(location);
+                }
+
+                continue;
+            }
+
+            var indexed = await Task.Run(() => shards.ReferencesIn(Context.Paths.ToReal(group.Key)), cancellationToken).ConfigureAwait(false);
+            if (indexed is null) continue;
+            var byStart = indexed.ToLookup(r => (r.Line, r.Character));
+            foreach (var location in group)
+            {
+                var here = byStart[(location.Line, location.Character)].ToArray();
+                if (here.Length > 0 && !here.Any(r => targets.Contains(r.SymbolId))) dropped.Add(location);
+            }
+        }
+
+        return dropped.Count == 0 ? locations : locations.Where(l => !dropped.Contains(l)).ToArray();
+    }
+
+    /// <summary>
+    /// 선언 줄(선언 머리에서 <c>;</c>·<c>{</c>까지, 최대 다섯 줄)에 <c>virtual</c>·<c>override</c>·<c>final</c>이 있으면 가상 함수로 봅니다.
+    /// 선언 위치를 모르면(심볼이 여럿) 거짓입니다.
+    /// </summary>
+    private static bool IsVirtualFunction(SemanticSymbol symbol)
+    {
+        if (symbol.Declaration is not { } declaration || symbol.ContainerName.Length == 0) return false;
+        var text = SourceLinePreview.ReadText(declaration.Path);
+        if (text is null) return false;
+        var head = new System.Text.StringBuilder();
+        for (var line = declaration.Line; line < declaration.Line + 5; line++)
+        {
+            var current = SourceLinePreview.LineAt(text, line);
+            head.Append(' ').Append(current);
+            if (current.IndexOf(';') >= 0 || current.IndexOf('{') >= 0) break;
+        }
+
+        return System.Text.RegularExpressions.Regex.IsMatch(head.ToString(), @"\b(virtual|override|final)\b");
+    }
+
+    /// <summary>요청 문서에서 한정자 후보를 확인하는 최대 개수입니다. 후보마다 symbolInfo 요청 하나가 듭니다.</summary>
+    private const int MaxQualifierChecks = 300;
+
+    /// <summary>
+    /// 요청 문서에서 clangd가 빠뜨린 한정자 사용(<c>이름::</c>)을 더합니다. clang 22 색인은 템플릿 인수가 붙은 이름 앞의 한정자
+    /// (<c>std::vector&lt;int&gt;</c>의 <c>std</c>, <c>O::I&lt;int&gt;</c>의 <c>O</c>)를 참조로 남기지 않습니다(clangd 22.1 확인, 2026-10-09 정확도 시험).
+    /// 요청 문서는 AST가 있으므로 결과에 없는 <c>이름::</c> 글자 위치마다 symbolInfo로 같은 심볼인지 확인합니다. 다른 파일은 색인에도 기록이
+    /// 없어 보완하지 않습니다.
+    /// </summary>
+    private async Task<IReadOnlyList<NavigationLocation>> WithQualifierUsesAsync(NavigationQuery query, SemanticSymbol symbol,
+        IReadOnlyList<NavigationLocation> locations, CancellationToken cancellationToken)
+    {
+        var name = symbol.Name;
+        if (symbol.Usr.Length == 0 || symbol.Usr.Contains("@macro@") || name.Length == 0 || char.IsDigit(name[0]) || !name.All(IsWordChar)) return locations;
+        var found = new HashSet<(int, int)>(locations.Where(l => string.Equals(l.Path, query.Path, StringComparison.OrdinalIgnoreCase)).Select(l => (l.Line, l.Character)));
+        var added = new List<NavigationLocation>();
+        var checks = 0;
+        foreach (var (line, character) in QualifierCandidates(query.Document.Text, symbol.Name))
+        {
+            if (found.Contains((line, character))) continue;
+            if (++checks > MaxQualifierChecks) break;
+            var at = await session.SymbolInfoAsync(query.Path, line, character, cancellationToken, symbol.Name).ConfigureAwait(false);
+            if (at is not null && at.Usr == symbol.Usr) added.Add(new NavigationLocation(query.Path, line, character, line, character + symbol.Name.Length));
+        }
+
+        if (added.Count == 0) return locations;
+        return locations.Concat(added).OrderBy(l => l.Path, StringComparer.OrdinalIgnoreCase).ThenBy(l => l.Line).ThenBy(l => l.Character).ToArray();
+    }
+
+    /// <summary>
+    /// 매크로 참조에 clangd가 빠뜨린, 다른 매크로의 인수 안에서 쓴 위치를 더합니다. clangd는 매크로 이름의 위치가 매크로 위치(macro ID)이면
+    /// 기록하지 않는데, <c>##__VA_ARGS__</c>로 넘긴 인수처럼 미리 펼치지 않는 인수 안의 매크로는 바깥 매크로를 펼친 뒤 다시 훑을 때 펼쳐져
+    /// 그렇게 됩니다(예: <c>UE_LOG(…, TEXT("%s"), Cond ? TEXT("a") : TEXT("b"))</c>의 뒤 두 TEXT, 2026-10-09 정확도 시험).
+    /// </summary>
+    /// <remarks>
+    /// clangd에 열린 문서(요청 문서 포함)는 결과에 없는 이름 위치를 symbolInfo로 확인합니다. 닫힌 파일은 결과에 이미 나온 파일만 보며,
+    /// 색인 파일에 그 매크로 기록이 있고(그 파일 문맥에서 같은 매크로가 정의됨) 이름이 놓인 조건부 구역에 다른 참조 기록이 있으면(활성 구역)
+    /// 더합니다. 결과에 한 번도 나오지 않은 파일은 찾지 못합니다.
+    /// </remarks>
+    private async Task<IReadOnlyList<NavigationLocation>> WithMacroArgumentUsesAsync(NavigationQuery query, SemanticSymbol symbol,
+        IReadOnlyList<NavigationLocation> locations, CancellationToken cancellationToken)
+    {
+        if (!symbol.Usr.Contains("@macro@") || symbol.Id.Length == 0 || locations.Count == 0) return locations;
+        var name = symbol.Name;
+        var found = new HashSet<(string, int, int)>(locations.Select(l => (l.Path.ToUpperInvariant(), l.Line, l.Character)));
+        var added = new List<NavigationLocation>();
+        var checks = 0;
+        foreach (var path in new[] { query.Path }.Concat(locations.Select(l => l.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var openText = documents.AcquireIfOpen(path);
+            if (openText is not null)
+            {
+                try
+                {
+                    foreach (var word in CodeWords.Find(openText, name))
+                    {
+                        if (word.Directive || found.Contains((path.ToUpperInvariant(), word.Line, word.Character))) continue;
+                        if (++checks > MaxQualifierChecks) break;
+                        var at = await session.SymbolInfoAsync(path, word.Line, word.Character, cancellationToken, name).ConfigureAwait(false);
+                        if (at is not null && at.Usr == symbol.Usr) added.Add(new NavigationLocation(path, word.Line, word.Character, word.Line, word.Character + name.Length));
+                    }
+                }
+                finally
+                {
+                    documents.Release(path);
+                }
+
+                continue;
+            }
+
+            var text = SourceLinePreview.ReadText(path);
+            if (text is null) continue;
+            var words = CodeWords.Find(text, name).Where(w => !w.Directive && !found.Contains((path.ToUpperInvariant(), w.Line, w.Character))).ToArray();
+            if (words.Length == 0) continue;
+            var indexed = await Task.Run(() => shards.ReferencesIn(Context.Paths.ToReal(path)), cancellationToken).ConfigureAwait(false);
+            if (indexed is null || !indexed.Any(r => r.SymbolId == symbol.Id)) continue;
+            var referencedLines = indexed.Select(r => r.Line).Distinct().OrderBy(l => l).ToArray();
+            var conditionals = CodeWords.ConditionalLines(text);
+            foreach (var word in words)
+            {
+                var before = -1;
+                var after = int.MaxValue;
+                foreach (var line in conditionals)
+                {
+                    if (line < word.Line) before = line;
+                    else if (line > word.Line)
+                    {
+                        after = line;
+                        break;
+                    }
+                }
+
+                if (referencedLines.Any(l => l > before && l < after)) added.Add(new NavigationLocation(path, word.Line, word.Character, word.Line, word.Character + name.Length));
+            }
+        }
+
+        if (added.Count == 0) return locations;
+        return locations.Concat(added).OrderBy(l => l.Path, StringComparer.OrdinalIgnoreCase).ThenBy(l => l.Line).ThenBy(l => l.Character).ToArray();
+    }
+
+    /// <summary>
+    /// 글자에서 <c>이름</c> 바로 뒤에 (템플릿 인수를 건너뛰고) <c>::</c>가 오는 위치입니다. 주석·문자열 안도 후보가 되지만 symbolInfo 확인에서 걸러집니다.
+    /// </summary>
+    public static IEnumerable<(int Line, int Character)> QualifierCandidates(string text, string name)
+    {
+        var lines = text.Split('\n');
+        for (var line = 0; line < lines.Length; line++)
+        {
+            var current = lines[line];
+            var index = 0;
+            while ((index = current.IndexOf(name, index, StringComparison.Ordinal)) >= 0)
+            {
+                var start = index;
+                index += name.Length;
+                if (start > 0 && IsWordChar(current[start - 1]) || index < current.Length && IsWordChar(current[index])) continue;
+                var after = index;
+                while (after < current.Length && current[after] == ' ') after++;
+                if (after < current.Length && current[after] == '<')
+                {
+                    var depth = 0;
+                    for (; after < current.Length; after++)
+                    {
+                        if (current[after] == '<') depth++;
+                        else if (current[after] == '>' && --depth == 0)
+                        {
+                            after++;
+                            break;
+                        }
+                    }
+
+                    while (after < current.Length && current[after] == ' ') after++;
+                }
+
+                if (after + 1 < current.Length && current[after] == ':' && current[after + 1] == ':') yield return (line, start);
+            }
+        }
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
+    private static string? Spelled(NavigationQuery query) => IdentifierAt(query.Document.Text, query.Line, query.Character);
+
+    /// <summary>위치(식별자 안이나 바로 뒤)에 쓰인 식별자입니다. 식별자가 아니면 null입니다. 위치는 0기반 줄과 UTF-16 문자 위치입니다.</summary>
+    public static string? IdentifierAt(string text, int line, int character)
+    {
+        var lineText = SourceLinePreview.LineAt(text, line);
+        if (character < 0 || character > lineText.Length) return null;
+        static bool IsWord(char c) => char.IsLetterOrDigit(c) || c == '_';
+        var start = character;
+        while (start > 0 && IsWord(lineText[start - 1])) start--;
+        var end = character;
+        while (end < lineText.Length && IsWord(lineText[end])) end++;
+        return end == start || char.IsDigit(lineText[start]) ? null : lineText.Substring(start, end - start);
     }
 
     /// <summary>표시 보조 요청의 결과입니다. 시간 상한·취소·요청 거절·연결 끊김은 null(근거 없음)로 둡니다.</summary>
@@ -639,20 +893,46 @@ public sealed class ClangdNavigator : IDisposable
     /// 분석에 실패하므로(테스트 전용 UE 샘플: 정의·참조 0개), 처음 열 때 자기 명령(헤더는 소속 모듈의 명령)을 덮어쓰기로 줍니다.
     /// 색인 단위가 이미 그 파일을 담고 있어 background index는 최신 여부만 확인하고 다시 분석하지 않았습니다(같은 샘플 0.7초, 2026-10-09 측정).
     /// 공유 PCH 없이 준 문서는 첫 진단에 오류가 있으면 PCH를 넣어 다시 분석합니다(<see cref="OnDiagnostics"/>).
+    /// 색인 단위에 없는 파일(엔진 파일, 명령이 없는 프로젝트 모듈 파일)은 모듈 규칙으로 만든 근사 명령을 줍니다. clangd의 추정 명령은
+    /// 프로젝트 모듈의 것이라 다른 모듈 헤더를 찾지 못해 심볼을 잃었습니다(2026-10-09 정확도 시험: 엔진 파일 다수).
     /// </summary>
     private void OpenDocument(string path, string text, int version)
     {
-        if (Context.Plan is { } plan && documentCommandsSent.Add(path) && plan.DocumentCommand(path) is { } choice)
+        if (Context.Plan is { } plan && documentCommandsSent.Add(path))
         {
-            if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
+            if (plan.DocumentCommand(path) is { } choice)
             {
-                lock (pchGate) pchPending.Add(path);
-            }
+                if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
+                {
+                    lock (pchGate) pchPending.Add(path);
+                }
 
-            session.UpdateCompileCommands(new[] { choice.Command });
+                session.UpdateCompileCommands(new[] { choice.Command });
+            }
+            else if (ApproximateCommand(path) is { } command)
+            {
+                session.UpdateCompileCommands(new[] { command });
+            }
         }
 
         session.OpenDocument(path, text, version);
+    }
+
+    /// <summary>
+    /// database 명령이 없는 Unreal C++ 파일의 근사 명령입니다(<see cref="UnrealCompileCommands.Synthesize"/>). 엔진 파일은 include를 스스로
+    /// 갖추므로 공유 PCH를 빼고, 프로젝트 파일은 공유 PCH를 남깁니다. 만들 수 없으면 null입니다.
+    /// </summary>
+    private CompileCommand? ApproximateCommand(string path)
+    {
+        if (Context.Kind != CompileContextKind.Unreal || HasCommand(path) ||
+            string.Equals(Path.GetFullPath(path), Path.GetFullPath(Context.IndexStartPath), StringComparison.OrdinalIgnoreCase) ||
+            !DefinitionCandidates.IsSource(path) && !DefinitionCandidates.IsHeader(path))
+        {
+            return null;
+        }
+
+        var engine = IsEngine(path);
+        return UnrealCompileCommands.Synthesize(path, Context.Commands, Context.OverrideDirectory, sharedPrecompiledHeader: !engine, graph: Context.ModuleGraph);
     }
 
     /// <summary>
@@ -662,15 +942,16 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     /// <remarks>
     /// 같은 묶음의 앞 구성원이 포함한 헤더에 기대는 파일은 묶음 색인은 통과해도 혼자 열면 실패할 수 있어 묶음 판단과 따로 봅니다.
-    /// 오류 원인을 가리지 않고 빌드 명령(PCH 포함)으로 돌아가며, 문서마다 세션당 한 번만 봅니다.
+    /// 오류 원인을 가리지 않고 빌드 명령(PCH 포함)으로 돌아가며, 문서마다 세션당 한 번만 봅니다. 오류가 없어도 조건식에 정의되지 않은 매크로를
+    /// 썼으면(PCH가 정의하던 매크로라 그 구역이 비활성으로 분석됨, <see cref="ConditionMacros"/>) 같은 방식으로 돌아갑니다.
     /// </remarks>
-    private void OnDiagnostics(string path, DocumentErrors? errors)
+    private void OnDiagnostics(string path, DocumentErrors? errors, bool undefinedConditionMacros)
     {
         // 대기 목록에서 빼는 것과 전환 등록을 한 잠금 안에서 해, 그 사이에 들어온 요청이 전환 전 분석으로 답받지 않게 합니다(피드백 검토 36).
         // 잠금 순서는 pchGate → 계획·세션 잠금이며, 세션은 자기 잠금을 쥔 채 이 콜백을 부르지 않습니다.
         lock (pchGate)
         {
-            if (!pchPending.Remove(path) || errors is null) return;
+            if (!pchPending.Remove(path) || errors is null && !undefinedConditionMacros) return;
             if (Context.Plan?.DocumentCommand(path, pch: true) is not { } choice) return;
             // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다.
             var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
@@ -813,13 +1094,16 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
-    /// <summary>폴더에 <paramref name="sinceUtc"/> 뒤에 쓴 파일이 있는지 봅니다. 읽지 못하면 없다고 봅니다.</summary>
+    /// <summary>
+    /// 색인 폴더에 <paramref name="sinceUtc"/> 뒤에 쓴 색인 파일(<c>*.idx</c>)이 있는지 봅니다. clangd는 시작할 때마다 같은 폴더의
+    /// <c>.gitignore</c>를 다시 쓰므로 색인 파일만 봅니다. 읽지 못하면 없다고 봅니다.
+    /// </summary>
     public static bool IndexWrittenSince(string directory, DateTime sinceUtc)
     {
         try
         {
             if (!Directory.Exists(directory)) return false;
-            foreach (var file in new DirectoryInfo(directory).EnumerateFiles())
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*.idx"))
             {
                 if (file.LastWriteTimeUtc > sinceUtc) return true;
             }
@@ -912,7 +1196,7 @@ public sealed class ClangdNavigator : IDisposable
             // 엔진 cpp와 명령이 없는 Unreal 프로젝트 파일은 근사 명령을 줍니다. 명령이 있는 파일은 database의 명령을 그대로 씁니다.
             // 그 밖(명령 없는 일반 프로젝트 파일)은 clangd가 가까운 파일의 명령으로 추정합니다.
             var command = engine || Context.Kind == CompileContextKind.Unreal && !HasCommand(candidate)
-                ? UnrealCompileCommands.Synthesize(candidate, Context.Commands, Context.OverrideDirectory, sharedPrecompiledHeader: !engine)
+                ? UnrealCompileCommands.Synthesize(candidate, Context.Commands, Context.OverrideDirectory, sharedPrecompiledHeader: !engine, graph: Context.ModuleGraph)
                 : null;
             var text = engine && command is null ? null : SourceLinePreview.ReadText(candidate);
             if (text is null)
