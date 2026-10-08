@@ -8,7 +8,7 @@ using VisualBoost.Core.Analysis;
 namespace VisualBoost.Core.SemanticNavigation;
 
 /// <summary>
-/// 색인하지 않은 엔진 cpp에서 정의를 확정할 때 열어 볼 후보 파일을 고릅니다.
+/// 색인에 없는 정의(엔진 cpp, database 밖 프로젝트 cpp)를 확정할 때 열어 볼 후보 파일을 고릅니다.
 /// </summary>
 /// <remarks>
 /// 후보 하나를 확인하는 데 대형 TU 분석(수 초)이 들므로, 이름 인덱스에서 같은 이름·소속의 함수가 있는 cpp를
@@ -21,6 +21,8 @@ public static class DefinitionCandidates
     private static readonly Regex TypeOrMacroLine = new(
         @"^\s*(template\s*<.*>\s*)?((class|struct|union|enum|namespace|typedef|using)\b|#\s*define\b)",
         RegexOptions.CultureInvariant);
+    private static readonly Regex DeletedOrPure = new(@"=\s*(0|delete)\s*;", RegexOptions.CultureInvariant);
+    private static readonly Regex GeneratedEvent = new(@"\b(BlueprintImplementableEvent|BlueprintNativeEvent)\b", RegexOptions.CultureInvariant);
 
     public static bool IsHeader(string path) => HeaderExtensions.Contains(Path.GetExtension(path));
 
@@ -28,6 +30,32 @@ public static class DefinitionCandidates
 
     /// <summary>위치의 줄이 타입·별칭·매크로 정의처럼 보이면 헤더가 곧 정의이므로 cpp를 찾지 않습니다.</summary>
     public static bool LooksLikeTypeOrMacro(string lineText) => TypeOrMacroLine.IsMatch(lineText);
+
+    /// <summary>
+    /// 선언이 소스 cpp에 본문이 없는 함수(순수 가상 <c>= 0</c>, <c>= delete</c>, 본문을 Unreal 코드 생성기가 만드는
+    /// <c>BlueprintImplementableEvent</c>·<c>BlueprintNativeEvent</c>)처럼 보이면 true입니다. 후보 cpp를 열어도 정의가 없어
+    /// 요청마다 대형 TU 분석 시간만 쓰므로 요청 시점 확정을 하지 않습니다.
+    /// </summary>
+    /// <param name="line">0부터 센 선언 줄입니다. 바로 위 <c>UFUNCTION(...)</c>은 앞 선언이 끝난 줄까지 최대 3줄 봅니다.</param>
+    public static bool LooksLikeNoSourceBody(string text, int line)
+    {
+        var lines = text.Split('\n');
+        if (line < 0 || line >= lines.Length) return false;
+        if (DeletedOrPure.IsMatch(lines[line])) return true;
+        for (var i = line - 1; i >= 0 && i >= line - 3; i--)
+        {
+            var previous = lines[i].Trim();
+            if (previous.EndsWith(";", StringComparison.Ordinal) || previous.EndsWith("}", StringComparison.Ordinal) ||
+                previous.EndsWith("{", StringComparison.Ordinal))
+            {
+                break;
+            }
+
+            if (GeneratedEvent.IsMatch(previous)) return true;
+        }
+
+        return false;
+    }
 
     /// <param name="name">찾는 함수의 이름(소속 제외).</param>
     /// <param name="container">clangd가 알려 준 소속(<c>UPackage</c>, <c>UE::Foo::</c> 등). 없으면 빈 문자열.</param>

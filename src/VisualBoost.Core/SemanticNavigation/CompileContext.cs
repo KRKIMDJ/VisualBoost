@@ -166,7 +166,8 @@ public static class CompileContextBuilder
                 {
                     var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(result.Commands));
                     var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0}" +
-                                  (result.Supplemented > 0 ? $", 빌드 기록 없는 파일 {result.Supplemented:N0}개 보완)" : ")");
+                                  (result.Supplemented > 0 ? $", 빌드 기록 없는 파일 {result.Supplemented:N0}개 보완" : string.Empty) +
+                                  (result.UnreadableDirectories > 0 ? $", 읽지 못해 건너뛴 소스 폴더 {result.UnreadableDirectories:N0}개" : string.Empty) + ")";
                     return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths);
                 }
 

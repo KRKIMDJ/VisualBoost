@@ -558,7 +558,8 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     /// <remarks>
     /// 엔진 헤더는 엔진 cpp를 색인하지 않는 범위 결정 때문이고(근사 명령이 필요해 Unreal만), 프로젝트 헤더는 첫 색인이 끝나지 않았거나
-    /// 정의 파일에 명령이 없던 경우입니다. 타입·별칭·매크로 줄은 헤더가 곧 정의이므로 제외합니다.
+    /// 정의 파일에 명령이 없던 경우입니다. 타입·별칭·매크로 줄은 헤더가 곧 정의이므로, 순수 가상·삭제 함수와 생성 코드에 본문이 있는
+    /// Unreal 이벤트는 소스 cpp에 정의가 없으므로 제외합니다.
     /// </remarks>
     private bool MayNeedDefinitionFile(IReadOnlyList<NavigationLocation> locations)
     {
@@ -574,7 +575,8 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         var text = SourceLinePreview.ReadText(location.Path);
-        return text is not null && !DefinitionCandidates.LooksLikeTypeOrMacro(SourceLinePreview.LineAt(text, location.Line));
+        return text is not null && !DefinitionCandidates.LooksLikeTypeOrMacro(SourceLinePreview.LineAt(text, location.Line)) &&
+               !DefinitionCandidates.LooksLikeNoSourceBody(text, location.Line);
     }
 
     /// <summary>
@@ -596,6 +598,9 @@ public sealed class ClangdNavigator : IDisposable
             cancellationToken.ThrowIfCancellationRequested();
             var candidate = candidates[i];
             var engine = IsEngine(candidate);
+            // 첫 색인이 끝났고 database에 명령이 있는 파일은 이미 색인되었으므로 열어도 새 정보가 없습니다.
+            // 정의가 원래 소스에 없는 함수(외부 라이브러리 선언 등)에서 요청마다 후보 분석 시간을 쓰지 않게 합니다.
+            if (Progress.Completed && HasCommand(candidate)) continue;
             lock (attemptedCandidates)
             {
                 // 한 번 연 후보는 background index에 남으므로 내용이 바뀌기 전에는 다시 열어도 새 정보가 없습니다.

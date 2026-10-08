@@ -37,7 +37,7 @@ public sealed class UnrealBuildVariant
 public sealed class UnrealCompileCommandResult
 {
     public UnrealCompileCommandResult(IReadOnlyList<CompileCommand> commands, UnrealBuildVariant variant, int modules, int responseFiles,
-        int unityMembers, int skippedGenerated, int missingSources, int supplemented = 0)
+        int unityMembers, int skippedGenerated, int missingSources, int supplemented = 0, int unreadableDirectories = 0)
     {
         Commands = commands;
         Variant = variant;
@@ -47,10 +47,14 @@ public sealed class UnrealCompileCommandResult
         SkippedGenerated = skippedGenerated;
         MissingSources = missingSources;
         Supplemented = supplemented;
+        UnreadableDirectories = unreadableDirectories;
     }
 
     /// <summary>응답 파일이 없어 같은 모듈 명령이나 근사 명령으로 보완한 프로젝트 소스 수입니다.</summary>
     public int Supplemented { get; }
+
+    /// <summary>보완할 소스를 찾다가 접근 거부·경로 길이 초과 등으로 읽지 못해 건너뛴 폴더 수입니다.</summary>
+    public int UnreadableDirectories { get; }
 
     public IReadOnlyList<CompileCommand> Commands { get; }
 
@@ -83,6 +87,15 @@ public static class UnrealCompileCommands
 {
     private const int MaxResponseFileBytes = 4 * 1024 * 1024;
     private static readonly Regex UnityInclude = new("^\\s*#include\\s+\"([^\"]+)\"", RegexOptions.Multiline | RegexOptions.CultureInvariant);
+
+    // 응답 파일 없는 소스를 보완할 때 들어가지 않는 폴더입니다. 외부 라이브러리 소스와 Win64 대상으로 컴파일하지 않는
+    // Unreal 플랫폼 전용 폴더(Windows·Win64·Microsoft는 남김)입니다.
+    private static readonly HashSet<string> SkippedSupplementFolders = new(StringComparer.OrdinalIgnoreCase)
+    {
+        "ThirdParty", "Intermediate", "Binaries",
+        "Android", "IOS", "TVOS", "VisionOS", "Mac", "Apple", "Linux", "LinuxArm64", "Unix", "HoloLens",
+        "PS4", "PS5", "XboxOne", "XboxOneGDK", "XSX", "WinGDK", "Switch"
+    };
     internal static readonly string[] DropWithValue = { "/experimental:log", "/sourceDependencies" };
     internal static readonly string[] DropPrefixes = { "/Yu", "/Yc", "/Fp", "/Fo", "/Fd", "/Fa", "/analyze", "/errorReport", "/d1", "/d2" };
 
@@ -203,9 +216,9 @@ public static class UnrealCompileCommands
             }
         }
 
-        var supplemented = SupplementMissing(projectDirectory, commands, overrideDirectory, cancellationToken);
+        var (supplemented, unreadable) = SupplementMissing(projectDirectory, commands, overrideDirectory, cancellationToken);
         return new UnrealCompileCommandResult(commands.Values.OrderBy(c => c.File, StringComparer.OrdinalIgnoreCase).ToArray(), variant,
-            modules, responseFiles, unityMembers, skippedGenerated, missingSources, supplemented);
+            modules, responseFiles, unityMembers, skippedGenerated, missingSources, supplemented, unreadable);
     }
 
     /// <summary>
@@ -215,9 +228,11 @@ public static class UnrealCompileCommands
     /// 이런 파일은 database에 없어 background index가 처리하지 않으므로, 그 안의 정의·참조는 편집기에서 파일을 열기 전까지
     /// 찾을 수 없었습니다(2026-10-08 회사 사용 피드백). 같은 모듈에 명령이 있으면 그 인자를 그대로 써서 정확하고,
     /// 모듈 전체가 빠졌으면 <see cref="Synthesize"/>의 근사 명령을 씁니다(생성 헤더가 없으면 일부 진단이 남음).
+    /// 이 대상으로 컴파일하지 않는 소스는 보완하지 않습니다: Windows 밖 플랫폼 전용 폴더(Win64 인자로 색인하면 플랫폼별 정의가
+    /// 후보·참조에 섞임), <c>ThirdParty</c> 폴더와 <c>ModuleType.External</c> 모듈(외부 라이브러리 소스까지 색인하면 메모리·CPU가 늘어남).
     /// </remarks>
-    private static int SupplementMissing(string projectDirectory, Dictionary<string, CompileCommand> commands, string? overrideDirectory,
-        CancellationToken cancellationToken)
+    private static (int Added, int Unreadable) SupplementMissing(string projectDirectory, Dictionary<string, CompileCommand> commands,
+        string? overrideDirectory, CancellationToken cancellationToken)
     {
         // 모듈 판정은 폴더마다 *.Build.cs를 찾으므로 폴더 단위로 기억합니다.
         var owners = new Dictionary<string, (string Directory, string Module)?>(StringComparer.OrdinalIgnoreCase);
@@ -239,15 +254,28 @@ public static class UnrealCompileCommands
             if (ModuleOf(command.File) is (string directory, _) && !samples.ContainsKey(directory)) samples[directory] = command;
         }
 
+        var external = new Dictionary<string, bool>(StringComparer.OrdinalIgnoreCase);
+        bool IsExternal(string directory, string module)
+        {
+            if (!external.TryGetValue(directory, out var value))
+            {
+                value = ReadRules(Path.Combine(directory, module + ".Build.cs")).IndexOf("ModuleType.External", StringComparison.Ordinal) >= 0;
+                external[directory] = value;
+            }
+
+            return value;
+        }
+
         var built = commands.Values.ToArray();
         var added = 0;
+        var unreadable = 0;
         foreach (var root in BuildRoots(projectDirectory, "Source"))
         {
-            foreach (var file in SafeSources(root))
+            foreach (var file in SupplementSources(root, ref unreadable, cancellationToken))
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var source = Normalize(file);
-                if (commands.ContainsKey(source) || IsGenerated(source) || ModuleOf(source) is not (string directory, _))
+                if (commands.ContainsKey(source) || IsGenerated(source) || ModuleOf(source) is not (string directory, string module))
                 {
                     continue;
                 }
@@ -258,7 +286,7 @@ public static class UnrealCompileCommands
                     // 마지막 인자가 source입니다(Build 참고). 모듈 정의 헤더·포함 경로가 같은 모듈이므로 그대로 맞습니다.
                     command = new CompileCommand(sample.Directory, source, sample.Arguments.Take(sample.Arguments.Count - 1).Concat(new[] { source }).ToArray());
                 }
-                else if (overrideDirectory is not null && built.Length > 0)
+                else if (overrideDirectory is not null && built.Length > 0 && !IsExternal(directory, module))
                 {
                     command = Synthesize(source, built, overrideDirectory);
                 }
@@ -269,19 +297,48 @@ public static class UnrealCompileCommands
             }
         }
 
-        return added;
+        return (added, unreadable);
     }
 
-    private static IReadOnlyList<string> SafeSources(string root)
+    /// <summary>
+    /// 보완할 소스를 폴더 단위로 모읍니다. 읽지 못한 폴더(접근 거부·경로 길이 초과)는 그 폴더만 건너뛰고 <paramref name="unreadable"/>에 셉니다.
+    /// </summary>
+    private static List<string> SupplementSources(string root, ref int unreadable, CancellationToken cancellationToken)
     {
-        if (!Directory.Exists(root)) return Array.Empty<string>();
+        var sources = new List<string>();
+        if (!Directory.Exists(root)) return sources;
+        var pending = new Stack<string>();
+        pending.Push(root);
+        while (pending.Count > 0)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            var directory = pending.Pop();
+            try
+            {
+                sources.AddRange(Directory.EnumerateFiles(directory).Where(DefinitionCandidates.IsSource));
+                foreach (var child in Directory.EnumerateDirectories(directory))
+                {
+                    if (!SkippedSupplementFolders.Contains(Path.GetFileName(child))) pending.Push(child);
+                }
+            }
+            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+            {
+                unreadable++;
+            }
+        }
+
+        return sources;
+    }
+
+    private static string ReadRules(string path)
+    {
         try
         {
-            return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Where(DefinitionCandidates.IsSource).ToArray();
+            return File.Exists(path) ? File.ReadAllText(path) : string.Empty;
         }
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
         {
-            return Array.Empty<string>();
+            return string.Empty;
         }
     }
 

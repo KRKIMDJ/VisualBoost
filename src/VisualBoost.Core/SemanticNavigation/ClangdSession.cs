@@ -40,11 +40,11 @@ public sealed class ClangdLaunchOptions
     /// 예전 기본값(코어의 1/4)은 큰 Unreal 프로젝트의 첫 색인이 너무 오래 걸렸고(2026-10-07 사용자 피드백), 코어의 절반(0.43.x)은
     /// 색인 중 메모리와 발열이 컸습니다(2026-10-08 회사 사용 피드백). 테스트 전용 UE 5.8 샘플(TU 305개, 16스레드 PC)에서 작업 8개는
     /// 첫 색인 155초·최고 5.1 GB·CPU 970초, 작업 4개는 217초·2.3 GB·823초였습니다. 물리 코어를 넘는 작업은 빨라지는 몫보다 메모리와
-    /// CPU 사용이 더 늘어 그 사이 값을 씁니다. 메모리를 모르면(0) 예전 기본값(코어의 1/4)을 씁니다(2026-10-07 검토).
+    /// CPU 사용이 더 늘어 그 사이 값을 씁니다. 메모리를 모르면(0) 예전 기본값(코어의 1/4)에 같은 상한 8을 둡니다(2026-10-07·2026-10-09 검토).
     /// </remarks>
     public static int DefaultWorkerCount(int processors, long memoryBytes)
     {
-        if (memoryBytes <= 0) return Math.Max(1, processors / 4);
+        if (memoryBytes <= 0) return Math.Max(1, Math.Min(8, processors / 4));
         var byCores = Math.Max(1, Math.Min(8, processors * 3 / 8));
         var gib = memoryBytes / (1024d * 1024 * 1024);
         var byMemory = (int)Math.Floor((gib - 8) / 2.5);
