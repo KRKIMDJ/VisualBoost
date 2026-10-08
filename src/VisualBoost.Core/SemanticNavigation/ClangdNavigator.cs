@@ -52,6 +52,12 @@ public sealed class ClangdNavigatorOptions
     public int MaxDefinitionCandidates { get; set; } = 3;
 
     public TimeSpan CandidateTimeout { get; set; } = TimeSpan.FromSeconds(45);
+
+    /// <summary>Unreal 공유 PCH 헤더를 분석 명령에 넣는 방식입니다.</summary>
+    public UnrealPchMode PchMode { get; set; } = UnrealPchMode.Auto;
+
+    /// <summary>색인 실패를 모아 공유 PCH로 바꾸기 전에 기다리는 시간입니다. 실패마다 database를 다시 쓰지 않게 묶습니다.</summary>
+    public TimeSpan PchSwitchDelay { get; set; } = TimeSpan.FromSeconds(2);
 }
 
 /// <summary>요청 위치와 그때의 편집기 내용입니다. 좌표는 0기반 줄과 UTF-16 문자 위치입니다.</summary>
@@ -138,8 +144,19 @@ public sealed class ClangdNavigator : IDisposable
     private readonly HashSet<string> attemptedCandidates = new(StringComparer.OrdinalIgnoreCase);
     // Context.Commands의 파일별 명령입니다. 여러 요청이 동시에 처음 만들어도 같은 내용이라 잠그지 않습니다.
     private volatile Dictionary<string, CompileCommand>? commandsByFile;
-    // 자기 명령을 덮어쓰기로 준 unity 구성원입니다. ClangdDocumentSet이 잠금 안에서 여는 콜백에서만 쓰므로 그 잠금으로 보호됩니다.
-    private readonly HashSet<string> memberCommandsSent = new(StringComparer.OrdinalIgnoreCase);
+    // 명령을 덮어쓰기로 준 문서입니다. ClangdDocumentSet이 잠금 안에서 여는 콜백에서만 쓰므로 그 잠금으로 보호됩니다.
+    private readonly HashSet<string> documentCommandsSent = new(StringComparer.OrdinalIgnoreCase);
+    // 공유 PCH 전환 상태입니다. pchGate로 보호합니다.
+    private readonly object pchGate = new();
+    // PCH 없이 명령을 주고 첫 진단을 아직 보지 않은 문서입니다.
+    private readonly HashSet<string> pchPending = new(StringComparer.OrdinalIgnoreCase);
+    // 분석 오류로 PCH를 넣어 다시 분석하는 문서와 그 분석의 진단 도착, PCH 명령 보내기입니다.
+    private readonly Dictionary<string, Task> pchReparses = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task> pchSwitches = new(StringComparer.OrdinalIgnoreCase);
+    // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
+    private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
+    private bool pchFlushScheduled;
+    private int pchUnitIndexed;
     private bool touchRunning;
     private int activeRequests;
     private long lastRequestTicks = DateTime.UtcNow.Ticks;
@@ -152,6 +169,16 @@ public sealed class ClangdNavigator : IDisposable
         this.session = session;
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () => Changed?.Invoke();
+        if (context.Plan is { Mode: UnrealPchMode.Auto })
+        {
+            session.IndexFailed += OnIndexFailed;
+            session.DiagnosticsPublished += OnDiagnostics;
+            session.TranslationUnitIndexed += path =>
+            {
+                if (path.EndsWith(UnrealIndexPlan.PchSuffix, StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref pchUnitIndexed, 1);
+            };
+        }
+
         session.Exited += _ =>
         {
             lifetime.Cancel();
@@ -193,6 +220,23 @@ public sealed class ClangdNavigator : IDisposable
     /// <summary>참조 결과 상한입니다. 결과 수가 같으면 잘렸을 수 있습니다.</summary>
     public int ReferenceLimit => session.ReferenceLimit;
 
+    /// <summary>
+    /// 공유 PCH를 넣어 다시 색인한 결과를 쓰려면 clangd를 다시 시작해야 합니다. 호출자는 탐색·색인이 멈춘 동안 다시 시작합니다.
+    /// </summary>
+    /// <remarks>
+    /// clangd는 내용이 같은 파일을 다시 색인하면 이전 색인에 오류가 있었어도 디스크의 색인 파일만 새로 쓰고 메모리의 이전 결과는 그대로
+    /// 씁니다(clangd 22.1, 2026-10-09 확인: 같은 세션에서는 PCH로 다시 색인한 구성원의 참조가 빠지고 다시 시작하면 보임). 그래서 이 세션에서
+    /// PCH 합성 TU를 색인했고 색인이 끝났으며 남은 전환이 없으면 참입니다. 다시 시작한 clangd는 새 색인 파일을 읽으므로 다시 색인하지 않습니다.
+    /// </remarks>
+    public bool NeedsReload
+    {
+        get
+        {
+            if (Volatile.Read(ref pchUnitIndexed) == 0 || !Progress.Completed) return false;
+            lock (pchGate) return !pchFlushScheduled;
+        }
+    }
+
     public string LogPath => Path.Combine(Context.Directory, "clangd.log");
 
     /// <summary>컴파일 문맥을 준비하고 clangd를 시작합니다. 문맥이 없으면 <see cref="SemanticNavigationUnavailableException"/>입니다.</summary>
@@ -205,7 +249,7 @@ public sealed class ClangdNavigator : IDisposable
 
         var compiler = Path.Combine(Path.GetDirectoryName(options.ClangdPath)!, "clang-cl.exe");
         var context = await Task.Run(() => CompileContextBuilder.Prepare(options.SolutionPath, options.CacheRoot, options.EngineRoot,
-            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, options.Sources), cancellationToken).ConfigureAwait(false);
+            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, options.Sources, options.PchMode), cancellationToken).ConfigureAwait(false);
         if (!context.IsAvailable)
         {
             throw new SemanticNavigationUnavailableException(context.Reason ?? "컴파일 명령이 없습니다.");
@@ -264,9 +308,10 @@ public sealed class ClangdNavigator : IDisposable
     {
         using var tracked = TrackRequest();
         SyncOpenDocuments(query);
-        documents.Acquire(query.Document);
+        var opened = documents.Acquire(query.Document);
         try
         {
+            await AwaitPchCheckAsync(query.Path, opened, progress, cancellationToken).ConfigureAwait(false);
             var locations = await session.DefinitionAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
             var symbol = default(SemanticSymbol);
             var resolved = false;
@@ -311,7 +356,7 @@ public sealed class ClangdNavigator : IDisposable
     public async Task<NavigationResult> ReferencesAsync(NavigationQuery query, CancellationToken cancellationToken, IProgress<string>? progress = null)
     {
         using var tracked = TrackRequest();
-        var (result, definitions) = await ReferencesCoreAsync(query, cancellationToken).ConfigureAwait(false);
+        var (result, definitions) = await ReferencesCoreAsync(query, progress, cancellationToken).ConfigureAwait(false);
         if (definitions is null || !MayNeedDefinitionFile(definitions) || result.Symbol is not { Definition: null } symbol)
         {
             return result;
@@ -323,15 +368,15 @@ public sealed class ClangdNavigator : IDisposable
             return result;
         }
 
-        var (again, _) = await ReferencesCoreAsync(query, cancellationToken).ConfigureAwait(false);
+        var (again, _) = await ReferencesCoreAsync(query, progress, cancellationToken).ConfigureAwait(false);
         return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles);
     }
 
     private async Task<(NavigationResult Result, IReadOnlyList<NavigationLocation>? Definitions)> ReferencesCoreAsync(NavigationQuery query,
-        CancellationToken cancellationToken)
+        IProgress<string>? progress, CancellationToken cancellationToken)
     {
         SyncOpenDocuments(query);
-        documents.Acquire(query.Document);
+        var opened = documents.Acquire(query.Document);
         // 역할 표식 근거(선언 제외 참조, 정의·선언 이동)는 표시 보조라 본 요청 뒤에 함께 보내고, 본 결과가 온 뒤 정한 시간까지만 기다립니다.
         // clangd는 한 파일의 AST 요청을 받은 순서대로 하나씩 처리하고 이미 시작한 요청은 취소로 멈추지 않습니다. 그래서 결과 표시에 꼭 필요한
         // symbolInfo와 짧은 정의·선언 요청을 본 요청 바로 뒤에 두고, 본 요청만큼 걸릴 수 있는 선언 제외 참조는 맨 뒤에 보냅니다(2026-10-07 검토).
@@ -340,6 +385,7 @@ public sealed class ClangdNavigator : IDisposable
         var auxiliary = new List<Task>(4);
         try
         {
+            await AwaitPchCheckAsync(query.Path, opened, progress, cancellationToken).ConfigureAwait(false);
             var all = session.ReferencesAsync(query.Path, query.Line, query.Character, true, cancellationToken);
             var symbolInfo = session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken);
             auxiliary.Add(symbolInfo);
@@ -548,18 +594,158 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <summary>
-    /// 문서를 clangd에 엽니다. unity 묶음으로 색인하는 구성원은 database에 자기 명령이 없어 clangd가 다른 파일의 명령을 추정해 분석에
-    /// 실패하므로(테스트 전용 UE 샘플: 정의·참조 0개), 처음 열 때 자기 명령을 덮어쓰기로 줍니다. 묶음 색인이 이미 그 파일을 담고 있어
-    /// background index는 최신 여부만 확인하고 다시 분석하지 않았습니다(같은 샘플 0.7초, 2026-10-09 측정).
+    /// 문서를 clangd에 엽니다. Unreal 프로젝트는 database에 원래 파일 대신 색인 단위 합성 TU만 있어 clangd가 다른 파일의 명령을 추정해
+    /// 분석에 실패하므로(테스트 전용 UE 샘플: 정의·참조 0개), 처음 열 때 자기 명령(헤더는 소속 모듈의 명령)을 덮어쓰기로 줍니다.
+    /// 색인 단위가 이미 그 파일을 담고 있어 background index는 최신 여부만 확인하고 다시 분석하지 않았습니다(같은 샘플 0.7초, 2026-10-09 측정).
+    /// 공유 PCH 없이 준 문서는 첫 진단에 오류가 있으면 PCH를 넣어 다시 분석합니다(<see cref="OnDiagnostics"/>).
     /// </summary>
     private void OpenDocument(string path, string text, int version)
     {
-        if (Context.IsUnitMember(path) && memberCommandsSent.Add(path) && CommandOf(path) is { } command)
+        if (Context.Plan is { } plan && documentCommandsSent.Add(path) && plan.DocumentCommand(path) is { } choice)
         {
-            session.UpdateCompileCommands(new[] { command });
+            if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
+            {
+                lock (pchGate) pchPending.Add(path);
+            }
+
+            session.UpdateCompileCommands(new[] { choice.Command });
         }
 
         session.OpenDocument(path, text, version);
+    }
+
+    /// <summary>
+    /// PCH 없이 명령을 준 문서의 첫 진단에 오류가 있으면 PCH를 넣은 명령으로 바꿉니다. clangd는 열린 문서의 명령이 바뀌면 다시 분석합니다.
+    /// LSP 읽기 스레드에서 호출되므로 명령은 작업 스레드에서 보냅니다(<see cref="ClangdSession.DiagnosticsPublished"/>). 요청은 보내기를 기다린
+    /// 뒤 나가므로(<see cref="AwaitPchCheckAsync"/>) clangd가 다시 분석한 결과로 답합니다.
+    /// </summary>
+    /// <remarks>
+    /// 같은 묶음의 앞 구성원이 포함한 헤더에 기대는 파일은 묶음 색인은 통과해도 혼자 열면 실패할 수 있어 묶음 판단과 따로 봅니다.
+    /// 오류 원인을 가리지 않고 빌드 명령(PCH 포함)으로 돌아가며, 문서마다 세션당 한 번만 봅니다.
+    /// </remarks>
+    private void OnDiagnostics(string path, DocumentErrors? errors)
+    {
+        lock (pchGate)
+        {
+            if (!pchPending.Remove(path) || errors is null) return;
+        }
+
+        if (Context.Plan?.DocumentCommand(path, pch: true) is not { } choice) return;
+        // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다.
+        var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
+        Observe(reparsed);
+        var sent = Task.Run(() => SendSwitched(new[] { choice.Command }));
+        lock (pchGate)
+        {
+            pchReparses[path] = reparsed;
+            pchSwitches[path] = sent;
+        }
+    }
+
+    /// <summary>
+    /// 요청 전에 그 문서의 PCH 판단을 기다립니다. 판단할 문서가 아니면 바로 돌아갑니다. PCH를 넣어 다시 분석하게 되면 진행 문구를 알리고
+    /// 명령을 보낸 뒤 돌아가므로, 이어서 보내는 요청은 clangd가 다시 분석한 뒤 답합니다.
+    /// </summary>
+    private async Task AwaitPchCheckAsync(string path, int version, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        lock (pchGate)
+        {
+            if (!pchPending.Contains(path)) return;
+        }
+
+        await WaitForAnalysisAsync(path, version, options.CandidateTimeout, cancellationToken, reparse: false).ConfigureAwait(false);
+        Task? sent;
+        lock (pchGate)
+        {
+            if (!pchSwitches.TryGetValue(path, out sent)) return;
+        }
+
+        progress?.Report("공유 PCH를 넣어 다시 분석하는 중…");
+        await sent.ConfigureAwait(false);
+    }
+
+    private static void Observe(Task task) =>
+        _ = task.ContinueWith(done => _ = done.Exception, CancellationToken.None,
+            TaskContinuationOptions.OnlyOnFaulted | TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Default);
+
+    /// <summary>
+    /// 문서의 진단(= 분석 완료)을 기다립니다. <paramref name="reparse"/>가 참이고 첫 진단 뒤 PCH를 넣어 다시 분석하게 되었으면 그 진단도
+    /// 기다립니다. 문서를 닫기 전에 분석 결과를 색인에 남겨야 하는 후보 확인·저장 반영에서 씁니다. 시간 상한을 넘으면 기다리지 않고 돌아갑니다.
+    /// </summary>
+    private async Task WaitForAnalysisAsync(string path, int version, TimeSpan limit, CancellationToken cancellationToken, bool reparse = true)
+    {
+        using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
+        timeout.CancelAfter(limit);
+        try
+        {
+            await session.WaitForDiagnosticsAsync(path, version, timeout.Token).ConfigureAwait(false);
+            if (!reparse) return;
+            Task? reparsed;
+            lock (pchGate)
+            {
+                pchReparses.TryGetValue(path, out reparsed);
+            }
+
+            if (reparsed is { IsCompleted: false })
+            {
+                await Task.WhenAny(reparsed, Task.Delay(Timeout.Infinite, timeout.Token)).ConfigureAwait(false);
+                timeout.Token.ThrowIfCancellationRequested();
+            }
+        }
+        catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && !lifetime.IsCancellationRequested)
+        {
+            // 시간 안에 분석이 끝나지 않아도 열어 둔 동안 진행된 분석은 유지됩니다.
+        }
+    }
+
+    /// <summary>
+    /// background index가 분석 오류를 알린 TU를 모읍니다. stderr 읽기 스레드에서 호출되므로 파일 작업은 잠시 뒤 작업 스레드에서 묶어 합니다.
+    /// </summary>
+    private void OnIndexFailed(string translationUnit)
+    {
+        lock (pchGate)
+        {
+            failedUnits.Add(translationUnit);
+            if (pchFlushScheduled) return;
+            pchFlushScheduled = true;
+        }
+
+        _ = Task.Run(FlushFailedUnitsAsync);
+    }
+
+    private async Task FlushFailedUnitsAsync()
+    {
+        try
+        {
+            await Task.Delay(options.PchSwitchDelay, lifetime.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            return;
+        }
+
+        string[] failed;
+        lock (pchGate)
+        {
+            failed = failedUnits.ToArray();
+            failedUnits.Clear();
+            pchFlushScheduled = false;
+        }
+
+        SendSwitched(Context.Plan!.MarkNeedsPch(failed));
+    }
+
+    private void SendSwitched(IReadOnlyList<CompileCommand> commands)
+    {
+        if (commands.Count == 0 || lifetime.IsCancellationRequested) return;
+        try
+        {
+            session.UpdateCompileCommands(commands);
+        }
+        catch (Exception exception) when (exception is LspConnectionClosedException || exception is ObjectDisposedException)
+        {
+            // 종료되면 다음 시작 때 판단 기록으로 같은 명령을 씁니다.
+        }
     }
 
     private void SyncOpenDocuments(NavigationQuery query)
@@ -643,13 +829,8 @@ public sealed class ClangdNavigator : IDisposable
             var version = documents.Acquire(new DocumentText(candidate, text));
             try
             {
-                using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, lifetime.Token);
-                timeout.CancelAfter(options.CandidateTimeout);
-                await session.WaitForDiagnosticsAsync(candidate, version, timeout.Token).ConfigureAwait(false);
-            }
-            catch (OperationCanceledException) when (!cancellationToken.IsCancellationRequested && !lifetime.IsCancellationRequested)
-            {
                 // 시간 안에 분석이 끝나지 않은 후보는 건너뜁니다. 열어 둔 동안 진행된 색인은 유지됩니다.
+                await WaitForAnalysisAsync(candidate, version, options.CandidateTimeout, cancellationToken).ConfigureAwait(false);
             }
             finally
             {
@@ -693,13 +874,12 @@ public sealed class ClangdNavigator : IDisposable
                 var version = documents.Acquire(document);
                 try
                 {
-                    using var timeout = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
-                    timeout.CancelAfter(TimeSpan.FromSeconds(60));
-                    await session.WaitForDiagnosticsAsync(path, version, timeout.Token).ConfigureAwait(false);
+                    // 분석이 오래 걸려도 다음 저장 반영을 막지 않습니다.
+                    await WaitForAnalysisAsync(path, version, TimeSpan.FromSeconds(60), CancellationToken.None).ConfigureAwait(false);
                 }
                 catch (OperationCanceledException)
                 {
-                    // 분석이 오래 걸려도 다음 저장 반영을 막지 않습니다.
+                    // 종료 중입니다.
                 }
                 finally
                 {

@@ -110,11 +110,11 @@ public sealed class UnrealCompileCommandResult
 /// UBT를 다시 실행하지 않고 프로젝트·엔진 폴더에 아무것도 쓰지 않습니다. 근거와 측정은 R&D
 /// `ClangdFindings`의 "일반 빌드 응답 파일 변환"에 있습니다.
 /// - 파일별 응답 파일은 그대로, unity 응답 파일은 unity cpp의 #include 목록으로 개별 cpp에 펼치고 묶음 구성(<see cref="UnityUnit"/>)도
-///   함께 돌려줍니다. 색인은 묶음 단위로 합니다(<see cref="CompileContextBuilder"/>).
+///   함께 돌려줍니다. 색인은 묶음 단위로 합니다(<see cref="UnrealIndexPlan"/>).
 /// - MSVC PCH(/Yu /Yc /Fp)와 출력·로그 옵션을 빼되, /Yu 대상인 PCH 헤더의 강제 include는 텍스트 포함으로 남깁니다.
 ///   Unreal 프로젝트 소스는 공유 PCH가 넣어 주는 엔진 헤더에 기대는 경우가 흔해, 빼면 실제 빌드는 통과하는 TU가 불완전 타입·
 ///   미선언 이름 오류로 분석되고 그 TU의 정의·참조가 색인에서 조용히 빠집니다(2026-10-09 검토: 실제 프로젝트 TU 82개 중 30개 오류,
-///   포함하면 0개). TU마다 큰 헤더를 다시 분석하는 비용(첫 분석 약 2배)은 정확성을 위해 감수합니다. 엔진 cpp 근사 명령은
+///   포함하면 0개). 색인 단위마다 실제로 넣을지는 <see cref="UnrealIndexPlan"/>이 정하고, 엔진 cpp 근사 명령은
 ///   <see cref="Synthesize"/>에서 다시 뺍니다.
 /// - 강제 include는 clang driver가 옆의 MSVC .pch를 자동 선택하지 않도록 -Xclang -include로 바꿉니다.
 /// - UBT 컴파일 작업 경로는 항상 &lt;Engine&gt;/Engine/Source입니다.
@@ -452,6 +452,12 @@ public static class UnrealCompileCommands
         var normalizedFile = Normalize(file);
         return new CompileCommand(baseCommand.Directory, normalizedFile, head.Concat(extra).Concat(new[] { normalizedFile }).ToArray());
     }
+
+    /// <summary>UBT가 만든 PCH 래퍼 헤더(<c>SharedPCH.*</c>, 모듈 전용 <c>PCH.*</c>)의 강제 include를 모두 뺍니다.</summary>
+    public static IReadOnlyList<string> RemovePrecompiledHeaders(IReadOnlyList<string> arguments) => WithoutPrecompiledHeaders(arguments, false);
+
+    /// <summary>UBT가 만든 PCH 래퍼 헤더를 강제 include하는 명령인지 봅니다.</summary>
+    public static bool HasPrecompiledHeader(IReadOnlyList<string> arguments) => WithoutPrecompiledHeaders(arguments, false).Count != arguments.Count;
 
     /// <summary>UBT가 만든 PCH 래퍼 헤더(<c>SharedPCH.*</c>, 모듈 전용 <c>PCH.*</c>)의 강제 include를 뺍니다.</summary>
     private static IReadOnlyList<string> WithoutPrecompiledHeaders(IReadOnlyList<string> arguments, bool keepShared)

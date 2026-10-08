@@ -192,8 +192,11 @@ public sealed class ClangdSession : IDisposable
     private readonly Dictionary<string, int> diagnosticsVersions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DocumentErrors> documentErrors = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<DiagnosticsWaiter> diagnosticsWaiters = new();
+    // 연 문서입니다. 닫을 때 clangd가 보내는 빈 진단을 DiagnosticsPublished로 알리지 않으려고 둡니다.
+    private readonly HashSet<string> openDocuments = new(StringComparer.OrdinalIgnoreCase);
     private readonly StreamWriter? log;
     private long logBytes;
+    private bool keepingMessage = true;
     private BackgroundIndexProgress progress;
     private int disposed;
     private int exitRaised;
@@ -213,6 +216,24 @@ public sealed class ClangdSession : IDisposable
 
     /// <summary>프로세스나 연결이 끝났습니다. 의도한 종료에도 호출됩니다.</summary>
     public event Action<Exception?>? Exited;
+
+    /// <summary>
+    /// background index가 분석 오류가 있는 TU를 색인했습니다(그 TU의 색인은 불완전할 수 있음). 인수는 연 경로 기준 TU 경로입니다.
+    /// clangd stderr 읽기 스레드에서 호출되므로 오래 걸리는 일을 하지 않습니다.
+    /// </summary>
+    public event Action<string>? IndexFailed;
+
+    /// <summary>
+    /// background index가 TU 하나의 색인을 마쳤습니다. 인수는 연 경로 기준 TU 경로입니다. 분석 오류가 있었으면 <see cref="IndexFailed"/>가
+    /// 먼저 호출됩니다. clangd stderr 읽기 스레드에서 호출되므로 오래 걸리는 일을 하지 않습니다.
+    /// </summary>
+    public event Action<string>? TranslationUnitIndexed;
+
+    /// <summary>
+    /// 열린 문서의 최신 진단이 도착했습니다. 인수는 연 경로와 오류 요약(없으면 null)입니다. 그 버전을 기다리는 호출자보다 먼저 호출됩니다.
+    /// LSP 읽기 스레드에서 호출되므로 잠금을 오래 잡거나 clangd에 쓰지 않습니다. 쓰기는 동기식이라 clangd 출력이 차 있으면 서로 기다립니다.
+    /// </summary>
+    public event Action<string, DocumentErrors?>? DiagnosticsPublished;
 
     public BackgroundIndexProgress Progress
     {
@@ -247,7 +268,8 @@ public sealed class ClangdSession : IDisposable
             "--clang-tidy=false",
             "--header-insertion=never",
             "--enable-config=false",
-            "--log=error",
+            // 색인 실패(분석 오류) 알림이 info 수준이라 받습니다. 파일에는 오류와 색인 실패만 남깁니다(OnStandardError).
+            "--log=info",
             "--limit-references=" + options.ReferenceLimit.ToString(CultureInfo.InvariantCulture),
             "-j=" + ClangdLaunchOptions.ResolveWorkerCount(options.WorkerCount).ToString(CultureInfo.InvariantCulture),
             "--compile-commands-dir=" + options.CompileCommandsDirectory
@@ -317,9 +339,12 @@ public sealed class ClangdSession : IDisposable
         connection.Notify("initialized", JsonValue.Object());
     }
 
-    public void OpenDocument(string path, string text, int version) =>
+    public void OpenDocument(string path, string text, int version)
+    {
+        lock (stateLock) openDocuments.Add(path);
         connection.Notify("textDocument/didOpen", JsonValue.Object(("textDocument", JsonValue.Object(
             ("uri", ToUri(path)), ("languageId", LanguageOf(path)), ("version", version), ("text", text)))));
+    }
 
     /// <summary>전체 내용 동기화입니다. 증분 범위 계산 오류로 서버 상태가 어긋나는 위험을 피합니다.</summary>
     public void ChangeDocument(string path, string text, int version) =>
@@ -343,18 +368,25 @@ public sealed class ClangdSession : IDisposable
         {
             diagnosticsVersions.Remove(path);
             documentErrors.Remove(path);
+            openDocuments.Remove(path);
         }
 
         connection.Notify("textDocument/didClose", JsonValue.Object(("textDocument", JsonValue.Object(("uri", ToUri(path))))));
     }
 
     /// <summary>
-    /// 특정 파일의 명령을 공급하거나 바꿉니다. 바뀐 파일은 background index가 다시 처리합니다.
+    /// 특정 파일의 명령을 공급하거나 바꿉니다. 바뀐 파일은 background index가 다시 처리하고, 열린 문서면 clangd가 다시 분석합니다.
     /// 같은 명령을 다시 보내면 무시되므로 외부 변경 반영 수단으로 쓰지 않습니다.
     /// </summary>
+    /// <remarks>
+    /// 파일 키는 Windows 경로 형식(역슬래시)으로 보냅니다. clangd는 명령 저장소에서는 경로를 정규화하지만, 열린 문서를 다시 분석할지는
+    /// 받은 키 문자열이 문서 URI에서 얻은 경로와 같은지로 정합니다(clangd 22.1 확인: 슬래시 키는 열린 문서를 다시 분석하지 않음).
+    /// 문서 URI와 같은 경로 문자열(대소문자 포함)에서 만든 명령을 줘야 합니다.
+    /// </remarks>
     public void UpdateCompileCommands(IEnumerable<CompileCommand> commands) =>
         connection.Notify("workspace/didChangeConfiguration", JsonValue.Object(("settings", JsonValue.Object(
-            ("compilationDatabaseChanges", JsonValue.Object(options.Paths.ToReal(commands.ToArray()).Select(c => new KeyValuePair<string, JsonValue>(c.File,
+            ("compilationDatabaseChanges", JsonValue.Object(options.Paths.ToReal(commands.ToArray()).Select(c => new KeyValuePair<string, JsonValue>(
+                Path.GetFullPath(c.File),
                 JsonValue.Object(("workingDirectory", c.Directory), ("compilationCommand", JsonValue.Array(c.Arguments.Select(a => (JsonValue)a))))))))))));
 
     /// <summary>해당 문서의 진단(= AST 준비)이 <paramref name="minimumVersion"/> 이상으로 도착할 때까지 기다립니다.</summary>
@@ -367,19 +399,34 @@ public sealed class ClangdSession : IDisposable
                 return Task.CompletedTask;
             }
 
-            var waiter = new DiagnosticsWaiter(path, minimumVersion);
-            diagnosticsWaiters.Add(waiter);
-            if (cancellationToken.CanBeCanceled)
-            {
-                cancellationToken.Register(() =>
-                {
-                    lock (stateLock) diagnosticsWaiters.Remove(waiter);
-                    waiter.Completion.TrySetCanceled(cancellationToken);
-                });
-            }
-
-            return waiter.Completion.Task;
+            return AddWaiter(path, minimumVersion, cancellationToken);
         }
+    }
+
+    /// <summary>
+    /// 지금 이후 도착하는 그 문서의 다음 진단을 기다립니다. 내용 변경 없이 명령만 바꿔 다시 분석할 때는 진단 버전이 같아
+    /// <see cref="WaitForDiagnosticsAsync"/>로 구분할 수 없어 씁니다. 명령을 바꾸기 전에 불러야 합니다.
+    /// </summary>
+    public Task WaitForNextDiagnosticsAsync(string path, CancellationToken cancellationToken)
+    {
+        lock (stateLock) return AddWaiter(path, int.MinValue, cancellationToken);
+    }
+
+    /// <summary>진단 대기자를 등록합니다. stateLock 안에서 호출합니다.</summary>
+    private Task AddWaiter(string path, int minimumVersion, CancellationToken cancellationToken)
+    {
+        var waiter = new DiagnosticsWaiter(path, minimumVersion);
+        diagnosticsWaiters.Add(waiter);
+        if (cancellationToken.CanBeCanceled)
+        {
+            cancellationToken.Register(() =>
+            {
+                lock (stateLock) diagnosticsWaiters.Remove(waiter);
+                waiter.Completion.TrySetCanceled(cancellationToken);
+            });
+        }
+
+        return waiter.Completion.Task;
     }
 
     public async Task<IReadOnlyList<NavigationLocation>> DefinitionAsync(string path, int line, int character, CancellationToken cancellationToken) =>
@@ -593,10 +640,13 @@ public sealed class ClangdSession : IDisposable
             var version = parameters["version"].AsInt32() ?? 0;
             var errors = DocumentErrors.From(parameters["diagnostics"].Items);
             List<DiagnosticsWaiter> ready;
+            bool publish;
             lock (stateLock)
             {
                 var known = diagnosticsVersions.TryGetValue(path, out var previous) ? previous : int.MinValue;
-                if (version >= known)
+                var latest = version >= known;
+                publish = latest && openDocuments.Contains(path);
+                if (latest)
                 {
                     // 늦게 도착한 이전 버전의 진단으로 최신 오류 요약을 덮지 않습니다.
                     if (errors is null) documentErrors.Remove(path);
@@ -608,6 +658,7 @@ public sealed class ClangdSession : IDisposable
                 foreach (var waiter in ready) diagnosticsWaiters.Remove(waiter);
             }
 
+            if (publish) DiagnosticsPublished?.Invoke(path, errors);
             foreach (var waiter in ready) waiter.Completion.TrySetResult(true);
         }
     }
@@ -628,18 +679,85 @@ public sealed class ClangdSession : IDisposable
 
     private void OnStandardError(object sender, DataReceivedEventArgs e)
     {
-        if (e.Data is null || log is null)
+        if (e.Data is null)
+        {
+            return;
+        }
+
+        var line = e.Data;
+        var failed = ParseIndexFailure(line);
+        if (failed is not null)
+        {
+            IndexFailed?.Invoke(options.Paths.ToGiven(failed));
+        }
+        else if (ParseIndexedTranslationUnit(line) is string indexed)
+        {
+            TranslationUnitIndexed?.Invoke(options.Paths.ToGiven(indexed));
+        }
+
+        if (log is null)
         {
             return;
         }
 
         lock (stateLock)
         {
+            if (!ShouldLog(line, failed is not null)) return;
             // 로그가 무한히 커지지 않게 상한(8 MiB) 이후는 버립니다.
             if (Volatile.Read(ref disposed) != 0 || logBytes > 8 * 1024 * 1024) return;
-            logBytes += e.Data.Length + 2;
-            log.WriteLine(e.Data);
+            logBytes += line.Length + 2;
+            log.WriteLine(line);
         }
+    }
+
+    /// <summary>
+    /// 파일에 남길 줄인지 정합니다. stateLock 안에서 호출합니다. info 수준은 요청마다 줄이 생겨 오류와 색인 실패만 남기고, 수준 표시 없는
+    /// 이어지는 줄은 앞 메시지를 따릅니다. 비정상 종료 때의 스택 덤프는 수준 표시 없이 오므로 그 시작 줄부터 남깁니다.
+    /// </summary>
+    private bool ShouldLog(string line, bool indexFailure)
+    {
+        if (line.Length > 1 && line[1] == '[' && line[0] is 'E' or 'I' or 'V' or 'D')
+        {
+            keepingMessage = line[0] == 'E' || indexFailure;
+        }
+        else if (line.StartsWith("PLEASE submit", StringComparison.Ordinal) || line.StartsWith("Stack dump", StringComparison.Ordinal) ||
+                 line.StartsWith("Exception Code", StringComparison.Ordinal))
+        {
+            keepingMessage = true;
+        }
+
+        return keepingMessage;
+    }
+
+    private const string FailurePrefix = "] Failed to compile ";
+    private const string FailureSuffix = ", index may be incomplete";
+
+    /// <summary>
+    /// background index의 분석 오류 줄(<c>I[시각] Failed to compile 경로, index may be incomplete</c>)에서 TU 경로를 꺼냅니다.
+    /// clangd가 TU에 컴파일할 수 없는 오류가 있을 때 info 수준으로 남깁니다(clangd 22.1 확인). 형식이 다르면 null입니다.
+    /// </summary>
+    public static string? ParseIndexFailure(string line)
+    {
+        var start = line.IndexOf(FailurePrefix, StringComparison.Ordinal);
+        if (start < 0 || start > 32 || !line.EndsWith(FailureSuffix, StringComparison.Ordinal)) return null;
+        start += FailurePrefix.Length;
+        var length = line.Length - FailureSuffix.Length - start;
+        return length > 0 ? line.Substring(start, length) : null;
+    }
+
+    private const string IndexedPrefix = "] Indexed ";
+
+    /// <summary>
+    /// TU 하나의 색인 완료 줄(<c>I[시각] Indexed 경로 (n symbols, n refs, n files)</c>)에서 TU 경로를 꺼냅니다. 표준 라이브러리 요약 줄이나
+    /// 형식이 다르면 null입니다. 경로에 괄호가 있을 수 있어 마지막 괄호 묶음을 통계로 봅니다.
+    /// </summary>
+    public static string? ParseIndexedTranslationUnit(string line)
+    {
+        var start = line.IndexOf(IndexedPrefix, StringComparison.Ordinal);
+        if (start < 0 || start > 32 || !line.EndsWith(" files)", StringComparison.Ordinal)) return null;
+        start += IndexedPrefix.Length;
+        var end = line.LastIndexOf(" (", StringComparison.Ordinal);
+        return end > start ? line.Substring(start, end - start) : null;
     }
 
     private void OnClosed(Exception? exception)

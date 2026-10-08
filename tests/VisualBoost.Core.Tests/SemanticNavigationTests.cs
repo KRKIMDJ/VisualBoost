@@ -160,6 +160,13 @@ internal static class SemanticNavigationTests
             "큰 기준 사용량이면 정리 기준을 올림: " + policy.EffectiveLimitBytes / (1024 * 1024));
         Check(!policy.ShouldRestart(Sample(5 * Gib)) && policy.ShouldRestart(Sample(6 * Gib)), "올린 기준으로 판단");
         Check(!new ClangdMemoryPolicy(0).ShouldRestart(Sample(64 * Gib)), "기준 0은 정리하지 않음");
+
+        // 색인 결과 다시 읽기는 메모리와 상관없이, 색인·요청이 멈추고 짧은 유휴 뒤에 하되 Solution마다 횟수를 제한합니다.
+        var quiet = Sample(1 * Gib, sinceRequest: ClangdMemoryPolicy.ReloadIdle, sinceStart: TimeSpan.FromSeconds(30));
+        Check(ClangdMemoryPolicy.ShouldReload(true, quiet, 0) && !ClangdMemoryPolicy.ShouldReload(false, quiet, 0) &&
+              !ClangdMemoryPolicy.ShouldReload(true, Sample(1 * Gib, indexing: true), 0) && !ClangdMemoryPolicy.ShouldReload(true, Sample(1 * Gib, busy: true), 0) &&
+              !ClangdMemoryPolicy.ShouldReload(true, Sample(1 * Gib, sinceRequest: TimeSpan.FromSeconds(3)), 0) &&
+              !ClangdMemoryPolicy.ShouldReload(true, quiet, ClangdMemoryPolicy.MaxReloads), "색인 결과 다시 읽기 판단");
     }
 
     public static void RunOwnDefinitionReferences()
@@ -572,15 +579,35 @@ internal static class SemanticNavigationTests
             var written = CompileCommandDatabase.Read(Path.Combine(context.Directory, CompileCommandDatabase.FileName));
             var unitFile = Path.Combine(context.Directory, "units", "Module.Game.1.cpp").Replace('\\', '/');
             var writtenNames = written.Select(c => Path.GetFileName(c.File)).ToArray();
-            Check(context.Kind == CompileContextKind.Unreal && context.Commands.Count == 5 && context.UnitCount == 1 &&
-                  writtenNames.SequenceEqual(new[] { "Module.Game.1.cpp", "Adaptive.cpp", "Solo.cpp", "U3.cpp", Path.GetFileName(context.IndexStartPath) }),
-                "database는 묶음 + 묶이지 않은 파일 + 색인 시작 문서: " + string.Join(",", writtenNames));
+            var plan = context.Plan!;
+            // 묶이지 않은 파일도 같은 이름 다른 폴더와 겹치지 않게 경로 해시를 붙인 합성 TU로 색인합니다.
+            Check(context.Kind == CompileContextKind.Unreal && context.Commands.Count == 5 && plan.GroupedUnitCount == 1 && plan.GroupedMemberCount == 2 &&
+                  writtenNames.Length == 5 && writtenNames[0] == "Module.Game.1.cpp" && writtenNames[1].StartsWith("Adaptive-", StringComparison.Ordinal) &&
+                  writtenNames[2].StartsWith("Solo-", StringComparison.Ordinal) && writtenNames[3].StartsWith("U3-", StringComparison.Ordinal) &&
+                  writtenNames[4] == Path.GetFileName(context.IndexStartPath) &&
+                  written.Take(4).All(c => Path.GetDirectoryName(c.File)!.Replace('\\', '/') == Path.GetDirectoryName(unitFile)!.Replace('\\', '/')),
+                "database는 색인 단위 합성 TU + 색인 시작 문서: " + string.Join(",", writtenNames));
             Check(written[0].File == unitFile && written[0].Arguments.Last() == unitFile && written[0].Arguments.Contains("/DUNIT=1") &&
                   File.ReadAllText(unitFile).EndsWith(Include(Source("U1.cpp")) + Include(Source("U2.cpp")), StringComparison.Ordinal),
                 "합성 TU는 캐시 폴더에 구성원만 포함: " + File.ReadAllText(unitFile));
-            Check(context.IsUnitMember(Path.Combine(source, "U1.cpp")) && context.IsUnitMember(Source("U2.cpp").ToUpperInvariant()) &&
-                  !context.IsUnitMember(Source("U3.cpp")) && !context.IsUnitMember(Source("Solo.cpp")) && context.Summary.Contains("unity 묶음 1개로 2개 색인"),
-                "묶음 구성원 판정과 요약: " + context.Summary);
+            var soloUnit = written[2];
+            Check(soloUnit.Arguments.Contains("/DSOLO=1") && File.ReadAllText(soloUnit.File).EndsWith(Include(Source("Solo.cpp")), StringComparison.Ordinal),
+                "묶이지 않은 파일은 자기 명령으로 감쌈");
+            Check(plan.IsMember(Path.Combine(source, "U1.cpp")) && plan.IsMember(Source("U2.cpp").ToUpperInvariant()) && plan.IsMember(Source("Solo.cpp")) &&
+                  !plan.IsMember(Source("Gone.cpp")) && context.Summary.Contains("unity 묶음 1개로 2개 색인") && !context.Summary.Contains("PCH"),
+                "색인 단위 구성원 판정과 요약: " + context.Summary);
+            var u2Document = plan.DocumentCommand(Source("U2.cpp"));
+            Check(u2Document is { WithoutPch: false } && u2Document.Command.File == Source("U2.cpp") && u2Document.Command.Arguments.Last() == Source("U2.cpp") &&
+                  u2Document.Command.Arguments.Contains("/DUNIT=1"), "구성원 문서는 자기 명령");
+            // 헤더는 소속 모듈의 같은 이름 cpp 명령을, 없으면 경로 순서로 첫 cpp 명령을 빌려 C++로 분석합니다.
+            var header = Path.Combine(source, "Public", "U1.h");
+            var other = Path.Combine(source, "Public", "Other.h");
+            var headerDocument = plan.DocumentCommand(header)!.Command;
+            var otherDocument = plan.DocumentCommand(other)!.Command;
+            Check(headerDocument.File == header.Replace('\\', '/') && headerDocument.Arguments.Last() == headerDocument.File &&
+                  headerDocument.Arguments.Contains("/DUNIT=1") && headerDocument.Arguments.Count(a => a == "/TP") == 1 &&
+                  otherDocument.Arguments.Contains("/DADAPTIVE=1") && plan.DocumentCommand(Path.Combine(root, "Loose.h")) is null,
+                "헤더는 소속 모듈 명령: " + string.Join(" ", headerDocument.Arguments));
 
             // 같은 구성이면 합성 TU를 다시 쓰지 않고(clangd가 묶음을 새로 색인하지 않게), 쓰지 않는 묶음 파일은 지웁니다.
             var stamp = DateTime.UtcNow.AddMinutes(-5);
@@ -594,7 +621,8 @@ internal static class SemanticNavigationTests
             File.Delete(Source("U2.cpp"));
             var single = CompileContextBuilder.Prepare(Path.Combine(project, "Game.sln"), cache, engine, "clang-cl.exe");
             var singleNames = CompileCommandDatabase.Read(Path.Combine(single.Directory, CompileCommandDatabase.FileName)).Select(c => Path.GetFileName(c.File)).ToArray();
-            Check(single.Changed && single.UnitCount == 0 && !single.IsUnitMember(Source("U1.cpp")) && !File.Exists(unitFile) && singleNames.Contains("U1.cpp"),
+            Check(single.Changed && single.Plan!.GroupedUnitCount == 0 && single.Plan.IsMember(Source("U1.cpp")) && !File.Exists(unitFile) &&
+                  singleNames.Any(n => n.StartsWith("U1-", StringComparison.Ordinal)),
                 "구성원이 하나뿐인 묶음은 파일별: " + string.Join(",", singleNames));
         }
         finally
@@ -642,7 +670,7 @@ internal static class SemanticNavigationTests
                 ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
                 EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1
             }, CancellationToken.None).Result;
-            Check(navigator.Context.UnitCount == 1 && navigator.Context.IsUnitMember(u2) && navigator.Context.Commands.Count == 3, "묶음 색인 준비");
+            Check(navigator.Context.Plan is { GroupedUnitCount: 1 } plan && plan.IsMember(u2) && navigator.Context.Commands.Count == 3, "묶음 색인 준비");
             Check(SpinUntil(() => navigator.Progress.Completed, 60000), "묶음 색인 완료");
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
@@ -662,6 +690,188 @@ internal static class SemanticNavigationTests
         finally
         {
             TryDelete(root);
+        }
+    }
+
+    /// <summary>
+    /// 공유 PCH가 든 Unreal 테스트 프로젝트를 만듭니다. 묶음 1(U1, U2)은 U2가 PCH에 기대 PCH 없이 분석하면 실패하고,
+    /// 묶음 2(U4, U5)는 앞 구성원 U4가 Shared.h를 포함해 묶음은 통과하지만 U5 혼자서는 PCH 없이 실패합니다. Solo는 스스로 포함을 갖춥니다.
+    /// </summary>
+    private static (string Project, string Source, string Build) WritePchProject(string root, string extraFlag = "")
+    {
+        var project = Path.Combine(root, "Game");
+        Write(Path.Combine(project, "Game.uproject"), "{}");
+        var source = Path.Combine(project, "Source", "Game");
+        Write(Path.Combine(source, "Game.Build.cs"), "");
+        string Unix(string path) => path.Replace('\\', '/');
+        Write(Path.Combine(source, "Shared.h"), "#pragma once\nstruct FShared { int Value() const; };\n");
+        Write(Path.Combine(source, "Calc.h"), "#pragma once\nint Twice(int Value);\n");
+        Write(Path.Combine(source, "U1.cpp"), "#include \"Calc.h\"\nint Twice(int Value) { return Value * 2; }\n");
+        Write(Path.Combine(source, "U2.cpp"), "#include \"Calc.h\"\nint UseShared(const FShared& S) { return S.Value() + Twice(1); }\n");
+        Write(Path.Combine(source, "U4.cpp"), "#include \"Shared.h\"\nint FShared::Value() const { return 1; }\n");
+        Write(Path.Combine(source, "U5.cpp"), "int UseAgain(const FShared& S) { return S.Value(); }\n");
+        Write(Path.Combine(source, "Solo.cpp"), "#include \"Shared.h\"\nint SoloUse(const FShared& S) { return S.Value(); }\n");
+        var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
+        var pch = Unix(Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "GameEditor", "Development", "UnrealEd", "SharedPCH.UnrealEd.h"));
+        Write(pch, $"#pragma once\n#include \"{Unix(Path.Combine(source, "Shared.h"))}\"\n");
+        string Rsp(string file) => $"\"{Unix(file)}\"\n/I \"{Unix(source)}\"\n/FI\"{pch}\"\n/Yu\"{pch}\"\n{extraFlag}\n/TP\n/std:c++17\n/c\n";
+        string Include(string name) => $"#include \"{Unix(Path.Combine(source, name))}\"\n";
+        var unity1 = Path.Combine(build, "Module.Game.1.cpp");
+        Write(unity1, Include("U1.cpp") + Include("U2.cpp"));
+        Write(unity1 + ".obj.rsp", Rsp(unity1));
+        var unity2 = Path.Combine(build, "Module.Game.2.cpp");
+        Write(unity2, Include("U4.cpp") + Include("U5.cpp"));
+        Write(unity2 + ".obj.rsp", Rsp(unity2));
+        Write(Path.Combine(build, "Solo.cpp.obj.rsp"), Rsp(Path.Combine(source, "Solo.cpp")));
+        return (project, source, build);
+    }
+
+    /// <summary>공유 PCH 사용 방식별 database, 실패 단위의 PCH 전환과 판단 기록, clangd 로그 줄 해석을 확인합니다.</summary>
+    public static void RunUnrealPchPlan()
+    {
+        Check(ClangdSession.ParseIndexFailure("I[03:16:30.489] Failed to compile C:/a b/units/Module.G.1.cpp, index may be incomplete") == "C:/a b/units/Module.G.1.cpp" &&
+              ClangdSession.ParseIndexFailure("I[03:16:30.489] Indexed C:/a.cpp (1 symbols, 2 refs, 3 files)") is null &&
+              ClangdSession.ParseIndexFailure("E[03:16:30.489] something, index may be incomplete") is null, "색인 실패 줄 해석");
+        Check(ClangdSession.ParseIndexedTranslationUnit("I[03:16:30.489] Indexed C:/Program Files (x86)/x.cpp (30902 symbols, 198217 refs, 498 files)") ==
+              "C:/Program Files (x86)/x.cpp" &&
+              ClangdSession.ParseIndexedTranslationUnit("I[03:16:29.278] Indexed c++14 standard library (incomplete due to errors): 11513 symbols, 9185 filtered") is null,
+            "색인 완료 줄 해석(경로의 괄호 유지, 표준 라이브러리 요약 제외)");
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.PchPlan." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var engine = Path.Combine(root, "Engine Root");
+            var (project, source, build) = WritePchProject(root);
+            var solution = Path.Combine(project, "Game.sln");
+            var cache = Path.Combine(root, "cache");
+            string Source(string name) => Path.Combine(source, name).Replace('\\', '/');
+            IReadOnlyList<CompileCommand> Database(CompileContext context) => CompileCommandDatabase.Read(Path.Combine(context.Directory, CompileCommandDatabase.FileName));
+            bool HasPch(IEnumerable<string> arguments) => arguments.Any(a => a.Contains("SharedPCH."));
+
+            var auto = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe");
+            var plan = auto.Plan!;
+            var units = Database(auto).Take(3).ToArray();
+            Check(plan.Mode == UnrealPchMode.Auto && plan.SwitchableUnitCount == 3 && plan.PchUnitCount == 0 && units.All(c => !HasPch(c.Arguments)) &&
+                  units.All(c => c.Arguments.Contains("/I")) && !auto.Summary.Contains("PCH"), "자동은 PCH 없이 색인: " + auto.Summary);
+            var u1 = plan.DocumentCommand(Source("U1.cpp"))!;
+            Check(u1.WithoutPch && !HasPch(u1.Command.Arguments) && HasPch(plan.DocumentCommand(Source("U1.cpp"), pch: true)!.Command.Arguments),
+                "문서 명령도 PCH 없이, 요청하면 PCH 포함");
+
+            var wrapper = units[0].File;
+            Check(wrapper.EndsWith("/units/Module.Game.1.cpp", StringComparison.Ordinal) && plan.MarkNeedsPch(new[] { Source("Solo.cpp") }).Count == 0,
+                "합성 TU가 아닌 경로는 무시");
+            var switched = plan.MarkNeedsPch(new[] { wrapper.Replace('/', '\\').ToUpperInvariant() });
+            var pchWrapper = Path.Combine(auto.Directory, "units", "Module.Game.1.pch.cpp").Replace('\\', '/');
+            var rewritten = Database(auto);
+            Check(switched.Count == 1 && switched[0].File == pchWrapper && HasPch(switched[0].Arguments) && switched[0].Arguments.Last() == pchWrapper &&
+                  File.Exists(pchWrapper) && !File.Exists(wrapper) && rewritten.Any(c => c.File == pchWrapper && HasPch(c.Arguments)) &&
+                  rewritten.Count(c => HasPch(c.Arguments)) == 1 && File.Exists(Path.Combine(auto.Directory, "pch-units.json")),
+                "실패한 단위만 새 경로의 PCH 합성 TU로: " + string.Join(",", rewritten.Select(c => Path.GetFileName(c.File))));
+            // 문서는 단위 판단과 상관없이 PCH 없이 시작합니다(혼자 실패하면 진단을 보고 다시 분석).
+            Check(plan.UnitUsesPch(Source("U2.cpp")) && plan.DocumentCommand(Source("U1.cpp"))!.WithoutPch && !plan.UnitUsesPch(Source("U4.cpp")) &&
+                  plan.MarkNeedsPch(new[] { pchWrapper }).Count == 0 && plan.PchUnitCount == 1, "전환한 단위만 PCH, 문서는 PCH 없이 시작, 다시 알려도 그대로");
+
+            // 판단은 다음 시작에도 남고, 구성(인자)이 바뀌면 버립니다.
+            var restarted = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe");
+            Check(restarted.Plan!.PchUnitCount == 1 && Database(restarted).Any(c => c.File == pchWrapper) && restarted.Summary.Contains("공유 PCH 포함 단위 1개"),
+                "판단 기록으로 다시 시작: " + restarted.Summary);
+            var unity1Rsp = Path.Combine(build, "Module.Game.1.cpp.obj.rsp");
+            File.WriteAllText(unity1Rsp, File.ReadAllText(unity1Rsp).Replace("/TP", "/DCHANGED=1\n/TP"));
+            var changed = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe");
+            Check(changed.Plan!.PchUnitCount == 0 && File.Exists(wrapper) && !File.Exists(pchWrapper), "구성이 바뀌면 PCH 없이 다시 판단");
+
+            var always = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe", pchMode: UnrealPchMode.Always);
+            Check(always.Plan!.PchUnitCount == 3 && Database(always).Take(3).All(c => HasPch(c.Arguments) && c.File.EndsWith(".pch.cpp", StringComparison.Ordinal)) &&
+                  !always.Plan.DocumentCommand(Source("U5.cpp"))!.WithoutPch && always.Plan.MarkNeedsPch(new[] { wrapper }).Count == 0 && always.Summary.Contains("공유 PCH 포함"),
+                "항상은 모든 단위에 PCH");
+            var never = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe", pchMode: UnrealPchMode.Never);
+            Check(never.Plan!.PchUnitCount == 0 && Database(never).All(c => !HasPch(c.Arguments)) && never.Plan.MarkNeedsPch(new[] { wrapper }).Count == 0,
+                "넣지 않음은 실패해도 바꾸지 않음");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    /// <summary>
+    /// 실제 clangd로 자동 PCH를 확인합니다. PCH 없이 색인해 실패한 묶음은 PCH로 다시 색인되어 참조가 채워지고, 묶음은 통과하지만 혼자 열면
+    /// 실패하는 구성원 문서는 PCH를 넣어 다시 분석해 정의를 찾습니다.
+    /// </summary>
+    public static void RunPchAutoIntegration()
+    {
+        var clangd = FindClangd();
+        if (clangd is null)
+        {
+            Console.WriteLine("SKIP: 자동 PCH 통합 시험은 VISUALBOOST_TEST_CLANGD 또는 VS의 C++ Clang 도구가 필요합니다.");
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.PchAuto." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var (project, source, _) = WritePchProject(root);
+            var options = new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
+                EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1, PchSwitchDelay = TimeSpan.FromMilliseconds(200)
+            };
+            var first = ClangdNavigator.StartAsync(options, CancellationToken.None).Result;
+            try
+            {
+                var units = Path.Combine(first.Context.Directory, "units");
+                Check(SpinUntil(() => File.Exists(Path.Combine(units, "Module.Game.1.pch.cpp")), 60000), "실패한 묶음을 PCH로 전환");
+                Check(File.Exists(Path.Combine(units, "Module.Game.2.cpp")) && !File.Exists(Path.Combine(units, "Module.Game.2.pch.cpp")) &&
+                      first.Context.Plan!.PchUnitCount == 1, "통과한 묶음은 PCH 없이 유지");
+                // clangd는 같은 내용의 파일을 다시 색인해도 메모리의 이전(오류) 결과를 그대로 쓰므로 다시 시작이 필요하다고 알립니다.
+                Check(SpinUntil(() => first.NeedsReload, 60000), "PCH 단위 색인 뒤 다시 시작 필요");
+                first.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+            }
+            finally
+            {
+                first.Dispose();
+            }
+
+            using var navigator = ClangdNavigator.StartAsync(options, CancellationToken.None).Result;
+            Check(navigator.Context.Plan!.PchUnitCount == 1 && SpinUntil(() => navigator.Progress.Completed, 30000), "판단 기록으로 다시 시작");
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var solo = Path.Combine(source, "Solo.cpp");
+            var soloText = File.ReadAllText(solo);
+            var soloLine = soloText.Split('\n')[1];
+            var query = new NavigationQuery(new DocumentText(solo, soloText, 1), 1, soloLine.LastIndexOf("Value", StringComparison.Ordinal));
+            var u2 = Path.Combine(source, "U2.cpp");
+            var references = navigator.ReferencesAsync(query, timeout.Token).Result;
+            Check(references.Locations.Any(l => l.Path == u2) && !navigator.NeedsReload,
+                "다시 시작하면 PCH로 다시 색인한 구성원의 참조가 보이고 더 다시 시작하지 않음: " +
+                string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path))));
+
+            var u5 = Path.Combine(source, "U5.cpp");
+            var u5Text = File.ReadAllText(u5);
+            var reports = new List<string>();
+            var definition = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(u5, u5Text, 1), 0, u5Text.IndexOf("Value", StringComparison.Ordinal)),
+                new CollectProgress(reports), timeout.Token).Result;
+            Check(definition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") &&
+                  SpinUntil(() => navigator.ErrorsOf(u5) is null, 10000) && reports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                "혼자 실패하는 구성원 문서는 PCH로 다시 분석: " + string.Join(",", definition.Locations) + " / " + navigator.ErrorsOf(u5)?.FirstMessage + " / " +
+                string.Join("|", reports));
+            navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    /// <summary>진행 문구를 호출 스레드에서 바로 모읍니다(<see cref="Progress{T}"/>는 다른 스레드로 넘겨 순서가 늦을 수 있음).</summary>
+    private sealed class CollectProgress : IProgress<string>
+    {
+        private readonly List<string> reports;
+
+        public CollectProgress(List<string> reports) => this.reports = reports;
+
+        public void Report(string value)
+        {
+            lock (reports) reports.Add(value);
         }
     }
 

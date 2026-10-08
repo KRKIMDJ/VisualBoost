@@ -14,7 +14,7 @@ namespace VisualBoost.SemanticNavigation;
 internal sealed class SemanticNavigationSettings
 {
     public SemanticNavigationSettings(bool enabled, bool startOnSolutionOpen, string clangdPath, int workerCount, bool fallbackToVisualStudio,
-        int memoryLimitMegabytes = 0)
+        int memoryLimitMegabytes = 0, UnrealPchMode pchMode = UnrealPchMode.Auto)
     {
         Enabled = enabled;
         StartOnSolutionOpen = startOnSolutionOpen;
@@ -22,7 +22,11 @@ internal sealed class SemanticNavigationSettings
         WorkerCount = Math.Max(0, workerCount);
         FallbackToVisualStudio = fallbackToVisualStudio;
         MemoryLimitMegabytes = Math.Max(0, memoryLimitMegabytes);
+        PchMode = Enum.IsDefined(typeof(UnrealPchMode), pchMode) ? pchMode : UnrealPchMode.Auto;
     }
+
+    /// <summary>Unreal 공유 PCH 헤더를 분석 명령에 넣는 방식입니다.</summary>
+    public UnrealPchMode PchMode { get; }
 
     /// <summary>clangd 메모리 정리 기준(MB)입니다. 0이면 <see cref="ClangdMemoryPolicy.DefaultLimitBytes"/>입니다.</summary>
     public int MemoryLimitMegabytes { get; }
@@ -41,7 +45,7 @@ internal sealed class SemanticNavigationSettings
 
     /// <summary>실행 중인 clangd를 다시 시작해야 하는 설정 차이입니다.</summary>
     public bool RequiresRestart(SemanticNavigationSettings other) =>
-        !string.Equals(ClangdPath, other.ClangdPath, StringComparison.OrdinalIgnoreCase) || WorkerCount != other.WorkerCount;
+        !string.Equals(ClangdPath, other.ClangdPath, StringComparison.OrdinalIgnoreCase) || WorkerCount != other.WorkerCount || PchMode != other.PchMode;
 }
 
 /// <summary>
@@ -52,6 +56,7 @@ internal sealed class SemanticNavigationSettings
 /// 같은 Solution에서 빌드 완료·옵션 변경 전까지 기억해 매 요청마다 다시 탐색하지 않습니다.
 /// clangd가 비정상 종료하면 잠시 뒤 다시 시작하되, 짧은 시간에 반복되면 몇 분 쉰 뒤 다시 시도합니다.
 /// clangd가 해제한 메모리를 쥐고 있어 정리 기준을 넘으면 유휴 상태에서 다시 시작합니다(<see cref="ClangdMemoryPolicy"/>).
+/// 공유 PCH를 넣어 다시 색인한 결과를 clangd가 메모리에 반영하지 않으므로 그때도 요청이 멈추면 다시 시작합니다(<see cref="ClangdNavigator.NeedsReload"/>).
 /// 문서 알림은 직렬 큐 하나로 보내 같은 문서의 내용이 뒤바뀌어 도착하지 않게 합니다.
 /// 실행 중에는 Solution 폴더의 C++ 소스를 감시해 편집기 밖 변경을 반영합니다. 바뀐 파일이 적으면 하나씩 다시 분석하고,
 /// 많거나(브랜치 전환 등) 삭제가 있으면 다시 시작합니다. 재시작한 clangd는 바뀐 파일만 다시 색인합니다.
@@ -105,6 +110,8 @@ internal sealed class SemanticNavigationService : IDisposable
     private int exitPauses;
     private readonly Timer memoryTimer;
     private ClangdMemoryPolicy memoryPolicy;
+    // 이 Solution을 연 뒤 색인 결과를 다시 읽으려고 다시 시작한 횟수입니다(ClangdMemoryPolicy.ShouldReload).
+    private int reloads;
     // 요청이 탐색기를 받아 간 마지막 시각입니다. 받아 간 뒤 탐색기에 요청을 등록하기 전의 틈에 메모리 정리가 끼지 않게 합니다.
     private DateTime lastAcquireUtc;
     private int disposed;
@@ -201,6 +208,7 @@ internal sealed class SemanticNavigationService : IDisposable
             unexpectedExits.Clear();
             exitPauses = 0;
             memoryPolicy = new ClangdMemoryPolicy(settings.MemoryLimitBytes);
+            reloads = 0;
             folderRetries = 0;
             unavailableReason = null;
             start = solutionPath is not null && settings.Enabled && settings.StartOnSolutionOpen;
@@ -323,6 +331,12 @@ internal sealed class SemanticNavigationService : IDisposable
                     ? $"상태: 색인 중 {progress.Done:N0}/{progress.Total:N0}"
                     : progress.Completed ? "상태: 준비됨(색인 완료)" : "상태: 준비됨");
                 lines.Add("컴파일 명령: " + current.Context.Summary);
+                if (current.Context.Plan is { SwitchableUnitCount: > 0 } plan)
+                {
+                    var mode = plan.Mode switch { UnrealPchMode.Always => "항상", UnrealPchMode.Never => "넣지 않음", _ => "자동" };
+                    lines.Add($"공유 PCH: {mode} · 포함한 색인 단위 {plan.PchUnitCount:N0}/{plan.SwitchableUnitCount:N0}개");
+                }
+
                 lines.Add("clangd: " + clangdPath + $" (PID {current.ProcessId})");
                 lines.Add($"메모리 정리 기준: {memoryPolicy.EffectiveLimitBytes / (1024 * 1024):N0} MB(넘으면 탐색하지 않는 동안 다시 시작)");
                 lines.Add("캐시: " + current.Context.Directory);
@@ -422,6 +436,7 @@ internal sealed class SemanticNavigationService : IDisposable
                 SolutionPath = solution,
                 EngineRoot = FindEngineRoot(solution),
                 WorkerCount = options.WorkerCount,
+                PchMode = options.PchMode,
                 FindSymbols = name => fileIndex.FindSymbol(name),
                 FindByStem = stem => fileIndex.FindByStem(stem)
             }, cancellationToken).ConfigureAwait(false);
@@ -607,7 +622,8 @@ internal sealed class SemanticNavigationService : IDisposable
 
     /// <summary>
     /// clangd가 해제한 뒤에도 쥐고 있는 메모리가 정리 기준을 넘었고 색인·요청이 없는 유휴 상태면 다시 시작해 돌려받습니다
-    /// (<see cref="ClangdMemoryPolicy"/>). 다시 시작한 clangd는 저장된 색인을 읽어 이어 갑니다. 타이머 스레드에서 호출됩니다.
+    /// (<see cref="ClangdMemoryPolicy"/>). 공유 PCH로 다시 색인한 결과를 읽어야 할 때도 같은 방식으로 다시 시작합니다.
+    /// 다시 시작한 clangd는 저장된 색인을 읽어 이어 갑니다. 타이머 스레드에서 호출됩니다.
     /// </summary>
     /// <remarks>
     /// 판단과 탐색기 떼어 내기는 같은 잠금 안에서 합니다. 표본을 잰 뒤 다른 경로(설정 변경·Solution 닫기·종료)가 탐색기를 바꿨거나
@@ -643,23 +659,33 @@ internal sealed class SemanticNavigationService : IDisposable
         // 탐색기를 받아 간 요청은 탐색기에 등록하기 전이라도 최근 요청으로 봅니다.
         var lastRequest = current.LastRequestUtc > acquired ? current.LastRequestUtc : acquired;
         var sample = new ClangdMemorySample(bytes, current.Progress.Active, current.IsBusy, now - lastRequest, now - current.StartedUtc);
+        var needsReload = current.NeedsReload;
         long limit;
+        bool reload;
         ClangdNavigator? stopped;
         SourceChangeMonitor? watcher;
         lock (gate)
         {
-            if (observed != generation || !ReferenceEquals(navigator, current) || lastAcquireUtc != acquired || Volatile.Read(ref disposed) != 0 ||
-                !memoryPolicy.ShouldRestart(sample))
+            if (observed != generation || !ReferenceEquals(navigator, current) || lastAcquireUtc != acquired || Volatile.Read(ref disposed) != 0)
             {
                 return;
             }
 
+            // 색인 결과 다시 읽기를 먼저 봅니다. 메모리 정책의 판단은 다시 시작을 정하면 상태가 바뀌므로 필요할 때만 묻습니다.
+            reload = ClangdMemoryPolicy.ShouldReload(needsReload, sample, reloads);
+            if (!reload && !memoryPolicy.ShouldRestart(sample))
+            {
+                return;
+            }
+
+            if (reload) reloads++;
             limit = memoryPolicy.EffectiveLimitBytes;
             (stopped, watcher) = DetachLocked(null);
         }
 
-        ActivityLog.LogInformation("VisualBoost/SemanticNavigation",
-            $"clangd 메모리 {bytes / (1024 * 1024):N0} MB가 정리 기준 {limit / (1024 * 1024):N0} MB를 넘어 유휴 상태에서 다시 시작합니다.");
+        ActivityLog.LogInformation("VisualBoost/SemanticNavigation", reload
+            ? "공유 PCH를 넣어 다시 색인한 결과를 읽도록 clangd를 다시 시작합니다."
+            : $"clangd 메모리 {bytes / (1024 * 1024):N0} MB가 정리 기준 {limit / (1024 * 1024):N0} MB를 넘어 유휴 상태에서 다시 시작합니다.");
         Release(stopped, watcher);
         BeginStart();
     }

@@ -101,6 +101,19 @@ public sealed class ClangdMemoryPolicy
         return true;
     }
 
+    /// <summary>색인 결과를 다시 읽으려고 다시 시작하기 전에 기다리는 요청 없는 시간입니다.</summary>
+    public static readonly TimeSpan ReloadIdle = TimeSpan.FromSeconds(10);
+
+    /// <summary>한 Solution을 연 동안 색인 결과를 다시 읽으려고 다시 시작하는 최대 횟수입니다. 색인 파일을 남기지 못하는 경우의 반복을 막습니다.</summary>
+    public const int MaxReloads = 3;
+
+    /// <summary>
+    /// 색인 결과를 다시 읽으려고(<see cref="ClangdNavigator.NeedsReload"/>) 지금 다시 시작할지 정합니다. 결과가 틀린 채 남지 않도록 메모리 기준과
+    /// 상관없이, 색인·요청이 멈추고 <see cref="ReloadIdle"/>이 지나면 다시 시작합니다.
+    /// </summary>
+    public static bool ShouldReload(bool needsReload, ClangdMemorySample sample, int reloads) =>
+        needsReload && reloads < MaxReloads && !sample.Indexing && !sample.Busy && sample.SinceLastRequest >= ReloadIdle;
+
     /// <summary>옵션 값(MB)을 상한으로 바꿉니다. 0 이하면 이 PC의 <see cref="DefaultLimitBytes"/>입니다.</summary>
     public static long ResolveLimitBytes(int megabytes) =>
         megabytes > 0 ? megabytes * 1024L * 1024 : DefaultLimitBytes(PhysicalMemory.TotalBytes());

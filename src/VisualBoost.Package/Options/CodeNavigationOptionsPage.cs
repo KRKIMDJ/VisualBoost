@@ -1,7 +1,9 @@
 using System;
 using System.ComponentModel;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Microsoft.VisualStudio.Shell;
+using VisualBoost.Core.SemanticNavigation;
 using VisualBoost.SemanticNavigation;
 
 namespace VisualBoost.Options;
@@ -40,16 +42,69 @@ public sealed class CodeNavigationOptionsPage : DialogPage
         set => memoryLimitMegabytes = value <= 0 ? 0 : Math.Max(1024, Math.Min(65536, value));
     }
 
+    [Category("정의·참조 탐색"), DisplayName("Unreal 공유 PCH 포함"), DefaultValue(UnrealPchMode.Auto)]
+    [Description("Unreal 프로젝트를 분석할 때 빌드의 공유 PCH 헤더를 넣는 방식입니다. 자동은 넣지 않고 색인한 뒤 분석 오류가 난 파일만 넣어 다시 분석합니다. 항상 넣으면 첫 색인과 메모리가 몇 배 늘고, 넣지 않으면 공유 PCH에 기대는 파일의 정의·참조가 빠질 수 있습니다.")]
+    [TypeConverter(typeof(UnrealPchModeConverter))]
+    public UnrealPchMode PchMode { get; set; } = UnrealPchMode.Auto;
+
     [Category("정의·참조 탐색"), DisplayName("사용할 수 없을 때 기본 탐색 실행"), DefaultValue(true)]
     [Description("clangd나 컴파일 명령이 없을 때 Visual Studio 기본 정의 이동·참조 찾기를 대신 실행합니다.")]
     public bool FallbackToVisualStudio { get; set; } = true;
 
     internal SemanticNavigationSettings CreateSettings() =>
-        new(Enabled, StartOnSolutionOpen, ClangdPath?.Trim().Trim('"') ?? string.Empty, WorkerCount, FallbackToVisualStudio, MemoryLimitMegabytes);
+        new(Enabled, StartOnSolutionOpen, ClangdPath?.Trim().Trim('"') ?? string.Empty, WorkerCount, FallbackToVisualStudio, MemoryLimitMegabytes, PchMode);
 
     protected override void OnApply(PageApplyEventArgs e)
     {
         base.OnApply(e);
         if (e.ApplyBehavior != ApplyKind.Cancel) SemanticNavigationRuntime.Service?.ApplySettings(CreateSettings());
+    }
+}
+
+/// <summary>
+/// 옵션 창에는 한국어 문구로 보이고, 설정 저장(불변 문화권)에는 enum 이름을 씁니다. 표시 문구를 바꿔도 저장된 설정이 그대로 읽힙니다.
+/// </summary>
+internal sealed class UnrealPchModeConverter : EnumConverter
+{
+    private static readonly (UnrealPchMode Mode, string Label)[] Labels =
+    {
+        (UnrealPchMode.Auto, "자동(오류 난 파일만)"),
+        (UnrealPchMode.Always, "항상"),
+        (UnrealPchMode.Never, "넣지 않음")
+    };
+
+    public UnrealPchModeConverter()
+        : base(typeof(UnrealPchMode))
+    {
+    }
+
+    public override object ConvertTo(ITypeDescriptorContext context, CultureInfo culture, object value, Type destinationType)
+    {
+        if (destinationType == typeof(string) && value is UnrealPchMode mode && !Equals(culture, CultureInfo.InvariantCulture))
+        {
+            foreach (var (candidate, label) in Labels)
+            {
+                if (candidate == mode) return label;
+            }
+        }
+
+        return base.ConvertTo(context, culture, value, destinationType);
+    }
+
+    public override object ConvertFrom(ITypeDescriptorContext context, CultureInfo culture, object value)
+    {
+        if (value is string text)
+        {
+            text = text.Trim();
+            foreach (var (mode, label) in Labels)
+            {
+                if (string.Equals(label, text, StringComparison.Ordinal)) return mode;
+            }
+
+            // 알 수 없는 저장값(이전 버전에 없던 이름 등)은 기본값으로 읽습니다.
+            return Enum.TryParse<UnrealPchMode>(text, true, out var parsed) && Enum.IsDefined(typeof(UnrealPchMode), parsed) ? parsed : UnrealPchMode.Auto;
+        }
+
+        return base.ConvertFrom(context, culture, value);
     }
 }
