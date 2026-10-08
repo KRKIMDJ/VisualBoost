@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -12,14 +13,21 @@ namespace VisualBoost.SemanticNavigation;
 
 internal sealed class SemanticNavigationSettings
 {
-    public SemanticNavigationSettings(bool enabled, bool startOnSolutionOpen, string clangdPath, int workerCount, bool fallbackToVisualStudio)
+    public SemanticNavigationSettings(bool enabled, bool startOnSolutionOpen, string clangdPath, int workerCount, bool fallbackToVisualStudio,
+        int memoryLimitMegabytes = 0)
     {
         Enabled = enabled;
         StartOnSolutionOpen = startOnSolutionOpen;
         ClangdPath = clangdPath ?? string.Empty;
         WorkerCount = Math.Max(0, workerCount);
         FallbackToVisualStudio = fallbackToVisualStudio;
+        MemoryLimitMegabytes = Math.Max(0, memoryLimitMegabytes);
     }
+
+    /// <summary>clangd 메모리 정리 기준(MB)입니다. 0이면 <see cref="ClangdMemoryPolicy.DefaultLimitBytes"/>입니다.</summary>
+    public int MemoryLimitMegabytes { get; }
+
+    public long MemoryLimitBytes => ClangdMemoryPolicy.ResolveLimitBytes(MemoryLimitMegabytes);
 
     public bool Enabled { get; }
 
@@ -42,7 +50,8 @@ internal sealed class SemanticNavigationSettings
 /// <remarks>
 /// 시작은 첫 요청이나 Solution 열기 때 작업 스레드에서 합니다. 쓸 수 없는 이유(경로·빌드 응답 파일 없음 등)는
 /// 같은 Solution에서 빌드 완료·옵션 변경 전까지 기억해 매 요청마다 다시 탐색하지 않습니다.
-/// clangd가 비정상 종료하면 다음 요청에서 다시 시작하되, 반복되면 중지합니다.
+/// clangd가 비정상 종료하면 잠시 뒤 다시 시작하되, 짧은 시간에 반복되면 몇 분 쉰 뒤 다시 시도합니다.
+/// clangd가 해제한 메모리를 쥐고 있어 정리 기준을 넘으면 유휴 상태에서 다시 시작합니다(<see cref="ClangdMemoryPolicy"/>).
 /// 문서 알림은 직렬 큐 하나로 보내 같은 문서의 내용이 뒤바뀌어 도착하지 않게 합니다.
 /// 실행 중에는 Solution 폴더의 C++ 소스를 감시해 편집기 밖 변경을 반영합니다. 바뀐 파일이 적으면 하나씩 다시 분석하고,
 /// 많거나(브랜치 전환 등) 삭제가 있으면 다시 시작합니다. 재시작한 clangd는 바뀐 파일만 다시 색인합니다.
@@ -50,6 +59,13 @@ internal sealed class SemanticNavigationSettings
 internal sealed class SemanticNavigationService : IDisposable
 {
     private const int MaxUnexpectedExits = 3;
+
+    // 이 시간 안에 MaxUnexpectedExits번 종료하면 잠시 쉬었다가 다시 시도합니다. 예전에는 Solution을 다시 열 때까지 멈춰
+    // 메모리 부족 등으로 몇 번 종료된 뒤 탐색을 전혀 쓸 수 없었습니다(2026-10-08 회사 사용 피드백).
+    private static readonly TimeSpan ExitWindow = TimeSpan.FromMinutes(10);
+    private static readonly TimeSpan ExitPause = TimeSpan.FromMinutes(5);
+
+    private static readonly TimeSpan MemoryCheckInterval = TimeSpan.FromSeconds(30);
 
     // 하나씩 다시 분석하면 TU마다 작업 스레드 하나로 전체 분석을 하므로, 이보다 많으면 병렬 재색인하는 재시작이 빠릅니다.
     private const int MaxReloadsPerBatch = 16;
@@ -77,10 +93,12 @@ internal sealed class SemanticNavigationService : IDisposable
     private CancellationTokenSource? startCancellation;
     private string? unavailableReason;
     private bool unavailableRetryable;
-    private DateTime unavailableAt;
+    private DateTime unavailableRetryAt;
     private int folderRetries;
     private string? clangdPath;
-    private int unexpectedExits;
+    private readonly Queue<DateTime> unexpectedExits = new();
+    private readonly Timer memoryTimer;
+    private ClangdMemoryPolicy memoryPolicy;
     private int disposed;
 
     /// <param name="sourcesProvider">C++ 프로젝트 목록과 활성 Solution 구성을 UI thread에서 모읍니다.</param>
@@ -91,10 +109,15 @@ internal sealed class SemanticNavigationService : IDisposable
         this.settings = settings;
         this.sourcesProvider = sourcesProvider;
         cacheRoot = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "VisualBoost", "Clangd");
+        memoryPolicy = new ClangdMemoryPolicy(settings.MemoryLimitBytes);
+        memoryTimer = new Timer(_ => CheckMemory(), null, MemoryCheckInterval, MemoryCheckInterval);
     }
 
     /// <summary>시작·종료·색인 진행이 바뀌었습니다. 임의 스레드에서 호출됩니다.</summary>
     public event Action? StateChanged;
+
+    /// <summary>새 clangd 탐색기가 준비되었습니다. 활성 문서를 다시 예열할 때 씁니다. 임의 스레드에서 호출됩니다.</summary>
+    public event Action? NavigatorStarted;
 
     public SemanticNavigationSettings Settings
     {
@@ -142,6 +165,7 @@ internal sealed class SemanticNavigationService : IDisposable
             restart = value.Enabled && navigator is not null && value.RequiresRestart(previous);
             start = value.Enabled && !previous.Enabled && value.StartOnSolutionOpen && solutionPath is not null;
             unavailableReason = null;
+            if (value.MemoryLimitMegabytes != previous.MemoryLimitMegabytes) memoryPolicy = new ClangdMemoryPolicy(value.MemoryLimitBytes);
         }
 
         if (!value.Enabled)
@@ -165,7 +189,8 @@ internal sealed class SemanticNavigationService : IDisposable
         lock (gate)
         {
             solutionPath = string.IsNullOrWhiteSpace(path) ? null : path;
-            unexpectedExits = 0;
+            unexpectedExits.Clear();
+            memoryPolicy = new ClangdMemoryPolicy(settings.MemoryLimitBytes);
             folderRetries = 0;
             unavailableReason = null;
             start = solutionPath is not null && settings.Enabled && settings.StartOnSolutionOpen;
@@ -238,7 +263,7 @@ internal sealed class SemanticNavigationService : IDisposable
             if (navigator is { HasExited: false } current) return current;
             if (unavailableReason is not null)
             {
-                if (!unavailableRetryable || DateTime.UtcNow - unavailableAt < RetryInterval) throw new SemanticNavigationUnavailableException(unavailableReason);
+                if (!unavailableRetryable || DateTime.UtcNow < unavailableRetryAt) throw new SemanticNavigationUnavailableException(unavailableReason);
                 unavailableReason = null;
             }
 
@@ -287,6 +312,7 @@ internal sealed class SemanticNavigationService : IDisposable
                     : progress.Completed ? "상태: 준비됨(색인 완료)" : "상태: 준비됨");
                 lines.Add("컴파일 명령: " + current.Context.Summary);
                 lines.Add("clangd: " + clangdPath + $" (PID {current.ProcessId})");
+                lines.Add($"메모리 정리 기준: {memoryPolicy.EffectiveLimitBytes / (1024 * 1024):N0} MB(넘으면 탐색하지 않는 동안 다시 시작)");
                 lines.Add("캐시: " + current.Context.Directory);
             }
             else
@@ -302,6 +328,7 @@ internal sealed class SemanticNavigationService : IDisposable
     public void Dispose()
     {
         if (Interlocked.Exchange(ref disposed, 1) != 0) return;
+        memoryTimer.Dispose();
         ClangdNavigator? current;
         SourceChangeMonitor? watcher;
         lock (gate)
@@ -399,6 +426,8 @@ internal sealed class SemanticNavigationService : IDisposable
             created.Changed += () => OnNavigatorChanged(created);
             if (created.HasExited) OnNavigatorChanged(created);
             RaiseStateChanged();
+            // 시작 전에 들어온 활성 문서 예열은 탐색기가 없어 버려졌고, 다시 시작하면 열린 문서의 분석이 사라지므로 다시 예열합니다.
+            if (!created.HasExited) NavigatorStarted?.Invoke();
             return created;
         }
         catch (SemanticNavigationUnavailableException exception)
@@ -433,7 +462,7 @@ internal sealed class SemanticNavigationService : IDisposable
             starting = null;
             unavailableReason = reason;
             unavailableRetryable = retryable;
-            unavailableAt = DateTime.UtcNow;
+            unavailableRetryAt = DateTime.UtcNow + RetryInterval;
             retryInBackground = retryable && settings.StartOnSolutionOpen && solutionPath is not null && Directory.Exists(solutionPath) &&
                                 folderRetries++ < MaxFolderRetries;
         }
@@ -462,6 +491,7 @@ internal sealed class SemanticNavigationService : IDisposable
         if (source.HasExited)
         {
             var unexpected = false;
+            var paused = false;
             SourceChangeMonitor? watcher = null;
             lock (gate)
             {
@@ -471,10 +501,17 @@ internal sealed class SemanticNavigationService : IDisposable
                     watcher = monitor;
                     monitor = null;
                     unexpected = true;
-                    unexpectedExits++;
-                    if (unexpectedExits >= MaxUnexpectedExits)
+                    var now = DateTime.UtcNow;
+                    unexpectedExits.Enqueue(now);
+                    while (unexpectedExits.Count > 0 && now - unexpectedExits.Peek() > ExitWindow) unexpectedExits.Dequeue();
+                    if (unexpectedExits.Count >= MaxUnexpectedExits)
                     {
-                        unavailableReason = $"clangd가 반복해서 종료되어 중지했습니다. 로그: {source.LogPath}";
+                        unexpectedExits.Clear();
+                        paused = true;
+                        unavailableReason = $"clangd가 {ExitWindow.TotalMinutes:N0}분 안에 {MaxUnexpectedExits}번 종료되어 {ExitPause.TotalMinutes:N0}분 쉰 뒤 다시 시도합니다. " +
+                                            $"로그: {source.LogPath}";
+                        unavailableRetryable = true;
+                        unavailableRetryAt = now + ExitPause;
                     }
                 }
             }
@@ -488,17 +525,22 @@ internal sealed class SemanticNavigationService : IDisposable
                 int observed;
                 lock (gate)
                 {
-                    restart = unavailableReason is null && settings.StartOnSolutionOpen;
+                    restart = (paused || unavailableReason is null) && settings.StartOnSolutionOpen;
                     observed = generation;
                 }
 
                 if (restart)
                 {
-                    // 남은 색인을 이어 가도록 잠시 뒤 다시 시작합니다. 반복 종료는 위 상한에서 멈춥니다.
-                    _ = Task.Delay(TimeSpan.FromSeconds(2)).ContinueWith(_ =>
+                    // 남은 색인을 이어 가도록 잠시 뒤 다시 시작합니다. 짧은 시간에 반복 종료하면 더 오래 쉰 뒤 시작합니다.
+                    _ = Task.Delay(paused ? ExitPause : TimeSpan.FromSeconds(2)).ContinueWith(_ =>
                     {
                         bool same;
-                        lock (gate) same = observed == generation;
+                        lock (gate)
+                        {
+                            same = observed == generation;
+                            if (same && paused) unavailableReason = null;
+                        }
+
                         if (same) BeginStart();
                     }, TaskScheduler.Default);
                 }
@@ -512,6 +554,50 @@ internal sealed class SemanticNavigationService : IDisposable
     {
         Stop(null);
         BeginStart();
+    }
+
+    /// <summary>
+    /// clangd가 해제한 뒤에도 쥐고 있는 메모리가 정리 기준을 넘었고 색인·요청이 없는 유휴 상태면 다시 시작해 돌려받습니다
+    /// (<see cref="ClangdMemoryPolicy"/>). 다시 시작한 clangd는 저장된 색인을 읽어 이어 갑니다. 타이머 스레드에서 호출됩니다.
+    /// </summary>
+    private void CheckMemory()
+    {
+        ClangdNavigator? current;
+        int observed;
+        lock (gate)
+        {
+            current = navigator;
+            observed = generation;
+        }
+
+        if (current is not { HasExited: false } || Volatile.Read(ref disposed) != 0) return;
+        long bytes;
+        try
+        {
+            using var process = Process.GetProcessById(current.ProcessId);
+            bytes = process.PrivateMemorySize64;
+        }
+        catch (Exception exception) when (exception is ArgumentException || exception is InvalidOperationException ||
+                                          exception is System.ComponentModel.Win32Exception)
+        {
+            // 확인하는 사이 종료된 경우입니다. 종료 처리는 Changed 알림이 맡습니다.
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        var sample = new ClangdMemorySample(bytes, current.Progress.Active, current.IsBusy, now - current.LastRequestUtc, now - current.StartedUtc);
+        bool restart;
+        long limit;
+        lock (gate)
+        {
+            restart = observed == generation && ReferenceEquals(navigator, current) && memoryPolicy.ShouldRestart(sample);
+            limit = memoryPolicy.EffectiveLimitBytes;
+        }
+
+        if (!restart) return;
+        ActivityLog.LogInformation("VisualBoost/SemanticNavigation",
+            $"clangd 메모리 {bytes / (1024 * 1024):N0} MB가 정리 기준 {limit / (1024 * 1024):N0} MB를 넘어 유휴 상태에서 다시 시작합니다.");
+        Restart();
     }
 
     private void Stop(string? reason)

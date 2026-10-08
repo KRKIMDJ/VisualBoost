@@ -23,6 +23,7 @@ internal static class Program
         Run("참조 위치의 정의·선언 역할 판정", SemanticNavigationTests.RunReferenceRoles);
         Run("클래스 자신의 정의 이름 참조 제외", SemanticNavigationTests.RunOwnDefinitionReferences);
         Run("clangd 색인 작업 수 기본값", SemanticNavigationTests.RunWorkerDefaults);
+        Run("clangd 메모리 정리 판단", SemanticNavigationTests.RunMemoryPolicy);
         Run("링크를 거친 Solution의 clangd 결과 경로 보정", SemanticNavigationTests.RunPathAliases);
         Run("LSP 연결 요청·통지·취소·끊김", SemanticNavigationTests.RunConnection);
         Run("Unreal 응답 파일 compilation database", SemanticNavigationTests.RunUnrealCommands);
@@ -34,7 +35,7 @@ internal static class Program
         Run("MSBuild 설계 시점 명령 통합(vcxproj → clangd)", SemanticNavigationTests.RunMsBuildIntegration);
         Run("Ninja 빌드 파일 명령·폴더 작업 영역", SemanticNavigationTests.RunNinjaCommands);
         Run("편집기 밖 소스 변경 감시", SemanticNavigationTests.RunSourceChangeMonitor);
-        Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진 정의·저장·외부 변경 반영)", SemanticNavigationTests.RunNavigatorIntegration);
+        Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진·프로젝트 정의·저장·외부 변경 반영)", SemanticNavigationTests.RunNavigatorIntegration);
         Run("독립 문서 색상 스캐너·취소·상한·성능", QuickColorTests.Run);
         Run("일반 C++ 선언·정의 생성", CodeGenerationTests.Run);
         Run("빠른 인클루드 및 주석 파일 링크", EditorToolsTests.Run);

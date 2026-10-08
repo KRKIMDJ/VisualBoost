@@ -29,11 +29,15 @@ public sealed class ClangdNavigatorOptions
     /// <summary>Unreal 엔진 설치 루트. Unreal 프로젝트가 아니거나 찾지 못했으면 null.</summary>
     public string? EngineRoot { get; set; }
 
-    /// <summary>0이면 논리 코어의 1/4입니다.</summary>
+    /// <summary>0이면 <see cref="ClangdLaunchOptions.DefaultWorkerCount"/>로 정합니다.</summary>
     public int WorkerCount { get; set; }
 
     /// <summary>clangd에 동시에 열어 둘 문서 수입니다. 문서마다 preamble·AST 메모리를 씁니다.</summary>
-    public int DocumentCapacity { get; set; } = 8;
+    /// <remarks>
+    /// 테스트 전용 UE 5.8 샘플에서 문서 하나를 열 때마다 private 메모리가 120~520 MB(평균 약 350 MB) 늘어 8개면 약 2.8 GB였습니다
+    /// (2026-10-08 측정). 활성 문서와 최근에 찾은 문서 두 개만 유지하고, 그보다 오래된 문서는 다시 찾을 때 분석합니다(Unreal 파일 약 3.6초).
+    /// </remarks>
+    public int DocumentCapacity { get; set; } = 3;
 
     /// <summary>엔진 정의 후보를 고를 이름 인덱스 조회. 없으면 헤더와 이름이 같은 cpp만 봅니다.</summary>
     public Func<string, IReadOnlyList<SourceSymbolLocation>>? FindSymbols { get; set; }
@@ -44,7 +48,8 @@ public sealed class ClangdNavigatorOptions
     /// <summary>compile_commands.json이 없을 때 명령을 얻을 빌드 도구와 Solution 구성입니다.</summary>
     public CompileCommandSources Sources { get; set; } = new();
 
-    public int MaxEngineCandidates { get; set; } = 3;
+    /// <summary>정의가 색인에 없을 때 요청 시점에 열어 볼 cpp 수입니다(엔진·프로젝트 공통).</summary>
+    public int MaxDefinitionCandidates { get; set; } = 3;
 
     public TimeSpan CandidateTimeout { get; set; } = TimeSpan.FromSeconds(45);
 }
@@ -109,8 +114,8 @@ public sealed class NavigationResult
 /// </summary>
 /// <remarks>
 /// 범위 결정: 프로젝트 TU는 background index로 전부 색인하고, 엔진은 프로젝트 TU가 포함한 헤더까지만 색인합니다.
-/// 엔진 cpp에만 있는 정의는 요청 시점에 후보 cpp에 근사 명령을 공급하고 열어 확정합니다. 확정한 파일은
-/// background index에 남아 다음 요청부터 바로 찾습니다.
+/// 엔진 cpp에만 있는 정의는 요청 시점에 후보 cpp에 근사 명령을 공급하고 열어 확정합니다. 프로젝트 정의가 아직 색인에 없을 때
+/// (첫 색인 중, 명령이 없던 파일)도 같은 방식으로 후보 cpp를 열어 확정합니다. 확정한 파일은 background index에 남아 다음 요청부터 바로 찾습니다.
 /// 최신성: 편집기에서 저장한 문서는 clangd에 열려 있으면 내용과 저장을 알리고, 아니면 저장된 내용으로 열었다가
 /// 분석이 끝나면 닫습니다. clangd는 파일 감시 통지만으로는 닫힌 파일을 다시 색인하지 않기 때문입니다.
 /// 편집기 밖에서 바뀐 파일(<see cref="Reload"/>)도 디스크 내용으로 같은 방식을 씁니다.
@@ -131,7 +136,11 @@ public sealed class ClangdNavigator : IDisposable
     private readonly Queue<string> touchOrder = new();
     private readonly Dictionary<string, DocumentText> touchTexts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> attemptedCandidates = new(StringComparer.OrdinalIgnoreCase);
+    // Context.Commands의 파일 집합입니다. 여러 요청이 동시에 처음 만들어도 같은 내용이라 잠그지 않습니다.
+    private volatile HashSet<string>? commandFiles;
     private bool touchRunning;
+    private int activeRequests;
+    private long lastRequestTicks = DateTime.UtcNow.Ticks;
     private int disposed;
 
     private ClangdNavigator(ClangdNavigatorOptions options, CompileContext context, ClangdSession session)
@@ -158,6 +167,26 @@ public sealed class ClangdNavigator : IDisposable
     public bool HasExited => session.HasExited;
 
     public int ProcessId => session.ProcessId;
+
+    /// <summary>이 탐색기를 시작한 시각(UTC)입니다.</summary>
+    public DateTime StartedUtc { get; } = DateTime.UtcNow;
+
+    /// <summary>마지막 탐색 요청이 시작하거나 끝난 시각(UTC)입니다. 요청이 없었으면 시작 시각입니다.</summary>
+    public DateTime LastRequestUtc => new(Interlocked.Read(ref lastRequestTicks), DateTimeKind.Utc);
+
+    /// <summary>탐색 요청이나 저장 반영이 진행 중입니다. 메모리 정리 재시작을 미룰 때 씁니다.</summary>
+    public bool IsBusy
+    {
+        get
+        {
+            lock (touchGate)
+            {
+                if (touchRunning) return true;
+            }
+
+            return Volatile.Read(ref activeRequests) > 0;
+        }
+    }
 
     /// <summary>참조 결과 상한입니다. 결과 수가 같으면 잘렸을 수 있습니다.</summary>
     public int ReferenceLimit => session.ReferenceLimit;
@@ -228,6 +257,7 @@ public sealed class ClangdNavigator : IDisposable
 
     public async Task<NavigationResult> DefinitionAsync(NavigationQuery query, IProgress<string>? progress, CancellationToken cancellationToken)
     {
+        using var tracked = TrackRequest();
         SyncOpenDocuments(query);
         documents.Acquire(query.Document);
         try
@@ -235,12 +265,13 @@ public sealed class ClangdNavigator : IDisposable
             var locations = await session.DefinitionAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
             var symbol = default(SemanticSymbol);
             var resolved = false;
-            if (NeedsEngineDefinition(locations))
+            if (MayNeedDefinitionFile(locations))
             {
                 symbol = await session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
-                if (symbol is not null)
+                // 요청 파일의 AST가 정의를 알면(헤더의 인라인 정의 등) 다른 파일을 열지 않습니다.
+                if (symbol is { Definition: null })
                 {
-                    var found = await ResolveEngineDefinitionAsync(query, symbol, locations[0].Path, progress, cancellationToken).ConfigureAwait(false);
+                    var found = await ResolveDefinitionFileAsync(query, symbol, locations[0].Path, progress, cancellationToken).ConfigureAwait(false);
                     if (found is not null)
                     {
                         locations = found;
@@ -265,7 +296,34 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
-    public async Task<NavigationResult> ReferencesAsync(NavigationQuery query, CancellationToken cancellationToken)
+    /// <summary>
+    /// 참조를 찾습니다. 함수 정의가 색인에 없으면(첫 색인 중이거나 명령이 없던 파일) 정의 파일을 요청 시점에 열어 확정한 뒤 다시 찾습니다.
+    /// </summary>
+    /// <remarks>
+    /// 정의 파일을 편집기에서 열어 두지 않으면 정의·참조가 빠지던 문제(2026-10-08 회사 사용 피드백)에 대응합니다.
+    /// 판단 근거는 같은 요청에서 함께 받은 정의 이동 결과이며, 그 결과가 늦었으면(역할 상한 초과) 열지 않습니다.
+    /// </remarks>
+    public async Task<NavigationResult> ReferencesAsync(NavigationQuery query, CancellationToken cancellationToken, IProgress<string>? progress = null)
+    {
+        using var tracked = TrackRequest();
+        var (result, definitions) = await ReferencesCoreAsync(query, cancellationToken).ConfigureAwait(false);
+        if (definitions is null || !MayNeedDefinitionFile(definitions) || result.Symbol is not { Definition: null } symbol)
+        {
+            return result;
+        }
+
+        var found = await ResolveDefinitionFileAsync(query, symbol, definitions[0].Path, progress, cancellationToken).ConfigureAwait(false);
+        if (found is null)
+        {
+            return result;
+        }
+
+        var (again, _) = await ReferencesCoreAsync(query, cancellationToken).ConfigureAwait(false);
+        return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles);
+    }
+
+    private async Task<(NavigationResult Result, IReadOnlyList<NavigationLocation>? Definitions)> ReferencesCoreAsync(NavigationQuery query,
+        CancellationToken cancellationToken)
     {
         SyncOpenDocuments(query);
         documents.Acquire(query.Document);
@@ -293,10 +351,11 @@ public sealed class ClangdNavigator : IDisposable
             var plain = await uses.ConfigureAwait(false);
             // 결과 수 제한에 걸리면 두 참조 결과가 서로 다른 위치에서 잘려 차이가 선언 묶음이 아닙니다.
             if (plain is not null && (locations.Count >= ReferenceLimit || plain.Count >= ReferenceLimit)) plain = null;
+            var definitions = await definition.ConfigureAwait(false);
             var roles = ReferenceRoles.Classify(locations, plain, symbol?.Definition, symbol?.Declaration,
-                await definition.ConfigureAwait(false), await declaration.ConfigureAwait(false));
+                definitions, await declaration.ConfigureAwait(false));
             cancellationToken.ThrowIfCancellationRequested();
-            return new NavigationResult(locations, symbol, Progress, false, kind, roles);
+            return (new NavigationResult(locations, symbol, Progress, false, kind, roles), definitions);
         }
         finally
         {
@@ -494,15 +553,22 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
-    private bool NeedsEngineDefinition(IReadOnlyList<NavigationLocation> locations)
+    /// <summary>
+    /// 정의 이동 결과가 헤더의 함수 선언 하나뿐이라 정의가 색인에 없을 수 있는지 봅니다.
+    /// </summary>
+    /// <remarks>
+    /// 엔진 헤더는 엔진 cpp를 색인하지 않는 범위 결정 때문이고(근사 명령이 필요해 Unreal만), 프로젝트 헤더는 첫 색인이 끝나지 않았거나
+    /// 정의 파일에 명령이 없던 경우입니다. 타입·별칭·매크로 줄은 헤더가 곧 정의이므로 제외합니다.
+    /// </remarks>
+    private bool MayNeedDefinitionFile(IReadOnlyList<NavigationLocation> locations)
     {
-        if (Context.Kind != CompileContextKind.Unreal || Context.EngineRoot is null || locations.Count != 1)
+        if (locations.Count != 1)
         {
             return false;
         }
 
         var location = locations[0];
-        if (!DefinitionCandidates.IsHeader(location.Path) || !IsUnder(location.Path, Context.EngineRoot))
+        if (!DefinitionCandidates.IsHeader(location.Path) || IsEngine(location.Path) && Context.Kind != CompileContextKind.Unreal)
         {
             return false;
         }
@@ -511,35 +577,44 @@ public sealed class ClangdNavigator : IDisposable
         return text is not null && !DefinitionCandidates.LooksLikeTypeOrMacro(SourceLinePreview.LineAt(text, location.Line));
     }
 
-    private async Task<IReadOnlyList<NavigationLocation>?> ResolveEngineDefinitionAsync(NavigationQuery query, SemanticSymbol symbol, string header,
+    /// <summary>
+    /// 정의가 있을 만한 cpp(이름 인덱스의 같은 소속 함수 → 헤더와 같은 이름 cpp, 최대 <see cref="ClangdNavigatorOptions.MaxDefinitionCandidates"/>개)를
+    /// 차례로 clangd에 열어 정의를 확정합니다. 결과는 clangd가 다시 돌려준 위치만 쓰고 이름으로 추측한 위치는 쓰지 않습니다.
+    /// </summary>
+    private async Task<IReadOnlyList<NavigationLocation>?> ResolveDefinitionFileAsync(NavigationQuery query, SemanticSymbol symbol, string header,
         IProgress<string>? progress, CancellationToken cancellationToken)
     {
         var symbols = options.FindSymbols?.Invoke(symbol.Name) ?? Array.Empty<SourceSymbolLocation>();
         // 이름 인덱스는 Solution을 연 직후 비어 있을 수 있으므로 소속 모듈 폴더의 같은 이름 cpp를 함께 봅니다.
         var stems = (options.FindByStem?.Invoke(Path.GetFileNameWithoutExtension(header)) ?? Array.Empty<string>())
             .Concat(SameNameSourcesInModule(header));
-        var candidates = DefinitionCandidates.Select(symbol.Name, symbol.ContainerName, header, symbols, stems, options.MaxEngineCandidates)
-            .Where(c => IsUnder(c, Context.EngineRoot!))
+        var candidates = DefinitionCandidates.Select(symbol.Name, symbol.ContainerName, header, symbols, stems, options.MaxDefinitionCandidates)
+            .Where(c => !IsEngine(c) || Context.Kind == CompileContextKind.Unreal)
             .ToArray();
         for (var i = 0; i < candidates.Length; i++)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var candidate = candidates[i];
+            var engine = IsEngine(candidate);
             lock (attemptedCandidates)
             {
-                // 한 번 연 후보는 background index에 남으므로 다시 열어도 새 정보가 없습니다.
-                if (!attemptedCandidates.Add(candidate)) continue;
+                // 한 번 연 후보는 background index에 남으므로 내용이 바뀌기 전에는 다시 열어도 새 정보가 없습니다.
+                if (!attemptedCandidates.Add(candidate + "|" + SafeWriteTicks(candidate))) continue;
             }
 
-            var command = UnrealCompileCommands.Synthesize(candidate, Context.Commands, Context.OverrideDirectory);
-            var text = command is null ? null : SourceLinePreview.ReadText(candidate);
-            if (command is null || text is null)
+            // 엔진 cpp와 명령이 없는 Unreal 프로젝트 파일은 근사 명령을 줍니다. 명령이 있는 파일은 database의 명령을 그대로 씁니다.
+            // 그 밖(명령 없는 일반 프로젝트 파일)은 clangd가 가까운 파일의 명령으로 추정합니다.
+            var command = engine || Context.Kind == CompileContextKind.Unreal && !HasCommand(candidate)
+                ? UnrealCompileCommands.Synthesize(candidate, Context.Commands, Context.OverrideDirectory)
+                : null;
+            var text = engine && command is null ? null : SourceLinePreview.ReadText(candidate);
+            if (text is null)
             {
                 continue;
             }
 
-            progress?.Report($"엔진 정의 확인 중({i + 1}/{candidates.Length}): {Path.GetFileName(candidate)}");
-            session.UpdateCompileCommands(new[] { command });
+            progress?.Report($"{(engine ? "엔진 정의" : "정의 파일")} 확인 중({i + 1}/{candidates.Length}): {Path.GetFileName(candidate)}");
+            if (command is not null) session.UpdateCompileCommands(new[] { command });
             var version = documents.Acquire(new DocumentText(candidate, text));
             try
             {
@@ -637,6 +712,54 @@ public sealed class ClangdNavigator : IDisposable
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
         {
             return Array.Empty<string>();
+        }
+    }
+
+    private RequestScope TrackRequest()
+    {
+        Interlocked.Increment(ref activeRequests);
+        Interlocked.Exchange(ref lastRequestTicks, DateTime.UtcNow.Ticks);
+        return new RequestScope(this);
+    }
+
+    private readonly struct RequestScope : IDisposable
+    {
+        private readonly ClangdNavigator owner;
+
+        public RequestScope(ClangdNavigator owner) => this.owner = owner;
+
+        public void Dispose()
+        {
+            Interlocked.Exchange(ref owner.lastRequestTicks, DateTime.UtcNow.Ticks);
+            Interlocked.Decrement(ref owner.activeRequests);
+        }
+    }
+
+    private bool IsEngine(string path) => Context.EngineRoot is not null && IsUnder(path, Context.EngineRoot);
+
+    private bool HasCommand(string path)
+    {
+        var commands = commandFiles;
+        if (commands is null)
+        {
+            commands = new HashSet<string>(Context.Commands.Select(c => NormalizedFull(c.File)), StringComparer.OrdinalIgnoreCase);
+            commandFiles = commands;
+        }
+
+        return commands.Contains(NormalizedFull(path));
+    }
+
+    private static string NormalizedFull(string path) => Path.GetFullPath(path).Replace('\\', '/');
+
+    private static long SafeWriteTicks(string path)
+    {
+        try
+        {
+            return File.GetLastWriteTimeUtc(path).Ticks;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            return 0;
         }
     }
 

@@ -1,11 +1,13 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel.Design;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Media;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Windows.Threading;
 using EnvDTE80;
 using Microsoft;
 using Microsoft.VisualStudio;
@@ -33,6 +35,9 @@ internal sealed class SemanticNavigationCommand
     private readonly VisualBoostPackage package;
     private readonly SemanticNavigationService service;
     private readonly SolutionFileIndexService fileIndex;
+
+    // 진행 중인 요청입니다. UI thread에서만 읽고 씁니다.
+    private CancellationTokenSource? active;
 
     private SemanticNavigationCommand(VisualBoostPackage package, SemanticNavigationService service, SolutionFileIndexService fileIndex,
         OleMenuCommandService commandService)
@@ -115,28 +120,34 @@ internal sealed class SemanticNavigationCommand
         openTexts[path] = query.Document;
         var statusBar = await package.GetServiceAsync(typeof(SVsStatusbar)) as IVsStatusbar;
         await package.JoinableTaskFactory.SwitchToMainThreadAsync();
-        statusBar?.SetText("VisualBoost: " + (kind == Kind.Definition ? "정의 찾는 중…" : "참조 찾는 중…"));
+        // 같은 키를 다시 누르면 이전 요청을 취소합니다. clangd는 한 파일의 요청을 차례로 처리하므로, 응답이 늦다고 다시 누를 때마다
+        // 요청이 쌓여 더 늦어지던 것을 막습니다(취소하면 아직 시작하지 않은 clangd 요청은 버려집니다).
+        active?.Cancel();
+        using var timeout = new CancellationTokenSource(RequestTimeout);
+        using var request = CancellationTokenSource.CreateLinkedTokenSource(timeout.Token);
+        active = request;
+        var waiting = new RequestStatus(statusBar, kind == Kind.Definition ? "정의 찾는 중" : "참조 찾는 중", service);
         // Progress<T>는 만든 UI 문맥으로 보고를 넘깁니다.
         var progress = new Progress<string>(text =>
         {
             ThreadHelper.ThrowIfNotOnUIThread();
-            statusBar?.SetText("VisualBoost: " + text);
+            if (!request.IsCancellationRequested) waiting.Stage(text);
         });
 
         NavigationResult result;
         int referenceLimit;
         bool limited;
         IReadOnlyList<string> lines = Array.Empty<string>();
-        using (var timeout = new CancellationTokenSource(RequestTimeout))
+        try
         {
             try
             {
                 (result, limited, referenceLimit, lines) = await Task.Run(async () =>
                 {
-                    var navigator = await service.GetNavigatorAsync(timeout.Token).ConfigureAwait(false);
+                    var navigator = await service.GetNavigatorAsync(request.Token).ConfigureAwait(false);
                     var found = kind == Kind.Definition
-                        ? await navigator.DefinitionAsync(query, progress, timeout.Token).ConfigureAwait(false)
-                        : await navigator.ReferencesAsync(query, timeout.Token).ConfigureAwait(false);
+                        ? await navigator.DefinitionAsync(query, progress, request.Token).ConfigureAwait(false)
+                        : await navigator.ReferencesAsync(query, request.Token, progress).ConfigureAwait(false);
                     var ordered = Order(found.Locations, path);
                     found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles);
                     // 결과가 하나인 정의 이동은 미리보기가 필요 없습니다.
@@ -166,7 +177,13 @@ internal sealed class SemanticNavigationCommand
             }
             catch (OperationCanceledException) when (timeout.IsCancellationRequested)
             {
-                await NotifyAsync($"{Name(kind)} 요청이 {RequestTimeout.TotalSeconds:N0}초 안에 끝나지 않았습니다. 색인이 끝난 뒤 다시 시도하세요.");
+                await NotifyAsync($"{Name(kind)} 요청이 {RequestTimeout.TotalSeconds:N0}초 안에 끝나지 않았습니다(마지막 단계: {waiting.Current}). " +
+                                  "색인 중이면 끝난 뒤 다시 시도하세요.");
+                return;
+            }
+            catch (OperationCanceledException) when (request.IsCancellationRequested)
+            {
+                // 새 요청이 이 요청을 대신했습니다. 상태 표시는 새 요청이 씁니다.
                 return;
             }
             catch (LspConnectionClosedException)
@@ -179,6 +196,12 @@ internal sealed class SemanticNavigationCommand
                 await NotifyAsync($"{Name(kind)}을(를) 완료하지 못했습니다: {exception.Message}");
                 return;
             }
+        }
+        finally
+        {
+            await package.JoinableTaskFactory.SwitchToMainThreadAsync();
+            waiting.Dispose();
+            if (ReferenceEquals(active, request)) active = null;
         }
 
         await package.JoinableTaskFactory.SwitchToMainThreadAsync();
@@ -197,7 +220,7 @@ internal sealed class SemanticNavigationCommand
             var target = result.Locations[0];
             NavigationLocationOpener.Open(package, target, activate: true);
             await SetStatusAsync($"{Path.GetFileName(target.Path)}:{target.Line + 1}" +
-                                 (result.ResolvedOnDemand ? " · 엔진 소스를 분석해 정의를 찾았습니다" : string.Empty) +
+                                 (result.ResolvedOnDemand ? " · 색인에 없던 정의 파일을 분석해 찾았습니다" : string.Empty) +
                                  (incomplete.Length > 0 ? " · " + incomplete : string.Empty));
             return;
         }
@@ -205,6 +228,7 @@ internal sealed class SemanticNavigationCommand
         var notes = new List<string>();
         if (kind == Kind.Definition) notes.Add("정의 후보가 여러 개입니다");
         if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
+        if (kind == Kind.References && result.ResolvedOnDemand) notes.Add("색인에 없던 정의 파일을 분석해 더했습니다");
         if (incomplete.Length > 0) notes.Add(incomplete);
         var dte = await package.GetServiceAsync(typeof(Microsoft.VisualStudio.Shell.Interop.SDTE)) as DTE2;
         Assumes.Present(dte);
@@ -307,5 +331,54 @@ internal sealed class SemanticNavigationCommand
         if (status is null) return;
         if (message.Length == 0) status.Clear();
         else status.SetText("VisualBoost: " + message);
+    }
+
+    /// <summary>
+    /// 요청이 끝날 때까지 상태 표시줄에 단계·경과 시간·색인 진행을 1초마다 보입니다. UI thread에서만 씁니다.
+    /// </summary>
+    /// <remarks>
+    /// 큰 Unreal 파일은 처음 열 때 분석이 수 초~수십 초 걸리고 색인 중에는 더 늦어지는데, 고정 문구만 보이면 멈춘 것처럼 보여
+    /// 다시 누르게 되었습니다(2026-10-08 회사 사용 피드백: 느리거나 안 됨).
+    /// </remarks>
+    private sealed class RequestStatus : IDisposable
+    {
+        private readonly IVsStatusbar? statusBar;
+        private readonly SemanticNavigationService service;
+        private readonly Stopwatch watch = Stopwatch.StartNew();
+        private readonly DispatcherTimer timer;
+
+        public RequestStatus(IVsStatusbar? statusBar, string stage, SemanticNavigationService service)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            this.statusBar = statusBar;
+            this.service = service;
+            Current = stage;
+            Show();
+            timer = new DispatcherTimer(TimeSpan.FromSeconds(1), DispatcherPriority.Background, (_, _) => Show(), Dispatcher.CurrentDispatcher);
+        }
+
+        /// <summary>마지막으로 보인 단계입니다.</summary>
+        public string Current { get; private set; }
+
+        public void Stage(string text)
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            Current = text;
+            Show();
+        }
+
+        public void Dispose()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            timer.Stop();
+        }
+
+        private void Show()
+        {
+            ThreadHelper.ThrowIfNotOnUIThread();
+            var seconds = (int)watch.Elapsed.TotalSeconds;
+            var index = service.Current?.Progress is { Active: true, Total: > 0 } progress ? $" · 색인 {progress.Done:N0}/{progress.Total:N0}" : string.Empty;
+            statusBar?.SetText("VisualBoost: " + Current + "…" + (seconds >= 2 ? $" {seconds}초" : string.Empty) + index);
+        }
     }
 }

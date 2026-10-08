@@ -34,17 +34,18 @@ public sealed class ClangdLaunchOptions
         requested > 0 ? requested : DefaultWorkerCount(Environment.ProcessorCount, PhysicalMemory.TotalBytes());
 
     /// <summary>
-    /// 논리 코어의 절반을 쓰되, VS·빌드 몫 8 GiB를 남기고 작업 하나에 2.5 GiB를 잡아 메모리로 다시 제한합니다.
+    /// 논리 코어의 3/8(최대 8)을 쓰되, VS·빌드 몫 8 GiB를 남기고 작업 하나에 2.5 GiB를 잡아 메모리로 다시 제한합니다.
     /// </summary>
     /// <remarks>
-    /// 첫 색인 시간은 작업 수에 거의 비례합니다(clangd가 작업마다 코어 하나를 다 씀). 예전 기본값(코어의 1/4)은 큰 Unreal 프로젝트의 첫 색인이
-    /// 너무 오래 걸렸습니다(2026-10-07 사용자 피드백). Unreal TU 하나가 1.4 GiB까지 쓰므로 메모리가 작은 PC에서는 작업 수를 줄입니다.
-    /// 메모리를 모르면(0) 메모리 부족을 피하려고 예전 기본값(코어의 1/4)을 씁니다(2026-10-07 검토).
+    /// 예전 기본값(코어의 1/4)은 큰 Unreal 프로젝트의 첫 색인이 너무 오래 걸렸고(2026-10-07 사용자 피드백), 코어의 절반(0.43.x)은
+    /// 색인 중 메모리와 발열이 컸습니다(2026-10-08 회사 사용 피드백). 테스트 전용 UE 5.8 샘플(TU 305개, 16스레드 PC)에서 작업 8개는
+    /// 첫 색인 155초·최고 5.1 GB·CPU 970초, 작업 4개는 217초·2.3 GB·823초였습니다. 물리 코어를 넘는 작업은 빨라지는 몫보다 메모리와
+    /// CPU 사용이 더 늘어 그 사이 값을 씁니다. 메모리를 모르면(0) 예전 기본값(코어의 1/4)을 씁니다(2026-10-07 검토).
     /// </remarks>
     public static int DefaultWorkerCount(int processors, long memoryBytes)
     {
         if (memoryBytes <= 0) return Math.Max(1, processors / 4);
-        var byCores = Math.Max(1, processors / 2);
+        var byCores = Math.Max(1, Math.Min(8, processors * 3 / 8));
         var gib = memoryBytes / (1024d * 1024 * 1024);
         var byMemory = (int)Math.Floor((gib - 8) / 2.5);
         return Math.Max(1, Math.Min(byCores, byMemory));

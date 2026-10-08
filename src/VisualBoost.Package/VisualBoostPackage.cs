@@ -17,7 +17,7 @@ using VisualBoost.Services;
 namespace VisualBoost;
 
 [PackageRegistration(UseManagedResourcesOnly = true, AllowsBackgroundLoading = true)]
-[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.43.9")]
+[InstalledProductRegistration("VisualBoost", "파일·심볼 탐색과 C++ 편집을 지원합니다.", "0.44.0")]
 [ProvideMenuResource("Menus.ctmenu", 1)]
 [ProvideAutoLoad(UIContextGuids80.SolutionExists, PackageAutoLoadFlags.BackgroundLoad)]
 // 폴더 열기 작업 영역(CMake 등)은 Solution 존재 상태를 켜지 않으므로 따로 등록합니다.
@@ -97,6 +97,11 @@ public sealed class VisualBoostPackage : AsyncPackage
         navigation = new SemanticNavigationService(fileIndex, ((CodeNavigationOptionsPage)GetDialogPage(typeof(CodeNavigationOptionsPage))).CreateSettings(),
             token => VcProjectCollector.CollectAsync(dte, token));
         SemanticNavigationRuntime.Service = navigation;
+        navigation.NavigatorStarted += () => JoinableTaskFactory.RunAsync(async () =>
+        {
+            await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+            SemanticDocumentTracker.WarmFocused();
+        }).FileAndForget("VisualBoost/SemanticNavigation/Warm");
         var currentNavigation = navigation;
         if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar, () => currentNavigation.StatusText);
         StartFileIndex(dte);

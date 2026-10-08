@@ -109,12 +109,44 @@ internal static class SemanticNavigationTests
     public static void RunWorkerDefaults()
     {
         const long Gib = 1024L * 1024 * 1024;
-        // 코어 절반을 쓰되 VS 몫 8 GiB를 남기고 작업당 2.5 GiB로 제한합니다. 메모리를 모르면 예전 기본값(코어의 1/4)을 씁니다.
-        Check(ClangdLaunchOptions.DefaultWorkerCount(16, 64 * Gib) == 8 && ClangdLaunchOptions.DefaultWorkerCount(16, 32 * Gib) == 8 &&
-              ClangdLaunchOptions.DefaultWorkerCount(8, 32 * Gib) == 4 && ClangdLaunchOptions.DefaultWorkerCount(32, 16 * Gib) == 3 &&
+        // 코어의 3/8(최대 8)을 쓰되 VS 몫 8 GiB를 남기고 작업당 2.5 GiB로 제한합니다. 메모리를 모르면 예전 기본값(코어의 1/4)을 씁니다.
+        Check(ClangdLaunchOptions.DefaultWorkerCount(16, 64 * Gib) == 6 && ClangdLaunchOptions.DefaultWorkerCount(32, 128 * Gib) == 8 &&
+              ClangdLaunchOptions.DefaultWorkerCount(8, 32 * Gib) == 3 && ClangdLaunchOptions.DefaultWorkerCount(32, 16 * Gib) == 3 &&
               ClangdLaunchOptions.DefaultWorkerCount(4, 8 * Gib) == 1 && ClangdLaunchOptions.DefaultWorkerCount(1, 0) == 1 &&
               ClangdLaunchOptions.DefaultWorkerCount(12, 0) == 3, "clangd 색인 작업 수 기본값");
         Check(ClangdLaunchOptions.ResolveWorkerCount(3) == 3 && ClangdLaunchOptions.ResolveWorkerCount(0) >= 1, "지정한 작업 수 우선");
+    }
+
+    public static void RunMemoryPolicy()
+    {
+        const long Gib = 1024L * 1024 * 1024;
+        Check(ClangdMemoryPolicy.DefaultLimitBytes(64 * Gib) == 8 * Gib && ClangdMemoryPolicy.DefaultLimitBytes(32 * Gib) == 4 * Gib &&
+              ClangdMemoryPolicy.DefaultLimitBytes(8 * Gib) == 2 * Gib && ClangdMemoryPolicy.DefaultLimitBytes(256 * Gib) == 8 * Gib &&
+              ClangdMemoryPolicy.DefaultLimitBytes(0) == 3 * Gib, "메모리 정리 기준 기본값(물리 메모리의 1/8, 2~8 GiB)");
+        Check(ClangdMemoryPolicy.ResolveLimitBytes(2048) == 2 * Gib && ClangdMemoryPolicy.ResolveLimitBytes(0) >= 2 * Gib, "지정한 정리 기준 우선");
+
+        var idle = TimeSpan.FromMinutes(10);
+        ClangdMemorySample Sample(long bytes, bool indexing = false, bool busy = false, TimeSpan? sinceRequest = null, TimeSpan? sinceStart = null) =>
+            new(bytes, indexing, busy, sinceRequest ?? idle, sinceStart ?? idle);
+
+        var policy = new ClangdMemoryPolicy(4 * Gib);
+        Check(!policy.ShouldRestart(Sample(3 * Gib)), "기준 이하는 유지");
+        Check(!policy.ShouldRestart(Sample(5 * Gib, indexing: true)) && !policy.ShouldRestart(Sample(5 * Gib, busy: true)) &&
+              !policy.ShouldRestart(Sample(5 * Gib, sinceRequest: TimeSpan.FromSeconds(30))) &&
+              !policy.ShouldRestart(Sample(5 * Gib, sinceStart: TimeSpan.FromMinutes(1))), "색인·요청 중이거나 최근 요청·시작 직후에는 다시 시작하지 않음");
+        Check(policy.ShouldRestart(Sample(5 * Gib)), "유휴 상태에서 기준을 넘으면 다시 시작");
+
+        // 다시 시작한 직후와 색인을 다시 읽는 동안은 기준 사용량을 재지 않고, 안정된 뒤 첫 표본으로 잽니다.
+        Check(!policy.ShouldRestart(Sample(5 * Gib, sinceStart: TimeSpan.FromSeconds(20))) &&
+              !policy.ShouldRestart(Sample(5 * Gib, indexing: true)), "다시 시작 직후에는 판단하지 않음");
+        Check(!policy.ShouldRestart(Sample(1 * Gib)) && policy.EffectiveLimitBytes == 4 * Gib, "작은 기준 사용량은 기준을 바꾸지 않음");
+        Check(policy.ShouldRestart(Sample(5 * Gib)), "기준 사용량을 잰 뒤 다시 넘으면 다시 시작");
+
+        // 다시 시작해도 기준 가까이 남는 큰 프로젝트: 기준을 1.5배로 올려 되풀이하지 않습니다.
+        Check(!policy.ShouldRestart(Sample(3500L * 1024 * 1024)) && policy.EffectiveLimitBytes == 3500L * 1024 * 1024 * 3 / 2,
+            "큰 기준 사용량이면 정리 기준을 올림: " + policy.EffectiveLimitBytes / (1024 * 1024));
+        Check(!policy.ShouldRestart(Sample(5 * Gib)) && policy.ShouldRestart(Sample(6 * Gib)), "올린 기준으로 판단");
+        Check(!new ClangdMemoryPolicy(0).ShouldRestart(Sample(64 * Gib)), "기준 0은 정리하지 않음");
     }
 
     public static void RunOwnDefinitionReferences()
@@ -388,6 +420,25 @@ internal static class SemanticNavigationTests
             Check(include >= 3 && a.Arguments[include - 3] == "-Xclang" && a.Arguments[include - 2] == "-include" && a.Arguments[include - 1] == "-Xclang", "정의 헤더는 -Xclang -include");
             Check(a.Arguments.Contains("Runtime/Core/Public") && a.Arguments.Contains("/DWITH_EDITOR=1") && a.Arguments.Contains("/std:c++20"), "공유 응답 파일 펼침");
 
+            // 응답 파일이 없는 프로젝트 소스: 같은 모듈의 명령을 그대로 쓰고, 이 구성에 빌드하지 않은 모듈은 근사 명령을 씁니다.
+            Write(Path.Combine(source, "Game.Build.cs"), "");
+            Write(Path.Combine(source, "Private", "D.cpp"), "int D;");
+            var tools = Path.Combine(project, "Source", "Tools");
+            Write(Path.Combine(tools, "Tools.Build.cs"), "");
+            Write(Path.Combine(tools, "Private", "T.cpp"), "int T;");
+            Write(Path.Combine(tools, "Private", "T.gen.cpp"), "");
+            var supplemented = UnrealCompileCommands.Build(project, engine, variant!, "cl.exe", default, Path.Combine(root, "modules"));
+            var all = supplemented.Commands.Select(c => Path.GetFileName(c.File)).OrderBy(f => f, StringComparer.Ordinal).ToArray();
+            Check(all.SequenceEqual(new[] { "A.cpp", "B.cpp", "C.cpp", "D.cpp", "F.cpp", "T.cpp" }) && supplemented.Supplemented == 3,
+                "응답 파일 없는 프로젝트 소스 보완(생성 파일 제외): " + string.Join(",", all) + " / " + supplemented.Supplemented);
+            var d = supplemented.Commands.Single(c => c.File.EndsWith("/D.cpp", StringComparison.Ordinal));
+            Check(d.Arguments.Take(d.Arguments.Count - 1).SequenceEqual(a.Arguments.Take(a.Arguments.Count - 1)) && d.Arguments.Last() == d.File,
+                "같은 모듈 명령 재사용");
+            var t = supplemented.Commands.Single(c => c.File.EndsWith("/T.cpp", StringComparison.Ordinal));
+            Check(t.Arguments.Contains(Path.Combine(tools, "Private").Replace('\\', '/')) && File.Exists(Path.Combine(root, "modules", "Tools.h")),
+                "빌드하지 않은 모듈은 근사 명령");
+            Check(UnrealCompileCommands.Build(project, engine, variant!, "cl.exe").Supplemented == 2, "재정의 폴더가 없으면 같은 모듈 보완만");
+
             var output = Path.Combine(root, "db");
             CompileCommandDatabase.Write(output, result.Commands);
             var reread = CompileCommandDatabase.Read(Path.Combine(output, CompileCommandDatabase.FileName));
@@ -574,11 +625,11 @@ internal static class SemanticNavigationTests
             var header = Path.Combine(engine, "Public", "Package.h");
             var symbols = new[]
             {
-                new Analysis.SourceSymbolLocation("SavePackage", Path.Combine(root, "Elsewhere", "Other.cpp"), 1, 1, Analysis.SourceSymbolKind.Function, "UOther"),
-                new Analysis.SourceSymbolLocation("SavePackage", Path.Combine(root, "Elsewhere", "Free.cpp"), 1, 1, Analysis.SourceSymbolKind.Function),
-                new Analysis.SourceSymbolLocation("SavePackage", Path.Combine(engine, "Private", "SavePackage2.cpp"), 1, 1, Analysis.SourceSymbolKind.Function, "UPackage"),
-                new Analysis.SourceSymbolLocation("SavePackage", header, 1, 1, Analysis.SourceSymbolKind.Function, "UPackage"),
-                new Analysis.SourceSymbolLocation("SavePackage", Path.Combine(engine, "Private", "Var.cpp"), 1, 1, Analysis.SourceSymbolKind.Variable, "UPackage")
+                new SourceSymbolLocation("SavePackage", Path.Combine(root, "Elsewhere", "Other.cpp"), 1, 1, SourceSymbolKind.Function, "UOther"),
+                new SourceSymbolLocation("SavePackage", Path.Combine(root, "Elsewhere", "Free.cpp"), 1, 1, SourceSymbolKind.Function),
+                new SourceSymbolLocation("SavePackage", Path.Combine(engine, "Private", "SavePackage2.cpp"), 1, 1, SourceSymbolKind.Function, "UPackage"),
+                new SourceSymbolLocation("SavePackage", header, 1, 1, SourceSymbolKind.Function, "UPackage"),
+                new SourceSymbolLocation("SavePackage", Path.Combine(engine, "Private", "Var.cpp"), 1, 1, Analysis.SourceSymbolKind.Variable, "UPackage")
             };
             var stems = new[] { Path.Combine(engine, "Private", "Package.cpp"), Path.Combine(engine, "Public", "Package.h") };
             var selected = DefinitionCandidates.Select("SavePackage", "UPackage", header, symbols, stems, 5).Select(Path.GetFileName).ToArray();
@@ -624,8 +675,17 @@ internal static class SemanticNavigationTests
             Write(use, useText);
             var other = Path.Combine(gameSource, "Other.cpp");
             Write(other, "#include \"Mod.h\"\nint Other() { return FMod::Compute(4); }\n");
+            // 프로젝트 함수의 정의 파일이 database에 없는 경우(모듈 밖 폴더): 색인되지 않으므로 요청 시점에 열어 확정해야 합니다.
+            Write(Path.Combine(gameSource, "Calc.h"), "#pragma once\nint CalcTotal(int Value);\nint CalcOther(int Value);\n");
+            var calcImpl = Path.Combine(project, "Source", "Shared", "CalcImpl.cpp");
+            Write(calcImpl, "#include \"../Game/Calc.h\"\nint CalcTotal(int Value) { return Value + 1; }\n");
+            var otherImpl = Path.Combine(project, "Source", "Shared", "OtherImpl.cpp");
+            Write(otherImpl, "#include \"../Game/Calc.h\"\nint CalcOther(int Value) { return Value + 2; }\n");
+            var caller = Path.Combine(gameSource, "Caller.cpp");
+            var callerText = "#include \"Calc.h\"\nint Caller() { return CalcTotal(2) + CalcOther(3); }\n";
+            Write(caller, callerText);
             var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
-            foreach (var file in new[] { use, other })
+            foreach (var file in new[] { use, other, caller })
             {
                 // 프로젝트 쪽 정의는 의존 모듈 API를 dllimport로 둡니다. 엔진 cpp 근사 명령은 이를 다시 비워야 합니다.
                 Write(Path.Combine(build, Path.GetFileName(file) + ".obj.rsp"),
@@ -635,10 +695,17 @@ internal static class SemanticNavigationTests
             var cacheRoot = Path.Combine(root, "cache");
             using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
-                // 이름 인덱스가 아직 비어 있는 상황: 소속 모듈 폴더의 같은 이름 cpp만으로 후보를 찾아야 합니다.
-                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1
+                // 엔진 함수는 이름 인덱스가 비어 있는 상황: 소속 모듈 폴더의 같은 이름 cpp만으로 후보를 찾아야 합니다.
+                // 프로젝트 함수는 이름 인덱스가 정의 파일을 압니다(파일 이름이 헤더와 달라 이름으로만 찾을 수 있음).
+                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1,
+                FindSymbols = name => name switch
+                {
+                    "CalcTotal" => new[] { new SourceSymbolLocation("CalcTotal", calcImpl, 2, 5, SourceSymbolKind.Function, "") },
+                    "CalcOther" => new[] { new SourceSymbolLocation("CalcOther", otherImpl, 2, 5, SourceSymbolKind.Function, "") },
+                    _ => Array.Empty<SourceSymbolLocation>()
+                }
             }, CancellationToken.None).Result;
-            Check(navigator.Context.Kind == CompileContextKind.Unreal && navigator.Context.Commands.Count == 2, "응답 파일에서 프로젝트 명령 준비");
+            Check(navigator.Context.Kind == CompileContextKind.Unreal && navigator.Context.Commands.Count == 3, "응답 파일에서 프로젝트 명령 준비");
             Check(SpinUntil(() => navigator.Progress.Completed, 60000), "프로젝트 색인 완료");
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
@@ -691,6 +758,18 @@ internal static class SemanticNavigationTests
             Check(moved.Locations.Any(l => l.Path == engineSource), "미저장 편집 위치로 정의 요청");
             Check(File.ReadAllText(use) == useText && File.ReadAllText(engineSource).Contains("Value * 2"), "원본 파일 보존");
             Check(!Directory.EnumerateFiles(project, "compile_commands.json", SearchOption.AllDirectories).Any(), "프로젝트 폴더에 database를 쓰지 않음");
+
+            // 색인에 없는 프로젝트 정의: 정의 이동은 후보 cpp를 열어 확정하고, 참조는 확정한 뒤 다시 찾아 정의를 더합니다.
+            var callerLine = callerText.Split('\n')[1];
+            var total = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1, callerLine.IndexOf("CalcTotal", StringComparison.Ordinal)),
+                null, timeout.Token).Result;
+            Check(total.ResolvedOnDemand && total.Locations.Single().Path == calcImpl, "색인에 없는 프로젝트 정의 파일을 요청 시점에 확정: " +
+                  string.Join(",", total.Locations));
+            var otherReferences = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1,
+                callerLine.IndexOf("CalcOther", StringComparison.Ordinal)), timeout.Token).Result;
+            Check(otherReferences.ResolvedOnDemand && otherReferences.Locations.Any(l => l.Path == otherImpl) && otherReferences.Locations.Any(l => l.Path == caller),
+                "참조에서 색인에 없는 정의 파일을 확정해 더함: " + string.Join(",", otherReferences.Locations.Select(l => Path.GetFileName(l.Path))));
+            Check(!navigator.IsBusy && navigator.LastRequestUtc >= navigator.StartedUtc, "요청이 끝나면 유휴 상태와 마지막 요청 시각");
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             Check(navigator.HasExited, "정상 종료");
         }

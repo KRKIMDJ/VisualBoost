@@ -37,7 +37,7 @@ public sealed class UnrealBuildVariant
 public sealed class UnrealCompileCommandResult
 {
     public UnrealCompileCommandResult(IReadOnlyList<CompileCommand> commands, UnrealBuildVariant variant, int modules, int responseFiles,
-        int unityMembers, int skippedGenerated, int missingSources)
+        int unityMembers, int skippedGenerated, int missingSources, int supplemented = 0)
     {
         Commands = commands;
         Variant = variant;
@@ -46,7 +46,11 @@ public sealed class UnrealCompileCommandResult
         UnityMembers = unityMembers;
         SkippedGenerated = skippedGenerated;
         MissingSources = missingSources;
+        Supplemented = supplemented;
     }
+
+    /// <summary>응답 파일이 없어 같은 모듈 명령이나 근사 명령으로 보완한 프로젝트 소스 수입니다.</summary>
+    public int Supplemented { get; }
 
     public IReadOnlyList<CompileCommand> Commands { get; }
 
@@ -135,8 +139,12 @@ public static class UnrealCompileCommands
         return !new[] { "Editor", "Client", "Server" }.Any(kind => target.EndsWith(kind, StringComparison.OrdinalIgnoreCase));
     }
 
+    /// <param name="overrideDirectory">
+    /// 이 대상·구성에 빌드하지 않은 프로젝트 모듈의 근사 명령이 쓰는 API 매크로 재정의 헤더 폴더입니다(<see cref="Synthesize"/>).
+    /// null이면 그런 모듈은 보완하지 않습니다.
+    /// </param>
     public static UnrealCompileCommandResult Build(string projectDirectory, string engineRoot, UnrealBuildVariant variant, string compiler,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default, string? overrideDirectory = null)
     {
         var directory = Normalize(Path.Combine(engineRoot, "Engine", "Source"));
         var commands = new Dictionary<string, CompileCommand>(StringComparer.OrdinalIgnoreCase);
@@ -195,8 +203,86 @@ public static class UnrealCompileCommands
             }
         }
 
+        var supplemented = SupplementMissing(projectDirectory, commands, overrideDirectory, cancellationToken);
         return new UnrealCompileCommandResult(commands.Values.OrderBy(c => c.File, StringComparer.OrdinalIgnoreCase).ToArray(), variant,
-            modules, responseFiles, unityMembers, skippedGenerated, missingSources);
+            modules, responseFiles, unityMembers, skippedGenerated, missingSources, supplemented);
+    }
+
+    /// <summary>
+    /// 응답 파일이 없는 프로젝트·프로젝트 플러그인 소스(빌드 뒤 추가한 파일, 이 대상·구성에 빌드하지 않은 모듈)에 명령을 보완합니다.
+    /// </summary>
+    /// <remarks>
+    /// 이런 파일은 database에 없어 background index가 처리하지 않으므로, 그 안의 정의·참조는 편집기에서 파일을 열기 전까지
+    /// 찾을 수 없었습니다(2026-10-08 회사 사용 피드백). 같은 모듈에 명령이 있으면 그 인자를 그대로 써서 정확하고,
+    /// 모듈 전체가 빠졌으면 <see cref="Synthesize"/>의 근사 명령을 씁니다(생성 헤더가 없으면 일부 진단이 남음).
+    /// </remarks>
+    private static int SupplementMissing(string projectDirectory, Dictionary<string, CompileCommand> commands, string? overrideDirectory,
+        CancellationToken cancellationToken)
+    {
+        // 모듈 판정은 폴더마다 *.Build.cs를 찾으므로 폴더 단위로 기억합니다.
+        var owners = new Dictionary<string, (string Directory, string Module)?>(StringComparer.OrdinalIgnoreCase);
+        (string Directory, string Module)? ModuleOf(string file)
+        {
+            var directory = Path.GetDirectoryName(Path.GetFullPath(file))!;
+            if (!owners.TryGetValue(directory, out var owner))
+            {
+                owner = OwningModule(file);
+                owners[directory] = owner;
+            }
+
+            return owner;
+        }
+
+        var samples = new Dictionary<string, CompileCommand>(StringComparer.OrdinalIgnoreCase);
+        foreach (var command in commands.Values)
+        {
+            if (ModuleOf(command.File) is (string directory, _) && !samples.ContainsKey(directory)) samples[directory] = command;
+        }
+
+        var built = commands.Values.ToArray();
+        var added = 0;
+        foreach (var root in BuildRoots(projectDirectory, "Source"))
+        {
+            foreach (var file in SafeSources(root))
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                var source = Normalize(file);
+                if (commands.ContainsKey(source) || IsGenerated(source) || ModuleOf(source) is not (string directory, _))
+                {
+                    continue;
+                }
+
+                CompileCommand? command = null;
+                if (samples.TryGetValue(directory, out var sample))
+                {
+                    // 마지막 인자가 source입니다(Build 참고). 모듈 정의 헤더·포함 경로가 같은 모듈이므로 그대로 맞습니다.
+                    command = new CompileCommand(sample.Directory, source, sample.Arguments.Take(sample.Arguments.Count - 1).Concat(new[] { source }).ToArray());
+                }
+                else if (overrideDirectory is not null && built.Length > 0)
+                {
+                    command = Synthesize(source, built, overrideDirectory);
+                }
+
+                if (command is null) continue;
+                commands[source] = command;
+                added++;
+            }
+        }
+
+        return added;
+    }
+
+    private static IReadOnlyList<string> SafeSources(string root)
+    {
+        if (!Directory.Exists(root)) return Array.Empty<string>();
+        try
+        {
+            return Directory.EnumerateFiles(root, "*", SearchOption.AllDirectories).Where(DefinitionCandidates.IsSource).ToArray();
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            return Array.Empty<string>();
+        }
     }
 
     /// <summary>

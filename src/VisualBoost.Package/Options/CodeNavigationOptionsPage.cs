@@ -1,3 +1,4 @@
+using System;
 using System.ComponentModel;
 using System.Runtime.InteropServices;
 using Microsoft.VisualStudio.Shell;
@@ -9,6 +10,7 @@ namespace VisualBoost.Options;
 public sealed class CodeNavigationOptionsPage : DialogPage
 {
     private int workerCount;
+    private int memoryLimitMegabytes;
 
     [Category("정의·참조 탐색"), DisplayName("사용"), DefaultValue(true)]
     [Description("C++ 문서에서 정의로 이동과 참조 찾기에 clangd를 사용합니다. 끄면 Visual Studio 기본 탐색을 실행합니다.")]
@@ -23,11 +25,19 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     public string ClangdPath { get; set; } = string.Empty;
 
     [Category("정의·참조 탐색"), DisplayName("색인 작업 수"), DefaultValue(0)]
-    [Description("동시에 색인할 파일 수입니다. 0이면 자동으로 정합니다(논리 코어의 절반, 메모리가 적으면 더 적게). 값이 클수록 첫 색인이 빨리 끝나지만 CPU와 메모리를 더 씁니다. 0~64 범위로 적용됩니다.")]
+    [Description("동시에 색인할 파일 수입니다. 0이면 자동으로 정합니다(논리 코어의 3/8, 최대 8, 메모리가 적으면 더 적게). 값이 클수록 첫 색인이 빨리 끝나지만 CPU와 메모리를 더 씁니다. 0~64 범위로 적용됩니다.")]
     public int WorkerCount
     {
         get => workerCount;
         set => workerCount = value < 0 ? 0 : value > 64 ? 64 : value;
+    }
+
+    [Category("정의·참조 탐색"), DisplayName("clangd 메모리 정리 기준(MB)"), DefaultValue(0)]
+    [Description("clangd가 이보다 많은 메모리를 쥐고 있으면 색인과 탐색이 멈춘 동안 다시 시작해 메모리를 돌려받습니다. 저장된 색인은 그대로 씁니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~8 GB). 1024~65536 범위로 적용됩니다.")]
+    public int MemoryLimitMegabytes
+    {
+        get => memoryLimitMegabytes;
+        set => memoryLimitMegabytes = value <= 0 ? 0 : Math.Max(1024, Math.Min(65536, value));
     }
 
     [Category("정의·참조 탐색"), DisplayName("사용할 수 없을 때 기본 탐색 실행"), DefaultValue(true)]
@@ -35,7 +45,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     public bool FallbackToVisualStudio { get; set; } = true;
 
     internal SemanticNavigationSettings CreateSettings() =>
-        new(Enabled, StartOnSolutionOpen, ClangdPath?.Trim().Trim('"') ?? string.Empty, WorkerCount, FallbackToVisualStudio);
+        new(Enabled, StartOnSolutionOpen, ClangdPath?.Trim().Trim('"') ?? string.Empty, WorkerCount, FallbackToVisualStudio, MemoryLimitMegabytes);
 
     protected override void OnApply(PageApplyEventArgs e)
     {

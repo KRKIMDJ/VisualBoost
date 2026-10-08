@@ -50,6 +50,7 @@ internal static class SemanticDocumentTracker
     private static DispatcherTimer? idleTimer;
     private static DispatcherTimer? warmTimer;
     private static Tracked? pendingWarm;
+    private static Tracked? lastFocused;
 
     public static void Attach(IWpfTextView view, ITextDocument document)
     {
@@ -99,8 +100,19 @@ internal static class SemanticDocumentTracker
         }).ToArray();
     }
 
+    /// <summary>
+    /// 마지막으로 초점을 받은 C++ 문서를 다시 예열합니다. clangd가 새로 시작하면 열린 문서의 분석이 없어 다음 요청이 그 분석부터 기다리므로
+    /// 탐색기 준비 직후 부릅니다. UI thread에서 호출합니다.
+    /// </summary>
+    public static void WarmFocused()
+    {
+        ThreadHelper.ThrowIfNotOnUIThread();
+        if (lastFocused is { Views: > 0 } item) ScheduleWarm(item);
+    }
+
     private static void ScheduleWarm(Tracked item)
     {
+        lastFocused = item;
         pendingWarm = item;
         warmTimer ??= CreateTimer(TimeSpan.FromMilliseconds(800), OnWarm);
         warmTimer.Stop();
@@ -151,6 +163,7 @@ internal static class SemanticDocumentTracker
         Buffers.Remove(item.Document.TextBuffer);
         RemovePath(item.Path);
         if (ReferenceEquals(pendingWarm, item)) pendingWarm = null;
+        if (ReferenceEquals(lastFocused, item)) lastFocused = null;
         SemanticNavigationRuntime.Service?.Closed(item.Path);
     }
 

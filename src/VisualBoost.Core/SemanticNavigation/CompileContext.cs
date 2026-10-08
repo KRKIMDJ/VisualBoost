@@ -82,7 +82,9 @@ public sealed class CompileContext
     public PathAliases Paths { get; }
 
     /// <summary>엔진 파일 근사 명령의 모듈 매크로 재정의 헤더 폴더입니다.</summary>
-    public string OverrideDirectory => Path.Combine(Directory, "modules");
+    public string OverrideDirectory => OverrideDirectoryOf(Directory);
+
+    internal static string OverrideDirectoryOf(string directory) => Path.Combine(directory, "modules");
 
     public bool IsAvailable => Kind != CompileContextKind.None;
 }
@@ -158,11 +160,13 @@ public static class CompileContextBuilder
             }
             else
             {
-                var result = UnrealCompileCommands.Build(solutionDirectory, engineRoot, variant, compiler, cancellationToken);
+                var result = UnrealCompileCommands.Build(solutionDirectory, engineRoot, variant, compiler, cancellationToken,
+                    CompileContext.OverrideDirectoryOf(directory));
                 if (result.Commands.Count > 0)
                 {
                     var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(result.Commands));
-                    var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0})";
+                    var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0}" +
+                                  (result.Supplemented > 0 ? $", 빌드 기록 없는 파일 {result.Supplemented:N0}개 보완)" : ")");
                     return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths);
                 }
 
