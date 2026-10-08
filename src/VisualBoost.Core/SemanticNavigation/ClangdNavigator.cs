@@ -136,8 +136,10 @@ public sealed class ClangdNavigator : IDisposable
     private readonly Queue<string> touchOrder = new();
     private readonly Dictionary<string, DocumentText> touchTexts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> attemptedCandidates = new(StringComparer.OrdinalIgnoreCase);
-    // Context.Commands의 파일 집합입니다. 여러 요청이 동시에 처음 만들어도 같은 내용이라 잠그지 않습니다.
-    private volatile HashSet<string>? commandFiles;
+    // Context.Commands의 파일별 명령입니다. 여러 요청이 동시에 처음 만들어도 같은 내용이라 잠그지 않습니다.
+    private volatile Dictionary<string, CompileCommand>? commandsByFile;
+    // 자기 명령을 덮어쓰기로 준 unity 구성원입니다. ClangdDocumentSet이 잠금 안에서 여는 콜백에서만 쓰므로 그 잠금으로 보호됩니다.
+    private readonly HashSet<string> memberCommandsSent = new(StringComparer.OrdinalIgnoreCase);
     private bool touchRunning;
     private int activeRequests;
     private long lastRequestTicks = DateTime.UtcNow.Ticks;
@@ -148,7 +150,7 @@ public sealed class ClangdNavigator : IDisposable
         this.options = options;
         Context = context;
         this.session = session;
-        documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), session.OpenDocument, session.ChangeDocument, session.CloseDocument);
+        documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () => Changed?.Invoke();
         session.Exited += _ =>
         {
@@ -545,6 +547,21 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
+    /// <summary>
+    /// 문서를 clangd에 엽니다. unity 묶음으로 색인하는 구성원은 database에 자기 명령이 없어 clangd가 다른 파일의 명령을 추정해 분석에
+    /// 실패하므로(테스트 전용 UE 샘플: 정의·참조 0개), 처음 열 때 자기 명령을 덮어쓰기로 줍니다. 묶음 색인이 이미 그 파일을 담고 있어
+    /// background index는 최신 여부만 확인하고 다시 분석하지 않았습니다(같은 샘플 0.7초, 2026-10-09 측정).
+    /// </summary>
+    private void OpenDocument(string path, string text, int version)
+    {
+        if (Context.IsUnitMember(path) && memberCommandsSent.Add(path) && CommandOf(path) is { } command)
+        {
+            session.UpdateCompileCommands(new[] { command });
+        }
+
+        session.OpenDocument(path, text, version);
+    }
+
     private void SyncOpenDocuments(NavigationQuery query)
     {
         foreach (var document in query.OpenDocuments)
@@ -745,16 +762,23 @@ public sealed class ClangdNavigator : IDisposable
 
     private bool IsEngine(string path) => Context.EngineRoot is not null && IsUnder(path, Context.EngineRoot);
 
-    private bool HasCommand(string path)
+    private bool HasCommand(string path) => CommandOf(path) is not null;
+
+    private CompileCommand? CommandOf(string path)
     {
-        var commands = commandFiles;
+        var commands = commandsByFile;
         if (commands is null)
         {
-            commands = new HashSet<string>(Context.Commands.Select(c => NormalizedFull(c.File)), StringComparer.OrdinalIgnoreCase);
-            commandFiles = commands;
+            commands = new Dictionary<string, CompileCommand>(StringComparer.OrdinalIgnoreCase);
+            foreach (var command in Context.Commands)
+            {
+                commands[NormalizedFull(command.File)] = command;
+            }
+
+            commandsByFile = commands;
         }
 
-        return commands.Contains(NormalizedFull(path));
+        return commands.TryGetValue(NormalizedFull(path), out var found) ? found : null;
     }
 
     private static string NormalizedFull(string path) => Path.GetFullPath(path).Replace('\\', '/');

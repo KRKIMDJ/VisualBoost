@@ -34,10 +34,38 @@ public sealed class UnrealBuildVariant
     public override string ToString() => $"{Target} {Platform} {Configuration}";
 }
 
+/// <summary>UBT unity 묶음 하나입니다. 구성원 cpp는 실제 빌드에서 이 묶음 명령으로 함께 컴파일되었습니다.</summary>
+public sealed class UnityUnit
+{
+    public UnityUnit(string source, string directory, IReadOnlyList<string> arguments, IReadOnlyList<string> members)
+    {
+        Source = source;
+        Directory = directory;
+        Arguments = arguments;
+        Members = members;
+    }
+
+    /// <summary>UBT가 만든 unity cpp(Intermediate 아래)입니다.</summary>
+    public string Source { get; }
+
+    /// <summary>컴파일 작업 경로(Engine/Source)입니다.</summary>
+    public string Directory { get; }
+
+    /// <summary>source를 뺀 명령 인자(컴파일러 포함)입니다. 구성원 명령에서 마지막 source를 뺀 것과 같습니다.</summary>
+    public IReadOnlyList<string> Arguments { get; }
+
+    /// <summary>
+    /// 색인할 구성원을 unity cpp의 포함 순서대로 담습니다. 생성 파일, 없는 파일, 파일별 응답 파일로 따로 컴파일된 파일은 뺍니다.
+    /// 경로는 <see cref="UnrealCompileCommandResult.Commands"/>의 파일 경로와 같은 표기입니다.
+    /// </summary>
+    public IReadOnlyList<string> Members { get; }
+}
+
 public sealed class UnrealCompileCommandResult
 {
     public UnrealCompileCommandResult(IReadOnlyList<CompileCommand> commands, UnrealBuildVariant variant, int modules, int responseFiles,
-        int unityMembers, int skippedGenerated, int missingSources, int supplemented = 0, int unreadableDirectories = 0)
+        int unityMembers, int skippedGenerated, int missingSources, int supplemented = 0, int unreadableDirectories = 0,
+        IReadOnlyList<UnityUnit>? units = null)
     {
         Commands = commands;
         Variant = variant;
@@ -48,7 +76,11 @@ public sealed class UnrealCompileCommandResult
         MissingSources = missingSources;
         Supplemented = supplemented;
         UnreadableDirectories = unreadableDirectories;
+        Units = units ?? Array.Empty<UnityUnit>();
     }
+
+    /// <summary>UBT unity 묶음입니다. 구성원은 <see cref="Commands"/>에도 파일별 명령으로 들어 있습니다.</summary>
+    public IReadOnlyList<UnityUnit> Units { get; }
 
     /// <summary>응답 파일이 없어 같은 모듈 명령이나 근사 명령으로 보완한 프로젝트 소스 수입니다.</summary>
     public int Supplemented { get; }
@@ -77,7 +109,8 @@ public sealed class UnrealCompileCommandResult
 /// <remarks>
 /// UBT를 다시 실행하지 않고 프로젝트·엔진 폴더에 아무것도 쓰지 않습니다. 근거와 측정은 R&D
 /// `ClangdFindings`의 "일반 빌드 응답 파일 변환"에 있습니다.
-/// - 파일별 응답 파일은 그대로, unity 응답 파일은 unity cpp의 #include 목록으로 개별 cpp에 펼칩니다.
+/// - 파일별 응답 파일은 그대로, unity 응답 파일은 unity cpp의 #include 목록으로 개별 cpp에 펼치고 묶음 구성(<see cref="UnityUnit"/>)도
+///   함께 돌려줍니다. 색인은 묶음 단위로 합니다(<see cref="CompileContextBuilder"/>).
 /// - MSVC PCH(/Yu /Yc /Fp)와 출력·로그 옵션을 빼되, /Yu 대상인 PCH 헤더의 강제 include는 텍스트 포함으로 남깁니다.
 ///   Unreal 프로젝트 소스는 공유 PCH가 넣어 주는 엔진 헤더에 기대는 경우가 흔해, 빼면 실제 빌드는 통과하는 TU가 불완전 타입·
 ///   미선언 이름 오류로 분석되고 그 TU의 정의·참조가 색인에서 조용히 빠집니다(2026-10-09 검토: 실제 프로젝트 TU 82개 중 30개 오류,
@@ -164,6 +197,7 @@ public static class UnrealCompileCommands
     {
         var directory = Normalize(Path.Combine(engineRoot, "Engine", "Source"));
         var commands = new Dictionary<string, CompileCommand>(StringComparer.OrdinalIgnoreCase);
+        var units = new List<UnityUnit>();
         int modules = 0, responseFiles = 0, unityMembers = 0, skippedGenerated = 0, missingSources = 0;
         foreach (var root in BuildRoots(projectDirectory, variant.RelativeDirectory))
         {
@@ -172,6 +206,9 @@ public static class UnrealCompileCommands
                 cancellationToken.ThrowIfCancellationRequested();
                 modules++;
                 var sources = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
+                // 구성원이 명령을 받은 unity cpp입니다. 파일별 응답 파일이 있는 구성원은 따로 컴파일되었으므로 묶음에서 뺍니다.
+                var unitOf = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+                var unity = new List<(string Source, IReadOnlyList<string> Arguments, string[] Members)>();
                 foreach (var responseFile in SafeFiles(module, "*.obj.rsp").OrderBy(f => f, StringComparer.OrdinalIgnoreCase))
                 {
                     if (!TryConvert(Expand(responseFile, 0), out var source, out var arguments))
@@ -182,20 +219,26 @@ public static class UnrealCompileCommands
                     responseFiles++;
                     if (IsUnitySource(source, module))
                     {
-                        foreach (var member in ReadUnityMembers(source))
+                        var members = ReadUnityMembers(source).Select(Normalize).ToArray();
+                        unity.Add((Normalize(source), arguments, members));
+                        foreach (var member in members)
                         {
                             unityMembers++;
-                            var normalizedMember = Normalize(member);
-                            if (!sources.ContainsKey(normalizedMember)) sources[normalizedMember] = arguments;
+                            if (sources.ContainsKey(member)) continue;
+                            sources[member] = arguments;
+                            unitOf[member] = Normalize(source);
                         }
                     }
                     else
                     {
                         // 파일별 응답 파일은 unity 구성보다 우선합니다(적응형 unity로 따로 컴파일된 파일).
-                        sources[Normalize(source)] = arguments;
+                        var normalized = Normalize(source);
+                        sources[normalized] = arguments;
+                        unitOf.Remove(normalized);
                     }
                 }
 
+                var grouped = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
                 foreach (var pair in sources)
                 {
                     var source = Normalize(pair.Key);
@@ -214,14 +257,22 @@ public static class UnrealCompileCommands
                     if (!commands.ContainsKey(source))
                     {
                         commands[source] = new CompileCommand(directory, source, new[] { compiler, "--driver-mode=cl" }.Concat(pair.Value).Concat(new[] { source }).ToArray());
+                        if (unitOf.ContainsKey(source)) grouped.Add(source);
                     }
+                }
+
+                foreach (var (unitySource, arguments, members) in unity)
+                {
+                    var kept = members.Where(m => grouped.Contains(m) && string.Equals(unitOf[m], unitySource, StringComparison.OrdinalIgnoreCase))
+                        .Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+                    if (kept.Length > 0) units.Add(new UnityUnit(unitySource, directory, new[] { compiler, "--driver-mode=cl" }.Concat(arguments).ToArray(), kept));
                 }
             }
         }
 
         var (supplemented, unreadable) = SupplementMissing(projectDirectory, commands, overrideDirectory, cancellationToken);
         return new UnrealCompileCommandResult(commands.Values.OrderBy(c => c.File, StringComparer.OrdinalIgnoreCase).ToArray(), variant,
-            modules, responseFiles, unityMembers, skippedGenerated, missingSources, supplemented, unreadable);
+            modules, responseFiles, unityMembers, skippedGenerated, missingSources, supplemented, unreadable, units);
     }
 
     /// <summary>

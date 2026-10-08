@@ -28,6 +28,8 @@ internal static class Program
         Run("링크를 거친 Solution의 clangd 결과 경로 보정", SemanticNavigationTests.RunPathAliases);
         Run("LSP 연결 요청·통지·취소·끊김", SemanticNavigationTests.RunConnection);
         Run("Unreal 응답 파일 compilation database", SemanticNavigationTests.RunUnrealCommands);
+        Run("Unreal unity 묶음 합성 TU", SemanticNavigationTests.RunUnityUnits);
+        Run("unity 묶음 색인 통합(구성원 참조·구성원 자기 명령)", SemanticNavigationTests.RunUnityIntegration);
         Run("clangd 세션 통합", SemanticNavigationTests.RunClangdIntegration);
         Run("clangd 문서 집합 임대·리비전·용량", SemanticNavigationTests.RunDocumentSet);
         Run("컴파일 문맥 준비", SemanticNavigationTests.RunCompileContext);

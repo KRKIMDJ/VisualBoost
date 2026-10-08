@@ -527,6 +527,144 @@ internal static class SemanticNavigationTests
         }
     }
 
+    /// <summary>UBT unity 묶음 구성과 캐시 폴더의 합성 TU·database 기록을 확인합니다.</summary>
+    public static void RunUnityUnits()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.UnityUnits." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var engine = Path.Combine(root, "Engine Root");
+            var project = Path.Combine(root, "Game");
+            Write(Path.Combine(project, "Game.uproject"), "{}");
+            var source = Path.Combine(project, "Source", "Game");
+            Write(Path.Combine(source, "Game.Build.cs"), "");
+            string Source(string name) => Path.Combine(source, name).Replace('\\', '/');
+            foreach (var name in new[] { "U1.cpp", "U2.cpp", "U3.cpp", "Solo.cpp", "Adaptive.cpp" }) Write(Source(name), "int " + name.Replace(".cpp", "") + ";");
+            var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
+            string Rsp(string file, string flag) => $"\"{file.Replace('\\', '/')}\"\n/I \"Runtime/Core/Public\"\n{flag}\n/TP\n/std:c++20\n";
+            string Include(string file) => $"#include \"{file}\"\n";
+            var generated = Path.Combine(project, "Intermediate", "Build", "Win64", "UnrealEditor", "Inc", "Game", "UHT", "U1.gen.cpp").Replace('\\', '/');
+            // 묶음 1: 생성 파일·따로 컴파일된 파일(Adaptive)·지운 파일(Gone)을 빼면 U1, U2. 묶음 2: 구성원이 하나뿐이라 파일별로 둡니다.
+            var unity1 = Path.Combine(build, "Module.Game.1.cpp");
+            Write(unity1, "// generated\n" + Include(generated) + Include(Source("U1.cpp")) + Include(Source("Adaptive.cpp")) + Include(Source("U2.cpp")) +
+                          Include(Source("Gone.cpp")));
+            Write(unity1 + ".obj.rsp", Rsp(unity1, "/DUNIT=1"));
+            var unity2 = Path.Combine(build, "Module.Game.2.cpp");
+            Write(unity2, Include(Source("U3.cpp")));
+            Write(unity2 + ".obj.rsp", Rsp(unity2, "/DUNIT=2"));
+            Write(Path.Combine(build, "Adaptive.cpp.obj.rsp"), Rsp(Source("Adaptive.cpp"), "/DADAPTIVE=1"));
+            Write(Path.Combine(build, "Solo.cpp.obj.rsp"), Rsp(Source("Solo.cpp"), "/DSOLO=1"));
+
+            var variant = UnrealCompileCommands.DetectVariant(project)!;
+            var result = UnrealCompileCommands.Build(project, engine, variant, "clang-cl.exe");
+            var names = result.Commands.Select(c => Path.GetFileName(c.File)).OrderBy(f => f, StringComparer.Ordinal).ToArray();
+            Check(names.SequenceEqual(new[] { "Adaptive.cpp", "Solo.cpp", "U1.cpp", "U2.cpp", "U3.cpp" }), "구성원도 파일별 명령: " + string.Join(",", names));
+            var units = result.Units.OrderBy(u => u.Source, StringComparer.Ordinal).ToArray();
+            Check(units.Length == 2 && units[0].Members.SequenceEqual(new[] { Source("U1.cpp"), Source("U2.cpp") }) &&
+                  units[1].Members.SequenceEqual(new[] { Source("U3.cpp") }),
+                "묶음 구성원(생성·따로 컴파일·없는 파일 제외, 포함 순서): " + string.Join(" | ", units.Select(u => string.Join(",", u.Members.Select(Path.GetFileName)))));
+            var u1 = result.Commands.Single(c => c.File == Source("U1.cpp"));
+            Check(units[0].Arguments.SequenceEqual(u1.Arguments.Take(u1.Arguments.Count - 1)) && units[0].Arguments.Contains("/DUNIT=1") &&
+                  result.Commands.Single(c => c.File == Source("Adaptive.cpp")).Arguments.Contains("/DADAPTIVE=1"), "묶음 명령은 구성원 명령의 source 앞부분");
+
+            var cache = Path.Combine(root, "cache");
+            var context = CompileContextBuilder.Prepare(Path.Combine(project, "Game.sln"), cache, engine, "clang-cl.exe");
+            var written = CompileCommandDatabase.Read(Path.Combine(context.Directory, CompileCommandDatabase.FileName));
+            var unitFile = Path.Combine(context.Directory, "units", "Module.Game.1.cpp").Replace('\\', '/');
+            var writtenNames = written.Select(c => Path.GetFileName(c.File)).ToArray();
+            Check(context.Kind == CompileContextKind.Unreal && context.Commands.Count == 5 && context.UnitCount == 1 &&
+                  writtenNames.SequenceEqual(new[] { "Module.Game.1.cpp", "Adaptive.cpp", "Solo.cpp", "U3.cpp", Path.GetFileName(context.IndexStartPath) }),
+                "database는 묶음 + 묶이지 않은 파일 + 색인 시작 문서: " + string.Join(",", writtenNames));
+            Check(written[0].File == unitFile && written[0].Arguments.Last() == unitFile && written[0].Arguments.Contains("/DUNIT=1") &&
+                  File.ReadAllText(unitFile).EndsWith(Include(Source("U1.cpp")) + Include(Source("U2.cpp")), StringComparison.Ordinal),
+                "합성 TU는 캐시 폴더에 구성원만 포함: " + File.ReadAllText(unitFile));
+            Check(context.IsUnitMember(Path.Combine(source, "U1.cpp")) && context.IsUnitMember(Source("U2.cpp").ToUpperInvariant()) &&
+                  !context.IsUnitMember(Source("U3.cpp")) && !context.IsUnitMember(Source("Solo.cpp")) && context.Summary.Contains("unity 묶음 1개로 2개 색인"),
+                "묶음 구성원 판정과 요약: " + context.Summary);
+
+            // 같은 구성이면 합성 TU를 다시 쓰지 않고(clangd가 묶음을 새로 색인하지 않게), 쓰지 않는 묶음 파일은 지웁니다.
+            var stamp = DateTime.UtcNow.AddMinutes(-5);
+            File.SetLastWriteTimeUtc(unitFile, stamp);
+            var stale = Path.Combine(context.Directory, "units", "Module.Old.1.cpp");
+            Write(stale, "#include \"x.cpp\"\n");
+            var again = CompileContextBuilder.Prepare(Path.Combine(project, "Game.sln"), cache, engine, "clang-cl.exe");
+            Check(!again.Changed && File.GetLastWriteTimeUtc(unitFile) == stamp && !File.Exists(stale), "같은 구성은 그대로 두고 쓰지 않는 묶음은 지움");
+
+            // 구성원이 하나로 줄면 묶지 않고 파일별로 돌아갑니다.
+            File.Delete(Source("U2.cpp"));
+            var single = CompileContextBuilder.Prepare(Path.Combine(project, "Game.sln"), cache, engine, "clang-cl.exe");
+            var singleNames = CompileCommandDatabase.Read(Path.Combine(single.Directory, CompileCommandDatabase.FileName)).Select(c => Path.GetFileName(c.File)).ToArray();
+            Check(single.Changed && single.UnitCount == 0 && !single.IsUnitMember(Source("U1.cpp")) && !File.Exists(unitFile) && singleNames.Contains("U1.cpp"),
+                "구성원이 하나뿐인 묶음은 파일별: " + string.Join(",", singleNames));
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    /// <summary>실제 clangd로 unity 묶음 색인의 구성원 참조와, 구성원을 열 때 자기 명령으로 분석하는지 확인합니다.</summary>
+    public static void RunUnityIntegration()
+    {
+        var clangd = FindClangd();
+        if (clangd is null)
+        {
+            Console.WriteLine("SKIP: unity 묶음 색인 통합 시험은 VISUALBOOST_TEST_CLANGD 또는 VS의 C++ Clang 도구가 필요합니다.");
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.UnityIntegration." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var project = Path.Combine(root, "Game");
+            Write(Path.Combine(project, "Game.uproject"), "{}");
+            var source = Path.Combine(project, "Source", "Game");
+            Write(Path.Combine(source, "Game.Build.cs"), "");
+            Write(Path.Combine(source, "Calc.h"), "#pragma once\nint Twice(int Value);\n");
+            var u1 = Path.Combine(source, "U1.cpp");
+            Write(u1, "#include \"Calc.h\"\nint Twice(int Value) { return Value * 2; }\n");
+            // 구성원 명령에만 있는 정의(GAME_UNIT)가 없으면 오류가 나도록 해, 열 때 자기 명령을 받는지 확인합니다.
+            // 같은 폴더의 Solo.cpp 명령에는 이 정의가 없어 clangd가 명령을 추정하면 오류가 납니다.
+            var u2 = Path.Combine(source, "U2.cpp");
+            var u2Text = "#include \"Calc.h\"\n#if !GAME_UNIT\n#error member command missing\n#endif\nint UseTwice() { return Twice(3); }\n";
+            Write(u2, u2Text);
+            var solo = Path.Combine(source, "Solo.cpp");
+            var soloText = "#include \"Calc.h\"\nint SoloUse() { return Twice(4); }\n";
+            Write(solo, soloText);
+            var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
+            var unity = Path.Combine(build, "Module.Game.1.cpp");
+            Write(unity, $"#include \"{u1.Replace('\\', '/')}\"\n#include \"{u2.Replace('\\', '/')}\"\n");
+            Write(unity + ".obj.rsp", $"\"{unity.Replace('\\', '/')}\"\n/DGAME_UNIT=1\n/TP\n/std:c++17\n/c\n");
+            Write(Path.Combine(build, "Solo.cpp.obj.rsp"), $"\"{solo.Replace('\\', '/')}\"\n/TP\n/std:c++17\n/c\n");
+
+            using var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
+                EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1
+            }, CancellationToken.None).Result;
+            Check(navigator.Context.UnitCount == 1 && navigator.Context.IsUnitMember(u2) && navigator.Context.Commands.Count == 3, "묶음 색인 준비");
+            Check(SpinUntil(() => navigator.Progress.Completed, 60000), "묶음 색인 완료");
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var soloLine = soloText.Split('\n')[1];
+            var references = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(solo, soloText, 1), 1, soloLine.IndexOf("Twice", StringComparison.Ordinal)),
+                timeout.Token).Result;
+            Check(references.Locations.Any(l => l.Path == u1) && references.Locations.Any(l => l.Path == u2),
+                "묶음으로 색인한 구성원의 정의·참조: " + string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path))));
+
+            var u2Line = u2Text.Split('\n')[4];
+            var definition = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(u2, u2Text, 1), 4, u2Line.IndexOf("Twice(3", StringComparison.Ordinal)),
+                null, timeout.Token).Result;
+            Check(definition.Locations.Any(l => l.Path == u1) && navigator.ErrorsOf(u2) is null,
+                "구성원을 열면 자기 명령으로 분석: " + string.Join(",", definition.Locations) + " / " + navigator.ErrorsOf(u2)?.FirstMessage);
+            navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
     /// <summary>실제 clangd로 세션 수명·문서 동기화·정의·참조·background index 완료 신호를 확인합니다.</summary>
     public static void RunClangdIntegration()
     {

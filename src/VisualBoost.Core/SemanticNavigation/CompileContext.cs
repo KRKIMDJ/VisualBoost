@@ -45,9 +45,12 @@ public sealed class CompileCommandSources
 /// <summary>clangd에 넘길 compilation database와 그 출처입니다.</summary>
 public sealed class CompileContext
 {
+    private readonly HashSet<string> unitMembers;
+
     public CompileContext(CompileContextKind kind, string directory, IReadOnlyList<CompileCommand> commands, string summary, string? reason,
-        string? engineRoot, bool changed, PathAliases? paths = null)
+        string? engineRoot, bool changed, PathAliases? paths = null, IEnumerable<string>? unitMembers = null, int unitCount = 0)
     {
+        UnitCount = unitCount;
         Kind = kind;
         Directory = directory;
         Commands = commands;
@@ -56,6 +59,7 @@ public sealed class CompileContext
         EngineRoot = engineRoot;
         Changed = changed;
         Paths = paths ?? PathAliases.None;
+        this.unitMembers = new HashSet<string>((unitMembers ?? Array.Empty<string>()).Select(FullPath), StringComparer.OrdinalIgnoreCase);
     }
 
     public CompileContextKind Kind { get; }
@@ -63,7 +67,25 @@ public sealed class CompileContext
     /// <summary>compile_commands.json과 clangd 색인 캐시(.cache/clangd)를 두는 VisualBoost 전용 폴더입니다.</summary>
     public string Directory { get; }
 
+    /// <summary>
+    /// 파일별 컴파일 명령입니다. unity 묶음으로 색인하는 구성원도 자기 명령을 가지며, compile_commands.json에는 그 대신 묶음 명령이
+    /// 들어갑니다(<see cref="IsUnitMember"/>).
+    /// </summary>
     public IReadOnlyList<CompileCommand> Commands { get; }
+
+    /// <summary>unity 묶음 수입니다.</summary>
+    public int UnitCount { get; }
+
+    /// <summary>
+    /// compile_commands.json에 자기 명령 없이 unity 묶음으로 색인하는 파일인지 봅니다. 이런 파일을 clangd에 열 때는
+    /// <see cref="Commands"/>의 자기 명령을 덮어쓰기로 줘야 합니다.
+    /// </summary>
+    public bool IsUnitMember(string path) => unitMembers.Count > 0 && unitMembers.Contains(FullPath(path));
+
+    /// <summary>unity 묶음 합성 TU를 두는 캐시 하위 폴더입니다.</summary>
+    internal static string UnitsDirectoryOf(string directory) => Path.Combine(directory, "units");
+
+    private static string FullPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
 
     public string Summary { get; }
 
@@ -172,11 +194,13 @@ public static class CompileContextBuilder
                     CompileContext.OverrideDirectoryOf(directory));
                 if (result.Commands.Count > 0)
                 {
-                    var changed = WriteDatabase(directory, paths.ToReal(result.Commands));
+                    var (indexed, members, units) = PlanUnits(directory, result, paths);
+                    var changed = WriteDatabase(directory, indexed);
                     var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0}" +
+                                  (units > 0 ? $", unity 묶음 {units:N0}개로 {members.Count:N0}개 색인" : string.Empty) +
                                   (result.Supplemented > 0 ? $", 빌드 기록 없는 파일 {result.Supplemented:N0}개 보완" : string.Empty) +
                                   (result.UnreadableDirectories > 0 ? $", 읽지 못해 건너뛴 소스 폴더 {result.UnreadableDirectories:N0}개" : string.Empty) + ")";
-                    return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths);
+                    return new CompileContext(CompileContextKind.Unreal, directory, result.Commands, summary, null, engineRoot, changed, paths, members, units);
                 }
 
                 unrealReason = $"Unreal 빌드 응답 파일({variant})에서 컴파일 명령을 만들지 못했습니다.";
@@ -227,6 +251,73 @@ public static class CompileContextBuilder
 
         return new CompileContext(CompileContextKind.None, directory, Array.Empty<CompileCommand>(), string.Empty,
             unrealReason ?? toolReason ?? "compile_commands.json을 찾지 못했습니다.", engineRoot, false);
+    }
+
+    /// <summary>
+    /// UBT unity 묶음을 캐시 폴더의 합성 TU로 바꾸고, compile_commands.json에 넣을 명령(묶음 + 묶이지 않은 파일)을 만듭니다.
+    /// </summary>
+    /// <remarks>
+    /// 구성원 cpp마다 TU로 색인하면 TU마다 공유 PCH 같은 큰 헤더를 다시 분석해 첫 색인이 오래 걸립니다. UBT가 실제 빌드에서 함께
+    /// 컴파일한 구성만 묶으므로 이름 충돌 없이 분석되고, 구성원 정의·참조는 묶음 색인에 그대로 남습니다(테스트 전용 UE 샘플: 구성원 305개 →
+    /// 묶음 12개, 정의·참조 결과 같음, 첫 색인 445초 → 52초·CPU 3,205초 → 190초, 2026-10-09 측정). UBT unity cpp를 그대로 쓰지 않는 이유는
+    /// 생성 파일(.gen.cpp)과 빌드 뒤 지운 파일, 따로 컴파일된 파일을 빼야 하기 때문입니다. 구성원이 하나뿐인 묶음은 이득이 없어 파일별로 둡니다.
+    /// 내용이 같으면 다시 쓰지 않아 clangd가 묶음을 새로 색인하지 않게 하고, 더 쓰지 않는 묶음 파일은 지웁니다.
+    /// </remarks>
+    private static (IReadOnlyList<CompileCommand> Database, IReadOnlyList<string> Members, int Units) PlanUnits(string directory,
+        UnrealCompileCommandResult result, PathAliases paths)
+    {
+        var unitsDirectory = CompileContext.UnitsDirectoryOf(directory);
+        var database = new List<CompileCommand>();
+        var members = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var unit in result.Units.Where(u => u.Members.Count > 1).OrderBy(u => u.Source, StringComparer.OrdinalIgnoreCase))
+        {
+            var name = Path.GetFileName(unit.Source);
+            for (var n = 2; names.Contains(name); n++)
+            {
+                name = Path.GetFileNameWithoutExtension(unit.Source) + "-" + n.ToString(System.Globalization.CultureInfo.InvariantCulture) + Path.GetExtension(unit.Source);
+            }
+
+            names.Add(name);
+            var path = Path.Combine(unitsDirectory, name).Replace('\\', '/');
+            var text = new StringBuilder("// VisualBoost 색인용 unity 묶음: ").Append(unit.Source).Append('\n');
+            foreach (var member in unit.Members)
+            {
+                // clangd에는 실제 경로를 줍니다(PathAliases 참고). 구성원 경로에 따옴표는 올 수 없습니다.
+                text.Append("#include \"").Append(paths.ToReal(member)).Append("\"\n");
+            }
+
+            WriteTextIfChanged(path, text.ToString());
+            database.Add(new CompileCommand(paths.ToReal(unit.Directory), path, unit.Arguments.Concat(new[] { path }).ToArray()));
+            members.UnionWith(unit.Members);
+        }
+
+        database.AddRange(paths.ToReal(result.Commands.Where(c => !members.Contains(c.File)).ToArray()));
+        RemoveStaleUnits(unitsDirectory, names);
+        return (database, members.ToArray(), names.Count);
+    }
+
+    private static void WriteTextIfChanged(string path, string text)
+    {
+        if (File.Exists(path) && File.ReadAllText(path) == text) return;
+        System.IO.Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, text);
+    }
+
+    /// <summary>이번에 쓰지 않은 묶음 파일을 지웁니다. 지우지 못해도 database에 없으므로 색인에는 영향이 없어 건너뜁니다.</summary>
+    private static void RemoveStaleUnits(string unitsDirectory, ISet<string> keep)
+    {
+        foreach (var file in SafeFiles(unitsDirectory, "*.cpp"))
+        {
+            if (keep.Contains(Path.GetFileName(file))) continue;
+            try
+            {
+                File.Delete(file);
+            }
+            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+            {
+            }
+        }
     }
 
     /// <summary>
