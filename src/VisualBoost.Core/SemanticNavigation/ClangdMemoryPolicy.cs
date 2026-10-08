@@ -104,8 +104,14 @@ public sealed class ClangdMemoryPolicy
     /// <summary>색인 결과를 다시 읽으려고 다시 시작하기 전에 기다리는 요청 없는 시간입니다.</summary>
     public static readonly TimeSpan ReloadIdle = TimeSpan.FromSeconds(10);
 
-    /// <summary>한 Solution을 연 동안 색인 결과를 다시 읽으려고 다시 시작하는 최대 횟수입니다. 색인 파일을 남기지 못하는 경우의 반복을 막습니다.</summary>
+    /// <summary>
+    /// 색인 결과를 다시 읽으려고 연달아 다시 시작하는 최대 횟수입니다. 호출자는 다시 시작한 clangd가 공유 PCH 단위를 다시 색인하지 않고 색인을
+    /// 마치면 횟수를 0으로 돌리므로, 색인 파일을 남기지 못해 다시 시작할 때마다 같은 단위를 색인하는 경우만 막습니다.
+    /// </summary>
     public const int MaxReloads = 3;
+
+    /// <summary>한 Solution을 연 동안 색인 뒤 메모리를 돌려받으려고 다시 시작하는 최대 횟수입니다. 다시 읽기 횟수와 따로 셉니다.</summary>
+    public const int MaxReclaims = 3;
 
     /// <summary>
     /// 색인 결과를 다시 읽으려고(<see cref="ClangdNavigator.NeedsReload"/>) 지금 다시 시작할지 정합니다. 결과가 틀린 채 남지 않도록 메모리 기준과
@@ -126,8 +132,8 @@ public sealed class ClangdMemoryPolicy
     /// 남고 다시 시작하면 0.3 GB였습니다(2026-10-09). 정리 기준을 이 수준으로 낮추면 공유 PCH 문서 하나(약 2.1 GB)만 열어 둬도 쉴 때마다
     /// 다시 시작하므로, 기준은 그대로 두고 색인한 세션에만 한 번 다시 시작합니다. 다시 시작한 세션은 저장된 색인을 읽어 다시 색인하지 않습니다.
     /// </remarks>
-    public static bool ShouldReclaimAfterIndex(int indexedUnits, ClangdMemorySample sample, int reloads) =>
-        indexedUnits > 0 && reloads < MaxReloads && !sample.Indexing && !sample.Busy && sample.SinceLastRequest >= DefaultIdle &&
+    public static bool ShouldReclaimAfterIndex(int indexedUnits, ClangdMemorySample sample, int reclaims) =>
+        indexedUnits > 0 && reclaims < MaxReclaims && !sample.Indexing && !sample.Busy && sample.SinceLastRequest >= DefaultIdle &&
         sample.PrivateBytes > ReclaimFloorBytes;
 
     /// <summary>옵션 값(MB)을 상한으로 바꿉니다. 0 이하면 이 PC의 <see cref="DefaultLimitBytes"/>입니다.</summary>

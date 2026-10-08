@@ -111,8 +111,15 @@ internal sealed class SemanticNavigationService : IDisposable
     private int exitPauses;
     private readonly Timer memoryTimer;
     private ClangdMemoryPolicy memoryPolicy;
-    // 이 Solution을 연 뒤 색인 결과를 다시 읽으려고 다시 시작한 횟수입니다(ClangdMemoryPolicy.ShouldReload).
+    // 색인 결과를 다시 읽으려고 연달아 다시 시작한 횟수입니다(ClangdMemoryPolicy.ShouldReload). 다시 시작한 clangd가 공유 PCH 단위를 다시
+    // 색인하지 않고 색인을 마치면 0으로 돌립니다. 색인 파일을 남기지 못해 되풀이되는 경우만 상한에 닿습니다(피드백 검토 33).
     private int reloads;
+    // 이 Solution을 연 뒤 색인 뒤 메모리를 돌려받으려고 다시 시작한 횟수입니다(ClangdMemoryPolicy.ShouldReclaimAfterIndex). 다시 읽기와 따로 셉니다.
+    private int reclaims;
+    // 마지막으로 떼어 낸 탐색기의 종료입니다. 새 탐색기는 이 종료를 기다린 뒤 캐시 폴더를 준비해, 이전 세션의 늦은 판단 기록과 겹치지 않습니다.
+    private Task previousShutdown = Task.CompletedTask;
+    // 색인 로그를 읽지 못한다고 이미 알린 탐색기입니다.
+    private ClangdNavigator? warnedLogFormat;
     // 요청이 탐색기를 받아 간 마지막 시각입니다. 받아 간 뒤 탐색기에 요청을 등록하기 전의 틈에 메모리 정리가 끼지 않게 합니다.
     private DateTime lastAcquireUtc;
     private int disposed;
@@ -210,6 +217,7 @@ internal sealed class SemanticNavigationService : IDisposable
             exitPauses = 0;
             memoryPolicy = new ClangdMemoryPolicy(settings.MemoryLimitBytes);
             reloads = 0;
+            reclaims = 0;
             folderRetries = 0;
             unavailableReason = null;
             start = solutionPath is not null && settings.Enabled && settings.StartOnSolutionOpen;
@@ -338,6 +346,8 @@ internal sealed class SemanticNavigationService : IDisposable
                     lines.Add($"공유 PCH: {mode} · 포함한 색인 단위 {plan.PchUnitCount:N0}/{plan.SwitchableUnitCount:N0}개");
                 }
 
+                if (current.IndexLogUnreadable) lines.Add("주의: " + IndexLogUnreadableMessage);
+
                 lines.Add("clangd: " + clangdPath + $" (PID {current.ProcessId})");
                 lines.Add($"메모리 정리 기준: {memoryPolicy.EffectiveLimitBytes / (1024 * 1024):N0} MB(넘으면 탐색하지 않는 동안 다시 시작)");
                 lines.Add("캐시: " + current.Context.Directory);
@@ -428,6 +438,7 @@ internal sealed class SemanticNavigationService : IDisposable
             }
 
             lock (gate) clangdPath = executable;
+            await WaitForPreviousShutdownAsync(cancellationToken).ConfigureAwait(false);
             var sources = await CollectSourcesAsync(cancellationToken).ConfigureAwait(false);
             var created = await ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
@@ -662,6 +673,11 @@ internal sealed class SemanticNavigationService : IDisposable
         var sample = new ClangdMemorySample(bytes, current.Progress.Active, current.IsBusy, now - lastRequest, now - current.StartedUtc);
         var needsReload = current.NeedsReload;
         var indexedUnits = current.IndexedUnits;
+        if (current.IndexLogUnreadable && !ReferenceEquals(Interlocked.Exchange(ref warnedLogFormat, current), current))
+        {
+            ActivityLog.LogWarning("VisualBoost/SemanticNavigation", IndexLogUnreadableMessage + " clangd: " + clangdPath);
+        }
+
         string message;
         ClangdNavigator? stopped;
         SourceChangeMonitor? watcher;
@@ -672,15 +688,18 @@ internal sealed class SemanticNavigationService : IDisposable
                 return;
             }
 
+            // 다시 시작한 clangd가 공유 PCH 단위를 다시 색인하지 않고 색인을 마쳤으면 다시 읽기가 끝난 것이므로 연속 횟수를 돌립니다.
+            if (sample.SinceStart >= ClangdMemoryPolicy.SettleTime && current.Progress.Completed && !current.PchUnitsIndexed) reloads = 0;
+
             // 색인 결과 다시 읽기와 색인 뒤 메모리 회수를 먼저 봅니다. 메모리 정책의 판단은 다시 시작을 정하면 상태가 바뀌므로 필요할 때만 묻습니다.
             if (ClangdMemoryPolicy.ShouldReload(needsReload, sample, reloads))
             {
                 reloads++;
                 message = "공유 PCH를 넣어 다시 색인한 결과를 읽도록 clangd를 다시 시작합니다.";
             }
-            else if (ClangdMemoryPolicy.ShouldReclaimAfterIndex(indexedUnits, sample, reloads))
+            else if (ClangdMemoryPolicy.ShouldReclaimAfterIndex(indexedUnits, sample, reclaims))
             {
-                reloads++;
+                reclaims++;
                 message = $"색인({indexedUnits:N0}개)을 마친 clangd가 쥐고 있는 메모리 {bytes / (1024 * 1024):N0} MB를 돌려받도록 유휴 상태에서 다시 시작합니다.";
             }
             else if (memoryPolicy.ShouldRestart(sample))
@@ -728,7 +747,7 @@ internal sealed class SemanticNavigationService : IDisposable
 
         if (current is not null)
         {
-            _ = Task.Run(async () =>
+            var shutdown = Task.Run(async () =>
             {
                 try
                 {
@@ -739,12 +758,30 @@ internal sealed class SemanticNavigationService : IDisposable
                     current.Dispose();
                 }
             });
+            lock (gate) previousShutdown = shutdown;
         }
 
         RaiseStateChanged();
     }
 
     private void RaiseStateChanged() => StateChanged?.Invoke();
+
+    private const string IndexLogUnreadableMessage =
+        "clangd 색인 로그를 읽지 못해 공유 PCH 자동 판단과 색인 뒤 메모리 정리를 하지 못했습니다. clangd 버전이 바뀌었을 수 있습니다. " +
+        "공유 PCH에 기대는 파일의 참조가 빠지면 옵션 'Unreal 공유 PCH 포함'을 항상으로 바꾸세요.";
+
+    /// <summary>
+    /// 떼어 낸 이전 탐색기의 종료를 기다립니다(최대 5초). 이전 clangd가 종료 중에 알린 색인 실패를 기록하는 것과 새 세션이 같은 캐시 폴더의
+    /// 합성 TU·판단 기록을 준비하는 것이 겹치지 않게 하고, 두 clangd가 같은 색인 폴더에 함께 쓰지 않게 합니다.
+    /// </summary>
+    private async Task WaitForPreviousShutdownAsync(CancellationToken cancellationToken)
+    {
+        Task previous;
+        lock (gate) previous = previousShutdown;
+        if (previous.IsCompleted) return;
+        await Task.WhenAny(previous, Task.Delay(TimeSpan.FromSeconds(5), cancellationToken)).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+    }
 
     /// <summary>Solution 정보(UI thread)와 현재 VS의 빌드 도구 경로를 묶습니다.</summary>
     private async Task<CompileCommandSources> CollectSourcesAsync(CancellationToken cancellationToken)

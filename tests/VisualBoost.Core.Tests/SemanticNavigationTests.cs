@@ -174,7 +174,21 @@ internal static class SemanticNavigationTests
               !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, Sample(ClangdMemoryPolicy.ReclaimFloorBytes / 2), 0) &&
               !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, Sample(2 * Gib, sinceRequest: ClangdMemoryPolicy.ReloadIdle), 0) &&
               !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, Sample(2 * Gib, indexing: true), 0) &&
-              !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, indexed, ClangdMemoryPolicy.MaxReloads), "색인 뒤 메모리 회수 판단");
+              !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, indexed, ClangdMemoryPolicy.MaxReclaims), "색인 뒤 메모리 회수 판단");
+
+        // 로그 형식 확인은 이 세션이 쓴 색인 파일이 있는지로 실제 색인을 판단합니다.
+        var shards = Path.Combine(Path.GetTempPath(), "VisualBoost.Shards." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Directory.CreateDirectory(shards);
+            File.WriteAllText(Path.Combine(shards, "a.idx"), "x");
+            Check(ClangdNavigator.IndexWrittenSince(shards, DateTime.UtcNow.AddMinutes(-1)) && !ClangdNavigator.IndexWrittenSince(shards, DateTime.UtcNow.AddMinutes(1)) &&
+                  !ClangdNavigator.IndexWrittenSince(Path.Combine(shards, "none"), DateTime.MinValue), "세션 뒤 쓴 색인 파일 판단");
+        }
+        finally
+        {
+            TryDelete(shards);
+        }
     }
 
     public static void RunOwnDefinitionReferences()
@@ -793,8 +807,41 @@ internal static class SemanticNavigationTests
                   !always.Plan.DocumentCommand(Source("U5.cpp"))!.WithoutPch && always.Plan.MarkNeedsPch(new[] { wrapper }).Count == 0 && always.Summary.Contains("공유 PCH 포함"),
                 "항상은 모든 단위에 PCH");
             var never = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe", pchMode: UnrealPchMode.Never);
+            var neverWrapper = Path.Combine(never.Directory, "units", "Module.Game.2.cpp");
+            var neverText = File.ReadAllText(neverWrapper);
+            never.Plan!.RecordFailure(neverWrapper);
             Check(never.Plan!.PchUnitCount == 0 && Database(never).All(c => !HasPch(c.Arguments)) && never.Plan.MarkNeedsPch(new[] { wrapper }).Count == 0,
                 "넣지 않음은 실패해도 바꾸지 않음");
+            // 넣지 않음으로 색인한 합성 TU는 내용을 달리해, 자동으로 바꾸면 clangd가 다시 색인하고 실패를 다시 알리게 합니다.
+            var backToAuto = CompileContextBuilder.Prepare(solution, cache, engine, "clang-cl.exe");
+            Check(neverText.Contains("공유 PCH 넣지 않음") && !File.ReadAllText(neverWrapper).Contains("공유 PCH 넣지 않음") && backToAuto.Plan!.PchUnitCount == 0,
+                "넣지 않음 합성 TU 구분");
+
+            // 판단은 실패를 받은 즉시 기록되어, 전환 전에 다시 시작해도 다음 세션이 PCH로 색인합니다(피드백 검토 34).
+            var fresh = Path.Combine(root, "cache-record");
+            var recorded = CompileContextBuilder.Prepare(solution, fresh, engine, "clang-cl.exe");
+            var unit2 = Path.Combine(recorded.Directory, "units", "Module.Game.2.cpp");
+            var solo = Database(recorded).First(c => Path.GetFileName(c.File).StartsWith("Solo-", StringComparison.Ordinal)).File;
+            recorded.Plan!.RecordFailure(unit2);
+            recorded.Plan.RecordFailure(solo);
+            recorded.Plan.RecordFailure(Source("Solo.cpp"));
+            Check(recorded.Plan.PchUnitCount == 0, "기록만으로는 이번 세션의 단위를 바꾸지 않음");
+            var next = CompileContextBuilder.Prepare(solution, fresh, engine, "clang-cl.exe");
+            var unit2Pch = Path.Combine(next.Directory, "units", "Module.Game.2.pch.cpp");
+            Check(next.Plan!.PchUnitCount == 2 && next.Plan.UnitUsesPch(Source("U4.cpp")) && File.Exists(unit2Pch),
+                "기록한 판단으로 다음 세션은 PCH 단위: " + next.Summary);
+            // 파일 하나짜리 PCH 단위의 문서는 처음부터 PCH로, 묶음 구성원과 헤더는 PCH 없이 엽니다(피드백 검토 38).
+            Check(!next.Plan.DocumentCommand(Source("Solo.cpp"))!.WithoutPch && next.Plan.DocumentCommand(Source("U5.cpp"))!.WithoutPch &&
+                  next.Plan.DocumentCommand(Source("Shared.h"))!.WithoutPch, "파일 하나짜리 PCH 단위 문서만 PCH로 시작");
+
+            // PCH를 넣고도 실패한 단위는 구성원이 그대로면 PCH를 유지하고, 바뀌면 PCH 없이 다시 판단합니다(피드백 검토 35).
+            next.Plan.RecordFailure(unit2Pch);
+            Check(CompileContextBuilder.Prepare(solution, fresh, engine, "clang-cl.exe").Plan!.UnitUsesPch(Source("U4.cpp")), "PCH로도 실패, 구성원 그대로면 유지");
+            File.SetLastWriteTimeUtc(Source("U5.cpp"), DateTime.UtcNow.AddMinutes(1));
+            var edited = CompileContextBuilder.Prepare(solution, fresh, engine, "clang-cl.exe");
+            Check(!edited.Plan!.UnitUsesPch(Source("U4.cpp")) && edited.Plan.UnitUsesPch(Source("Solo.cpp")) &&
+                  File.Exists(Path.Combine(edited.Directory, "units", "Module.Game.2.cpp")), "PCH로도 실패한 단위는 구성원이 바뀌면 다시 판단");
+            Check(!CompileContextBuilder.Prepare(solution, fresh, engine, "clang-cl.exe").Plan!.UnitUsesPch(Source("U4.cpp")), "다시 준비해도 풀린 판단 유지");
         }
         finally
         {

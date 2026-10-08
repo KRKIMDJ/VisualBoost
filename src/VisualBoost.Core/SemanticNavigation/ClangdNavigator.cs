@@ -158,6 +158,10 @@ public sealed class ClangdNavigator : IDisposable
     private bool pchFlushScheduled;
     private int pchUnitIndexed;
     private int indexedUnits;
+    // 색인 완료 줄을 하나라도 읽었는지(색인 시작 문서 포함), 로그 형식 확인을 시작했는지, 형식이 맞지 않는다고 판단했는지입니다.
+    private int indexedLineSeen;
+    private int logFormatChecking;
+    private int logFormatUnreadable;
     private bool touchRunning;
     private int activeRequests;
     private long lastRequestTicks = DateTime.UtcNow.Ticks;
@@ -169,7 +173,11 @@ public sealed class ClangdNavigator : IDisposable
         Context = context;
         this.session = session;
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
-        session.ProgressChanged += () => Changed?.Invoke();
+        session.ProgressChanged += () =>
+        {
+            if (Progress.Completed && Interlocked.Exchange(ref logFormatChecking, 1) == 0) _ = Task.Run(CheckLogFormatAsync);
+            Changed?.Invoke();
+        };
         var autoPch = context.Plan is { Mode: UnrealPchMode.Auto };
         if (autoPch)
         {
@@ -179,6 +187,7 @@ public sealed class ClangdNavigator : IDisposable
 
         session.TranslationUnitIndexed += path =>
         {
+            Volatile.Write(ref indexedLineSeen, 1);
             if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase)) return;
             Interlocked.Increment(ref indexedUnits);
             if (autoPch && path.EndsWith(UnrealIndexPlan.PchSuffix, StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref pchUnitIndexed, 1);
@@ -208,7 +217,10 @@ public sealed class ClangdNavigator : IDisposable
     /// <summary>마지막 탐색 요청이 시작하거나 끝난 시각(UTC)입니다. 요청이 없었으면 시작 시각입니다.</summary>
     public DateTime LastRequestUtc => new(Interlocked.Read(ref lastRequestTicks), DateTimeKind.Utc);
 
-    /// <summary>탐색 요청이나 저장 반영이 진행 중입니다. 메모리 정리 재시작을 미룰 때 씁니다.</summary>
+    /// <summary>
+    /// 탐색 요청, 저장 반영, 공유 PCH 전환(실패 모으기·명령 보내기)이 진행 중입니다. 메모리 정리·다시 읽기 재시작을 미룰 때 씁니다.
+    /// 전환 중에 다시 시작하면 그 세션의 전환이 끝나지 않고 다음 세션에서 다시 색인하게 됩니다.
+    /// </summary>
     public bool IsBusy
     {
         get
@@ -216,6 +228,11 @@ public sealed class ClangdNavigator : IDisposable
             lock (touchGate)
             {
                 if (touchRunning) return true;
+            }
+
+            lock (pchGate)
+            {
+                if (pchFlushScheduled || pchSwitches.Values.Any(sent => !sent.IsCompleted)) return true;
             }
 
             return Volatile.Read(ref activeRequests) > 0;
@@ -247,6 +264,19 @@ public sealed class ClangdNavigator : IDisposable
     /// 색인한 세션은 끝난 뒤 다시 시작해 돌려받습니다(<see cref="ClangdMemoryPolicy.ShouldReclaimAfterIndex"/>).
     /// </summary>
     public int IndexedUnits => Volatile.Read(ref indexedUnits);
+
+    /// <summary>이 clangd가 공유 PCH 합성 TU를 색인했습니다. 다시 읽기 재시작이 되풀이되는지 판단할 때 씁니다.</summary>
+    public bool PchUnitsIndexed => Volatile.Read(ref pchUnitIndexed) != 0;
+
+    /// <summary>
+    /// clangd가 색인 파일을 새로 썼는데 색인 완료 로그 줄을 하나도 읽지 못했습니다. clangd 버전이 바뀌어 로그 형식이 달라졌을 수 있으며,
+    /// 그동안 공유 PCH 자동 전환과 색인 뒤 메모리 정리가 동작하지 않습니다(연 문서의 PCH 전환은 진단 알림이라 계속 동작).
+    /// </summary>
+    /// <remarks>
+    /// 진척 알림만으로는 판단하지 않습니다. 저장된 색인을 읽기만 하는 재시작 세션도 진척을 알리고 완료 줄이 없어(2026-10-09 확인) 잘못
+    /// 판단하기 때문입니다. 첫 색인이 끝난 뒤 한 번, 이 세션이 시작한 뒤 쓴 색인 파일이 있는지로 실제 색인 여부를 봅니다.
+    /// </remarks>
+    public bool IndexLogUnreadable => Volatile.Read(ref logFormatUnreadable) != 0;
 
     public string LogPath => Path.Combine(Context.Directory, "clangd.log");
 
@@ -636,20 +666,17 @@ public sealed class ClangdNavigator : IDisposable
     /// </remarks>
     private void OnDiagnostics(string path, DocumentErrors? errors)
     {
+        // 대기 목록에서 빼는 것과 전환 등록을 한 잠금 안에서 해, 그 사이에 들어온 요청이 전환 전 분석으로 답받지 않게 합니다(피드백 검토 36).
+        // 잠금 순서는 pchGate → 계획·세션 잠금이며, 세션은 자기 잠금을 쥔 채 이 콜백을 부르지 않습니다.
         lock (pchGate)
         {
             if (!pchPending.Remove(path) || errors is null) return;
-        }
-
-        if (Context.Plan?.DocumentCommand(path, pch: true) is not { } choice) return;
-        // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다.
-        var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
-        Observe(reparsed);
-        var sent = Task.Run(() => SendSwitched(new[] { choice.Command }));
-        lock (pchGate)
-        {
+            if (Context.Plan?.DocumentCommand(path, pch: true) is not { } choice) return;
+            // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다.
+            var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
+            Observe(reparsed);
             pchReparses[path] = reparsed;
-            pchSwitches[path] = sent;
+            pchSwitches[path] = Task.Run(() => SendSwitched(new[] { choice.Command }));
         }
     }
 
@@ -659,20 +686,29 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     private async Task AwaitPchCheckAsync(string path, int version, IProgress<string>? progress, CancellationToken cancellationToken)
     {
+        bool pending;
+        Task? sent;
+        Task? reparsed;
         lock (pchGate)
         {
-            if (!pchPending.Contains(path)) return;
+            pending = pchPending.Contains(path);
+            pchSwitches.TryGetValue(path, out sent);
+            pchReparses.TryGetValue(path, out reparsed);
         }
 
-        await WaitForAnalysisAsync(path, version, options.CandidateTimeout, cancellationToken, reparse: false).ConfigureAwait(false);
-        Task? sent;
-        lock (pchGate)
+        // 판단 전도 아니고 진행 중인 전환도 없으면 바로 요청합니다. 이미 보낸 전환의 다시 분석은 clangd가 요청보다 먼저 처리합니다.
+        if (!pending && (sent is null || sent.IsCompleted && reparsed is not { IsCompleted: false })) return;
+        if (pending)
         {
-            if (!pchSwitches.TryGetValue(path, out sent)) return;
+            await WaitForAnalysisAsync(path, version, options.CandidateTimeout, cancellationToken, reparse: false).ConfigureAwait(false);
+            lock (pchGate)
+            {
+                if (!pchSwitches.TryGetValue(path, out sent)) return;
+            }
         }
 
         progress?.Report("공유 PCH를 넣어 다시 분석하는 중…");
-        await sent.ConfigureAwait(false);
+        await sent!.ConfigureAwait(false);
     }
 
     private static void Observe(Task task) =>
@@ -714,6 +750,9 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     private void OnIndexFailed(string translationUnit)
     {
+        // 판단은 바로 남깁니다. 모아서 전환하기 전에 다시 시작해도 다음 세션이 PCH로 색인합니다(clangd는 오류가 있던 같은 내용의 TU를
+        // 다시 색인하지 않아, 판단을 잃으면 그 단위가 계속 PCH 없이 남음).
+        Context.Plan!.RecordFailure(translationUnit);
         lock (pchGate)
         {
             failedUnits.Add(translationUnit);
@@ -730,8 +769,9 @@ public sealed class ClangdNavigator : IDisposable
         {
             await Task.Delay(options.PchSwitchDelay, lifetime.Token).ConfigureAwait(false);
         }
-        catch (OperationCanceledException)
+        catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
         {
+            // 판단은 실패를 받을 때 기록했으므로 다음 세션이 전환된 단위로 시작합니다.
             return;
         }
 
@@ -744,6 +784,51 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         SendSwitched(Context.Plan!.MarkNeedsPch(failed));
+    }
+
+    /// <summary>
+    /// 색인이 끝날 때 로그 형식이 맞는지 봅니다(<see cref="IndexLogUnreadable"/>). 이 세션이 색인 파일을 쓰지 않았으면 판단을 미루고 다음 색인
+    /// 완료 때 다시 봅니다. 한 번 판단하면 더 보지 않습니다.
+    /// </summary>
+    private async Task CheckLogFormatAsync()
+    {
+        var concluded = false;
+        try
+        {
+            // 마지막 TU의 색인 파일 쓰기와 로그 줄이 완료 알림보다 조금 늦을 수 있습니다.
+            await Task.Delay(TimeSpan.FromSeconds(3), lifetime.Token).ConfigureAwait(false);
+            if (!IndexWrittenSince(Path.Combine(Context.Directory, ".cache", "clangd", "index"), StartedUtc)) return;
+            concluded = true;
+            if (Volatile.Read(ref indexedLineSeen) != 0) return;
+            Volatile.Write(ref logFormatUnreadable, 1);
+            Changed?.Invoke();
+        }
+        catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
+        {
+            concluded = true;
+        }
+        finally
+        {
+            if (!concluded) Volatile.Write(ref logFormatChecking, 0);
+        }
+    }
+
+    /// <summary>폴더에 <paramref name="sinceUtc"/> 뒤에 쓴 파일이 있는지 봅니다. 읽지 못하면 없다고 봅니다.</summary>
+    public static bool IndexWrittenSince(string directory, DateTime sinceUtc)
+    {
+        try
+        {
+            if (!Directory.Exists(directory)) return false;
+            foreach (var file in new DirectoryInfo(directory).EnumerateFiles())
+            {
+                if (file.LastWriteTimeUtc > sinceUtc) return true;
+            }
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+        }
+
+        return false;
     }
 
     private void SendSwitched(IReadOnlyList<CompileCommand> commands)

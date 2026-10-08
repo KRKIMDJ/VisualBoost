@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.Globalization;
 using System.IO;
@@ -51,6 +52,8 @@ public sealed class UnrealDocumentCommand
 /// 알린 단위(<see cref="MarkNeedsPch"/>)만 넣습니다. clangd는 명령만 바뀐 TU를 다시 색인하지 않으므로(실행 중·다시 시작 모두, 2026-10-09
 /// 확인) PCH를 넣는 단위는 다른 합성 TU 경로(<c>.pch.cpp</c>)로 바꿔 새 TU로 색인하게 합니다. 이전 분석에 오류가 있었으므로 clangd는
 /// 구성원 파일의 색인도 새 결과로 바꿉니다. 판단은 구성(인자·구성원)이 같은 동안 캐시 폴더에 남겨 다음 세션에서 다시 실패하지 않게 합니다.
+/// clangd는 다시 시작해도 내용이 같으면 오류가 있던 TU를 다시 색인하지 않으므로(2026-10-09 확인) 판단은 실패를 알린 즉시 기록합니다
+/// (<see cref="RecordFailure"/>). 판단을 잃으면 그 단위는 내용이 바뀔 때까지 PCH 없는 색인으로 남습니다.
 /// </remarks>
 public sealed class UnrealIndexPlan
 {
@@ -64,18 +67,26 @@ public sealed class UnrealIndexPlan
     private readonly IReadOnlyList<Unit> units;
     private readonly Dictionary<string, Unit> unitOfMember = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CompileCommand> commandOfFile = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Unit> unitOfName = new(StringComparer.OrdinalIgnoreCase);
+    // PCH가 필요하다고 판단한 단위(단위 키 → 구성 지문)와 PCH를 넣고도 분석 오류가 난 단위(단위 키 → 그때의 구성원 파일 상태)입니다.
     private readonly Dictionary<string, string> decisions;
+    private readonly Dictionary<string, string> failedWithPch;
+
+    // 판단 기록 파일은 이전 세션의 늦은 기록과 새 세션의 준비가 겹칠 수 있어 캐시 폴더마다 잠그고, 읽는 쪽이 쓰다 만 파일을 보지 않게 바꿔치기로 씁니다.
+    private static readonly ConcurrentDictionary<string, object> DecisionLocks = new(StringComparer.OrdinalIgnoreCase);
 
     private UnrealIndexPlan(string directory, PathAliases paths, UnrealPchMode mode, IReadOnlyList<Unit> units, IEnumerable<CompileCommand> commands,
-        Dictionary<string, string> decisions)
+        Dictionary<string, string> decisions, Dictionary<string, string> failedWithPch)
     {
         this.directory = directory;
         this.paths = paths;
         Mode = mode;
         this.units = units;
         this.decisions = decisions;
+        this.failedWithPch = failedWithPch;
         foreach (var unit in units)
         {
+            unitOfName[unit.Name] = unit;
             foreach (var member in unit.Members) unitOfMember[FullPath(member)] = unit;
         }
 
@@ -127,17 +138,27 @@ public sealed class UnrealIndexPlan
             units.Add(new Unit(command.File, name, command.Directory, command.Arguments.Take(command.Arguments.Count - 1).ToArray(), new[] { command.File }));
         }
 
-        var decisions = mode == UnrealPchMode.Auto ? ReadDecisions(Path.Combine(directory, DecisionsFileName)) : new Dictionary<string, string>();
+        var decisions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var failedWithPch = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        if (mode == UnrealPchMode.Auto) ReadDecisions(directory, decisions, failedWithPch);
         foreach (var unit in units)
         {
             unit.NeedsPch = mode == UnrealPchMode.Always ||
                             mode == UnrealPchMode.Auto && decisions.TryGetValue(unit.Key, out var stamp) && stamp == unit.Stamp;
+            // PCH를 넣고도 분석 오류가 났던 단위(편집 중 문법 오류, 아직 생성하지 않은 헤더 등)는 PCH가 원인이 아니었을 수 있습니다.
+            // 그 뒤 구성원 파일이 바뀌었으면 PCH 없이 다시 판단합니다. 바뀌었으므로 clangd가 PCH 없는 합성 TU를 다시 색인해 실패 여부를
+            // 다시 알립니다. 그대로면 다시 색인되지 않아 판단을 바꿀 근거가 없으므로 PCH를 유지합니다.
+            if (unit.NeedsPch && mode == UnrealPchMode.Auto && failedWithPch.TryGetValue(unit.Key, out var print) && print != Fingerprint(unit.Members))
+            {
+                unit.NeedsPch = false;
+            }
         }
 
         // 구성이 바뀌어 더 쓰지 않는 판단은 버립니다. 파일에는 다음 판단을 기록할 때 반영됩니다.
         var current = new HashSet<string>(units.Where(u => u.NeedsPch).Select(u => u.Key), StringComparer.OrdinalIgnoreCase);
         foreach (var stale in decisions.Keys.Where(k => !current.Contains(k)).ToArray()) decisions.Remove(stale);
-        return new UnrealIndexPlan(directory, paths, mode, units, result.Commands, decisions);
+        foreach (var stale in failedWithPch.Keys.Where(k => !current.Contains(k)).ToArray()) failedWithPch.Remove(stale);
+        return new UnrealIndexPlan(directory, paths, mode, units, result.Commands, decisions, failedWithPch);
     }
 
     /// <summary>합성 TU로 색인하는 파일인지 봅니다.</summary>
@@ -155,11 +176,12 @@ public sealed class UnrealIndexPlan
     /// 해당 없으면 null입니다.
     /// </summary>
     /// <remarks>
-    /// <see cref="UnrealPchMode.Auto"/>는 단위 판단과 상관없이 PCH 없이 시작합니다. 단위는 구성원 하나만 PCH에 기대도 PCH로 바뀌는데, 그 단위의
-    /// 다른 문서까지 PCH로 열면 문서 하나에 4 GB 넘게 들었습니다(테스트 전용 UE 샘플, 2026-10-09). 혼자 열어 실패하는 문서는 호출자가 진단을
-    /// 보고 PCH를 넣어 다시 분석합니다.
+    /// <see cref="UnrealPchMode.Auto"/>는 묶음 구성원과 헤더를 단위 판단과 상관없이 PCH 없이 시작합니다. 묶음은 구성원 하나만 PCH에 기대도
+    /// PCH로 바뀌는데, 그 묶음의 다른 문서까지 PCH로 열면 문서 하나에 4 GB 넘게 들었습니다(테스트 전용 UE 샘플, 2026-10-09). 혼자 열어 실패하는
+    /// 문서는 호출자가 진단을 보고 PCH를 넣어 다시 분석합니다. 파일 하나만 담은 단위는 단위 판단이 곧 그 문서의 판단이므로 PCH 단위면
+    /// 처음부터 넣어, PCH 없는 분석을 한 번 더 하지 않습니다(피드백 검토 38: 실제 프로젝트 첫 요청 9.8~13.0초).
     /// </remarks>
-    /// <param name="pch">PCH 헤더를 넣을지입니다. null이면 <see cref="UnrealPchMode.Always"/>일 때만 넣습니다.</param>
+    /// <param name="pch">PCH 헤더를 넣을지입니다. null이면 <see cref="UnrealPchMode.Always"/>이거나 자동에서 파일 하나짜리 PCH 단위일 때 넣습니다.</param>
     public UnrealDocumentCommand? DocumentCommand(string path, bool? pch = null)
     {
         var header = DefinitionCandidates.IsHeader(path);
@@ -168,7 +190,7 @@ public sealed class UnrealIndexPlan
         var head = command.Arguments.Take(command.Arguments.Count - 1).ToArray();
         var stripped = UnrealCompileCommands.RemovePrecompiledHeaders(head);
         var hasPch = stripped.Count != head.Length;
-        var withPch = pch ?? Mode == UnrealPchMode.Always;
+        var withPch = pch ?? (Mode == UnrealPchMode.Always || Mode == UnrealPchMode.Auto && !header && SingleUnitUsesPch(source));
         var arguments = new List<string>(withPch || !hasPch ? head : stripped);
         // 문서 경로 그대로 씁니다. clangd는 명령을 바꾼 열린 문서를 경로 문자열이 같을 때만 다시 분석합니다(ClangdSession.UpdateCompileCommands).
         var file = FullPath(path);
@@ -200,6 +222,35 @@ public sealed class UnrealIndexPlan
     }
 
     /// <summary>
+    /// clangd가 분석 오류를 알린 TU의 판단을 바로 기록합니다(<see cref="UnrealPchMode.Auto"/>만). PCH 없이 색인한 단위는 다음 세션부터 PCH로
+    /// 색인하도록 판단을 남기고(전환은 <see cref="MarkNeedsPch"/>), PCH로 색인한 단위는 그때의 구성원 파일 상태를 남깁니다. 실패를 모아 전환하기
+    /// 전에 clangd를 다시 시작해도 판단을 잃지 않게 하려는 것입니다. 작은 파일 하나를 쓰므로 실패 알림을 받은 스레드에서 불러도 됩니다.
+    /// </summary>
+    /// <param name="translationUnit">clangd가 알린 TU 경로입니다. 이 계획의 합성 TU가 아니면 무시합니다.</param>
+    public void RecordFailure(string translationUnit)
+    {
+        if (Mode != UnrealPchMode.Auto) return;
+        lock (gate)
+        {
+            if (UnitOfWrapper(translationUnit) is not { Switchable: true } unit) return;
+            if (UsesPch(unit))
+            {
+                failedWithPch[unit.Key] = Fingerprint(unit.Members);
+            }
+            else if (!decisions.TryGetValue(unit.Key, out var stamp) || stamp != unit.Stamp)
+            {
+                decisions[unit.Key] = unit.Stamp;
+            }
+            else
+            {
+                return;
+            }
+
+            WriteDecisions();
+        }
+    }
+
+    /// <summary>
     /// clangd가 분석 오류를 알린 TU 중 공유 PCH 없이 색인한 단위를 PCH로 바꿉니다(<see cref="UnrealPchMode.Auto"/>만).
     /// 바꾼 단위의 새 합성 TU 명령을 돌려줍니다. 호출자는 clangd에 덮어쓰기로 보내 바로 색인하게 합니다. 파일을 쓰므로 UI thread에서 부르지 않습니다.
     /// </summary>
@@ -207,10 +258,15 @@ public sealed class UnrealIndexPlan
     public IReadOnlyList<CompileCommand> MarkNeedsPch(IEnumerable<string> translationUnits)
     {
         if (Mode != UnrealPchMode.Auto) return Array.Empty<CompileCommand>();
-        var failed = new HashSet<string>(translationUnits.Select(FullPath), StringComparer.OrdinalIgnoreCase);
         lock (gate)
         {
-            return SwitchLocked(units.Where(u => u.Switchable && !u.NeedsPch && failed.Contains(FullPath(WrapperPath(u)))).ToArray());
+            var switching = new List<Unit>();
+            foreach (var path in translationUnits)
+            {
+                if (UnitOfWrapper(path) is { Switchable: true, NeedsPch: false } unit && !switching.Contains(unit)) switching.Add(unit);
+            }
+
+            return SwitchLocked(switching);
         }
     }
 
@@ -264,10 +320,49 @@ public sealed class UnrealIndexPlan
 
     private static bool UsesPch(Unit unit) => unit.NeedsPch && unit.Switchable;
 
+    /// <summary>합성 TU 경로에 해당하는 단위입니다. 지금 쓰는 경로(PCH 여부에 맞는 확장자)가 아니면 null입니다. <see cref="gate"/> 안에서 부릅니다.</summary>
+    private Unit? UnitOfWrapper(string path)
+    {
+        var name = Path.GetFileName(path);
+        var pch = name.EndsWith(PchSuffix, StringComparison.OrdinalIgnoreCase);
+        var stem = pch ? name.Substring(0, name.Length - PchSuffix.Length) : Path.GetFileNameWithoutExtension(name);
+        return unitOfName.TryGetValue(stem, out var unit) && UsesPch(unit) == pch &&
+               string.Equals(FullPath(path), FullPath(WrapperPath(unit)), StringComparison.OrdinalIgnoreCase)
+            ? unit
+            : null;
+    }
+
+    private bool SingleUnitUsesPch(string member)
+    {
+        lock (gate) return unitOfMember.TryGetValue(member, out var unit) && unit.Members.Count == 1 && UsesPch(unit);
+    }
+
+    /// <summary>구성원 파일의 크기·수정 시각을 묶은 값입니다. 내용 해시보다 싸고, 판단을 다시 할지 정하는 데만 씁니다.</summary>
+    private static string Fingerprint(IEnumerable<string> members)
+    {
+        var text = new StringBuilder();
+        foreach (var member in members)
+        {
+            var info = new FileInfo(member);
+            text.Append(member).Append('|');
+            if (info.Exists) text.Append(info.Length.ToString(CultureInfo.InvariantCulture)).Append('|').Append(info.LastWriteTimeUtc.Ticks.ToString(CultureInfo.InvariantCulture));
+            text.Append('\n');
+        }
+
+        return Hash(text.ToString(), 8);
+    }
+
     /// <summary>합성 TU를 씁니다. 내용이 같으면 다시 쓰지 않습니다.</summary>
     private void WriteWrapper(Unit unit)
     {
         var text = new StringBuilder("// VisualBoost 색인 단위: ").Append(unit.Key).Append('\n');
+        if (Mode == UnrealPchMode.Never && unit.Switchable)
+        {
+            // clangd는 내용이 같으면 오류가 있던 TU를 다시 색인하지 않으므로, 넣지 않음으로 색인한 결과가 자동으로 바꾼 뒤에도 남아 실패를
+            // 다시 알리지 않습니다. 내용을 달리해 방식을 바꿀 때 다시 색인하게 합니다.
+            text.Append("// 공유 PCH 넣지 않음\n");
+        }
+
         foreach (var member in unit.Members)
         {
             // clangd에는 실제 경로를 줍니다(PathAliases 참고). Windows 경로에는 따옴표가 올 수 없습니다.
@@ -327,37 +422,56 @@ public sealed class UnrealIndexPlan
 
     private void WriteDecisions()
     {
-        var json = JsonValue.Object(("units", JsonValue.Object(decisions.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase)
-            .Select(d => new KeyValuePair<string, JsonValue>(d.Key, d.Value))))).ToJson();
-        try
-        {
-            File.WriteAllText(Path.Combine(directory, DecisionsFileName), json);
-        }
-        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
-        {
-            // 기록하지 못하면 다음 세션에서 다시 PCH 없이 색인해 같은 판단에 이릅니다.
-        }
-    }
+        static JsonValue Map(Dictionary<string, string> map) =>
+            JsonValue.Object(map.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase).Select(d => new KeyValuePair<string, JsonValue>(d.Key, d.Value)));
 
-    private static Dictionary<string, string> ReadDecisions(string path)
-    {
-        var result = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        try
+        var json = JsonValue.Object(("units", Map(decisions)), ("failedWithPch", Map(failedWithPch))).ToJson();
+        var path = Path.Combine(directory, DecisionsFileName);
+        lock (DecisionLock(directory))
         {
-            if (!File.Exists(path)) return result;
-            foreach (var pair in JsonValue.Parse(File.ReadAllText(path))["units"].Properties)
+            try
             {
-                if (pair.Value.AsString() is string stamp) result[pair.Key] = stamp;
+                var temporary = path + ".tmp";
+                File.WriteAllText(temporary, json);
+                if (File.Exists(path)) File.Replace(temporary, path, null);
+                else File.Move(temporary, path);
+            }
+            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+            {
+                // 기록하지 못하면 이번 세션의 전환만 남습니다. 다음 세션은 이전 기록으로 시작합니다.
             }
         }
-        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is FormatException)
-        {
-            // 읽지 못한 기록은 버리고 PCH 없이 다시 판단합니다.
-            result.Clear();
-        }
-
-        return result;
     }
+
+    private static void ReadDecisions(string directory, Dictionary<string, string> decisions, Dictionary<string, string> failedWithPch)
+    {
+        lock (DecisionLock(directory))
+        {
+            try
+            {
+                var path = Path.Combine(directory, DecisionsFileName);
+                if (!File.Exists(path)) return;
+                var root = JsonValue.Parse(File.ReadAllText(path));
+                foreach (var pair in root["units"].Properties)
+                {
+                    if (pair.Value.AsString() is string stamp) decisions[pair.Key] = stamp;
+                }
+
+                foreach (var pair in root["failedWithPch"].Properties)
+                {
+                    if (pair.Value.AsString() is string print) failedWithPch[pair.Key] = print;
+                }
+            }
+            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is FormatException)
+            {
+                // 읽지 못한 기록은 버리고 PCH 없이 다시 판단합니다.
+                decisions.Clear();
+                failedWithPch.Clear();
+            }
+        }
+    }
+
+    private static object DecisionLock(string directory) => DecisionLocks.GetOrAdd(Path.GetFullPath(directory), _ => new object());
 
     private static string UniqueName(string name, ISet<string> used)
     {
