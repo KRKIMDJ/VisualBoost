@@ -157,6 +157,7 @@ public sealed class ClangdNavigator : IDisposable
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
     private int pchUnitIndexed;
+    private int indexedUnits;
     private bool touchRunning;
     private int activeRequests;
     private long lastRequestTicks = DateTime.UtcNow.Ticks;
@@ -169,15 +170,19 @@ public sealed class ClangdNavigator : IDisposable
         this.session = session;
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () => Changed?.Invoke();
-        if (context.Plan is { Mode: UnrealPchMode.Auto })
+        var autoPch = context.Plan is { Mode: UnrealPchMode.Auto };
+        if (autoPch)
         {
             session.IndexFailed += OnIndexFailed;
             session.DiagnosticsPublished += OnDiagnostics;
-            session.TranslationUnitIndexed += path =>
-            {
-                if (path.EndsWith(UnrealIndexPlan.PchSuffix, StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref pchUnitIndexed, 1);
-            };
         }
+
+        session.TranslationUnitIndexed += path =>
+        {
+            if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase)) return;
+            Interlocked.Increment(ref indexedUnits);
+            if (autoPch && path.EndsWith(UnrealIndexPlan.PchSuffix, StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref pchUnitIndexed, 1);
+        };
 
         session.Exited += _ =>
         {
@@ -236,6 +241,12 @@ public sealed class ClangdNavigator : IDisposable
             lock (pchGate) return !pchFlushScheduled;
         }
     }
+
+    /// <summary>
+    /// 이 clangd가 background index로 색인한 TU 수입니다(색인 시작 문서 제외). 색인하며 쓴 메모리는 clangd가 운영체제에 돌려주지 않으므로,
+    /// 색인한 세션은 끝난 뒤 다시 시작해 돌려받습니다(<see cref="ClangdMemoryPolicy.ShouldReclaimAfterIndex"/>).
+    /// </summary>
+    public int IndexedUnits => Volatile.Read(ref indexedUnits);
 
     public string LogPath => Path.Combine(Context.Directory, "clangd.log");
 

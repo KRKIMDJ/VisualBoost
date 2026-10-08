@@ -109,11 +109,11 @@ internal static class SemanticNavigationTests
     public static void RunWorkerDefaults()
     {
         const long Gib = 1024L * 1024 * 1024;
-        // 코어의 3/8(최대 8)을 쓰되 VS 몫 8 GiB를 남기고 작업당 2.5 GiB로 제한합니다. 메모리를 모르면 예전 기본값(코어의 1/4, 최대 8)을 씁니다.
-        Check(ClangdLaunchOptions.DefaultWorkerCount(16, 64 * Gib) == 6 && ClangdLaunchOptions.DefaultWorkerCount(32, 128 * Gib) == 8 &&
-              ClangdLaunchOptions.DefaultWorkerCount(8, 32 * Gib) == 3 && ClangdLaunchOptions.DefaultWorkerCount(32, 16 * Gib) == 3 &&
-              ClangdLaunchOptions.DefaultWorkerCount(4, 8 * Gib) == 1 && ClangdLaunchOptions.DefaultWorkerCount(1, 0) == 1 &&
-              ClangdLaunchOptions.DefaultWorkerCount(12, 0) == 3 && ClangdLaunchOptions.DefaultWorkerCount(64, 0) == 8, "clangd 색인 작업 수 기본값");
+        // 작업 2개를 쓰되 논리 코어 8개 미만이거나 VS 몫 8 GiB를 남기고 작업당 2.5 GiB를 잡을 수 없으면 1개입니다.
+        Check(ClangdLaunchOptions.DefaultWorkerCount(16, 64 * Gib) == 2 && ClangdLaunchOptions.DefaultWorkerCount(64, 256 * Gib) == 2 &&
+              ClangdLaunchOptions.DefaultWorkerCount(8, 16 * Gib) == 2 && ClangdLaunchOptions.DefaultWorkerCount(4, 32 * Gib) == 1 &&
+              ClangdLaunchOptions.DefaultWorkerCount(16, 12 * Gib) == 1 && ClangdLaunchOptions.DefaultWorkerCount(1, 0) == 1 &&
+              ClangdLaunchOptions.DefaultWorkerCount(12, 0) == 2, "clangd 색인 작업 수 기본값");
         Check(ClangdLaunchOptions.ResolveWorkerCount(3) == 3 && ClangdLaunchOptions.ResolveWorkerCount(0) >= 1, "지정한 작업 수 우선");
     }
 
@@ -167,6 +167,14 @@ internal static class SemanticNavigationTests
               !ClangdMemoryPolicy.ShouldReload(true, Sample(1 * Gib, indexing: true), 0) && !ClangdMemoryPolicy.ShouldReload(true, Sample(1 * Gib, busy: true), 0) &&
               !ClangdMemoryPolicy.ShouldReload(true, Sample(1 * Gib, sinceRequest: TimeSpan.FromSeconds(3)), 0) &&
               !ClangdMemoryPolicy.ShouldReload(true, quiet, ClangdMemoryPolicy.MaxReloads), "색인 결과 다시 읽기 판단");
+
+        // 색인한 세션은 정리 기준보다 적어도, 오래 쉬고 남은 메모리가 하한을 넘으면 한 번 다시 시작해 돌려받습니다.
+        var indexed = Sample(ClangdMemoryPolicy.ReclaimFloorBytes + Gib / 10, sinceRequest: ClangdMemoryPolicy.DefaultIdle, sinceStart: TimeSpan.FromMinutes(1));
+        Check(ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, indexed, 0) && !ClangdMemoryPolicy.ShouldReclaimAfterIndex(0, indexed, 0) &&
+              !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, Sample(ClangdMemoryPolicy.ReclaimFloorBytes / 2), 0) &&
+              !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, Sample(2 * Gib, sinceRequest: ClangdMemoryPolicy.ReloadIdle), 0) &&
+              !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, Sample(2 * Gib, indexing: true), 0) &&
+              !ClangdMemoryPolicy.ShouldReclaimAfterIndex(12, indexed, ClangdMemoryPolicy.MaxReloads), "색인 뒤 메모리 회수 판단");
     }
 
     public static void RunOwnDefinitionReferences()
@@ -824,7 +832,7 @@ internal static class SemanticNavigationTests
                 Check(File.Exists(Path.Combine(units, "Module.Game.2.cpp")) && !File.Exists(Path.Combine(units, "Module.Game.2.pch.cpp")) &&
                       first.Context.Plan!.PchUnitCount == 1, "통과한 묶음은 PCH 없이 유지");
                 // clangd는 같은 내용의 파일을 다시 색인해도 메모리의 이전(오류) 결과를 그대로 쓰므로 다시 시작이 필요하다고 알립니다.
-                Check(SpinUntil(() => first.NeedsReload, 60000), "PCH 단위 색인 뒤 다시 시작 필요");
+                Check(SpinUntil(() => first.NeedsReload, 60000) && first.IndexedUnits >= 4, "PCH 단위 색인 뒤 다시 시작 필요: 색인 " + first.IndexedUnits);
                 first.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             }
             finally
@@ -841,7 +849,7 @@ internal static class SemanticNavigationTests
             var query = new NavigationQuery(new DocumentText(solo, soloText, 1), 1, soloLine.LastIndexOf("Value", StringComparison.Ordinal));
             var u2 = Path.Combine(source, "U2.cpp");
             var references = navigator.ReferencesAsync(query, timeout.Token).Result;
-            Check(references.Locations.Any(l => l.Path == u2) && !navigator.NeedsReload,
+            Check(references.Locations.Any(l => l.Path == u2) && !navigator.NeedsReload && navigator.IndexedUnits == 0,
                 "다시 시작하면 PCH로 다시 색인한 구성원의 참조가 보이고 더 다시 시작하지 않음: " +
                 string.Join(",", references.Locations.Select(l => Path.GetFileName(l.Path))));
 

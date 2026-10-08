@@ -27,7 +27,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     public string ClangdPath { get; set; } = string.Empty;
 
     [Category("정의·참조 탐색"), DisplayName("색인 작업 수"), DefaultValue(0)]
-    [Description("동시에 색인할 파일 수입니다. 0이면 자동으로 정합니다(논리 코어의 3/8, 최대 8, 메모리가 적으면 더 적게). 값이 클수록 첫 색인이 빨리 끝나지만 CPU와 메모리를 더 씁니다. 0~64 범위로 적용됩니다.")]
+    [Description("동시에 색인할 파일 수입니다. 0이면 자동으로 정합니다(2개, 코어나 메모리가 적으면 1개). 값이 클수록 첫 색인이 빨리 끝나지만 CPU와 메모리를 더 씁니다. 0~64 범위로 적용됩니다.")]
     public int WorkerCount
     {
         get => workerCount;
@@ -35,7 +35,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     }
 
     [Category("정의·참조 탐색"), DisplayName("clangd 메모리 정리 기준(MB)"), DefaultValue(0)]
-    [Description("clangd가 이보다 많은 메모리를 쥐고 있으면 색인과 탐색이 멈춘 동안 다시 시작해 메모리를 돌려받습니다. 저장된 색인은 그대로 씁니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~8 GB). 1024~65536 범위로 적용됩니다.")]
+    [Description("clangd가 이보다 많은 메모리를 쥐고 있으면 색인과 탐색이 멈춘 동안 다시 시작해 메모리를 돌려받습니다. 색인을 마친 뒤에는 이 기준과 상관없이 한 번 다시 시작합니다. 저장된 색인은 그대로 씁니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~8 GB). 1024~65536 범위로 적용됩니다.")]
     public int MemoryLimitMegabytes
     {
         get => memoryLimitMegabytes;

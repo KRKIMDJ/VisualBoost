@@ -34,20 +34,18 @@ public sealed class ClangdLaunchOptions
         requested > 0 ? requested : DefaultWorkerCount(Environment.ProcessorCount, PhysicalMemory.TotalBytes());
 
     /// <summary>
-    /// 논리 코어의 3/8(최대 8)을 쓰되, VS·빌드 몫 8 GiB를 남기고 작업 하나에 2.5 GiB를 잡아 메모리로 다시 제한합니다.
+    /// 작업 2개를 쓰되, 논리 코어가 8개 미만이거나 VS·빌드 몫 8 GiB를 남기고 작업 하나에 2.5 GiB를 잡을 메모리가 없으면 1개를 씁니다.
     /// </summary>
     /// <remarks>
-    /// 예전 기본값(코어의 1/4)은 큰 Unreal 프로젝트의 첫 색인이 너무 오래 걸렸고(2026-10-07 사용자 피드백), 코어의 절반(0.43.x)은
-    /// 색인 중 메모리와 발열이 컸습니다(2026-10-08 회사 사용 피드백). 테스트 전용 UE 5.8 샘플(TU 305개, 16스레드 PC)에서 작업 8개는
-    /// 첫 색인 155초·최고 5.1 GB·CPU 970초, 작업 4개는 217초·2.3 GB·823초였습니다. 물리 코어를 넘는 작업은 빨라지는 몫보다 메모리와
-    /// CPU 사용이 더 늘어 그 사이 값을 씁니다. 메모리를 모르면(0) 예전 기본값(코어의 1/4)에 같은 상한 8을 둡니다(2026-10-07·2026-10-09 검토).
-    /// Unreal 공유 PCH를 텍스트로 포함한 뒤(0.44.3) 같은 샘플의 작업 8개는 첫 색인 479초·최고 17.4 GB로, 작업당 약 2.2 GB가 들어
-    /// 작업당 2.5 GiB 가정과 맞습니다.
+    /// Unreal unity 묶음 색인과 자동 공유 PCH(0.45.0) 뒤 테스트 전용 UE 5.8 샘플(TU 305개, 16스레드·64 GB PC)의 첫 색인은 작업 1·2·4·6개에서
+    /// 36·27·21·20초, 최고 메모리는 0.7·1.2·2.4·3.6 GB였습니다(2026-10-09). 작업 2개를 넘기면 빨라지는 몫보다 메모리가 크게 늘고, 색인 중
+    /// 메모리와 발열이 크다는 회사 사용 피드백(2026-10-08)과 색인 최고 2 GB 목표에 맞춰 2개를 기본으로 합니다. 더 빠른 첫 색인이 필요하면
+    /// 옵션으로 늘립니다. 공유 PCH를 넣는 단위는 작업 하나에 약 2.2 GB가 들어 작업당 2.5 GiB 가정을 유지합니다.
     /// </remarks>
     public static int DefaultWorkerCount(int processors, long memoryBytes)
     {
-        if (memoryBytes <= 0) return Math.Max(1, Math.Min(8, processors / 4));
-        var byCores = Math.Max(1, Math.Min(8, processors * 3 / 8));
+        var byCores = processors >= 8 ? 2 : 1;
+        if (memoryBytes <= 0) return byCores;
         var gib = memoryBytes / (1024d * 1024 * 1024);
         var byMemory = (int)Math.Floor((gib - 8) / 2.5);
         return Math.Max(1, Math.Min(byCores, byMemory));

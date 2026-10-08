@@ -114,6 +114,22 @@ public sealed class ClangdMemoryPolicy
     public static bool ShouldReload(bool needsReload, ClangdMemorySample sample, int reloads) =>
         needsReload && reloads < MaxReloads && !sample.Indexing && !sample.Busy && sample.SinceLastRequest >= ReloadIdle;
 
+    /// <summary>색인 뒤 다시 시작해 돌려받을 만큼 남은 메모리의 하한입니다.</summary>
+    public const long ReclaimFloorBytes = 1024L * 1024 * 1024;
+
+    /// <summary>
+    /// 색인한 세션이 끝난 뒤 남은 메모리를 돌려받으려고 다시 시작할지 정합니다. 정리 기준과 상관없이, 이 세션에서 TU를 색인했고
+    /// 색인·요청이 <see cref="DefaultIdle"/> 동안 멈췄으며 메모리가 <see cref="ReclaimFloorBytes"/>를 넘으면 다시 시작합니다.
+    /// </summary>
+    /// <remarks>
+    /// clangd는 색인 작업이 쓴 힙을 운영체제에 돌려주지 않아, 테스트 전용 UE 5.8 샘플의 첫 색인 직후 1.1 GB(작업 2개)~2.7 GB(작업 6개)가
+    /// 남고 다시 시작하면 0.3 GB였습니다(2026-10-09). 정리 기준을 이 수준으로 낮추면 공유 PCH 문서 하나(약 2.1 GB)만 열어 둬도 쉴 때마다
+    /// 다시 시작하므로, 기준은 그대로 두고 색인한 세션에만 한 번 다시 시작합니다. 다시 시작한 세션은 저장된 색인을 읽어 다시 색인하지 않습니다.
+    /// </remarks>
+    public static bool ShouldReclaimAfterIndex(int indexedUnits, ClangdMemorySample sample, int reloads) =>
+        indexedUnits > 0 && reloads < MaxReloads && !sample.Indexing && !sample.Busy && sample.SinceLastRequest >= DefaultIdle &&
+        sample.PrivateBytes > ReclaimFloorBytes;
+
     /// <summary>옵션 값(MB)을 상한으로 바꿉니다. 0 이하면 이 PC의 <see cref="DefaultLimitBytes"/>입니다.</summary>
     public static long ResolveLimitBytes(int megabytes) =>
         megabytes > 0 ? megabytes * 1024L * 1024 : DefaultLimitBytes(PhysicalMemory.TotalBytes());
