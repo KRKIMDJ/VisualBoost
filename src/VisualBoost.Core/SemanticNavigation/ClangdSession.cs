@@ -154,9 +154,10 @@ public readonly struct BackgroundIndexProgress
 public sealed class SemanticSymbol
 {
     public SemanticSymbol(string name, string containerName, string usr, NavigationLocation? declaration = null, NavigationLocation? definition = null,
-        IReadOnlyList<string>? ids = null, IReadOnlyList<string>? usrs = null, string? id = null)
+        IReadOnlyList<string>? ids = null, IReadOnlyList<string>? usrs = null, string? id = null, NavigationLocation? primaryDeclaration = null)
     {
         Id = id ?? string.Empty;
+        PrimaryDeclaration = primaryDeclaration ?? declaration;
         Name = name;
         ContainerName = containerName;
         Usr = usr;
@@ -179,6 +180,12 @@ public sealed class SemanticSymbol
 
     /// <summary>요청 파일 AST가 아는 대표 선언 위치(<c>declarationRange</c>)입니다. 응답에 없거나 심볼이 여럿이면 null입니다.</summary>
     public NavigationLocation? Declaration { get; }
+
+    /// <summary>
+    /// 대표 항목의 선언 위치(<c>declarationRange</c>)입니다. <see cref="Declaration"/>과 달리 심볼이 여럿이어도 대표 항목의 것을 씁니다.
+    /// 응답에 없으면 null입니다.
+    /// </summary>
+    public NavigationLocation? PrimaryDeclaration { get; }
 
     /// <summary>요청 파일 AST가 아는 정의 위치(<c>definitionRange</c>)입니다. 정의가 다른 번역 단위에만 있으면 null입니다.</summary>
     public NavigationLocation? Definition { get; }
@@ -497,7 +504,7 @@ public sealed class ClangdSession : IDisposable
         var ids = result.Items.Select(i => i["id"].AsString()).Where(i => !string.IsNullOrEmpty(i)).Select(i => i!.ToUpperInvariant()).Distinct().ToArray();
         var usrs = result.Items.Select(i => i["usr"].AsString()).Where(u => !string.IsNullOrEmpty(u)).Select(u => u!).Distinct().ToArray();
         return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty, Range("declarationRange"), Range("definitionRange"), ids, usrs,
-            first["id"].AsString()?.ToUpperInvariant());
+            first["id"].AsString()?.ToUpperInvariant(), options.Paths.ToGiven(NavigationLocation.FromLsp(first["declarationRange"])).FirstOrDefault());
     }
 
     /// <summary>

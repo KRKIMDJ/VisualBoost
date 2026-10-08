@@ -117,6 +117,14 @@ public sealed class NavigationResult
 
     /// <summary>참조가 상한(<see cref="ClangdNavigator.ReferenceLimit"/>)에 걸려 일부만 받았습니다.</summary>
     public bool Limited { get; }
+
+    /// <summary>
+    /// 참조를 요청 파일에서만 찾은 결과입니다. clangd는 네임스페이스 참조를 색인하지 않아(clangd 22.1 확인) 다른 파일의 사용은 돌려주지 않습니다.
+    /// </summary>
+    public bool CurrentFileOnly => Symbol is { } symbol && IsNamespace(symbol.Usr);
+
+    /// <summary>clang USR의 마지막 구성 요소가 네임스페이스(<c>@N@이름</c>, 익명 <c>@aN</c>)인지 봅니다.</summary>
+    public static bool IsNamespace(string usr) => System.Text.RegularExpressions.Regex.IsMatch(usr, "(@N@[^@]+|@aN)$");
 }
 
 /// <summary>
@@ -465,9 +473,20 @@ public sealed class ClangdNavigator : IDisposable
             var limited = rawCount + inOpen >= ReferenceLimit;
             roleLimit.CancelAfter(RoleTimeout);
             var symbol = await symbolInfo.ConfigureAwait(false);
+            DeclarationSiteReferences? site = null;
             if (symbol is not null)
             {
                 locations = await WithoutRelatedSymbolsAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
+                if (!limited)
+                {
+                    site = await DeclarationSiteReferencesAsync(query, symbol, locations, progress, cancellationToken).ConfigureAwait(false);
+                    if (site is not null)
+                    {
+                        locations = site.Locations;
+                        limited = site.Limited;
+                    }
+                }
+
                 if (!limited)
                 {
                     locations = await WithQualifierUsesAsync(query, symbol, locations, cancellationToken).ConfigureAwait(false);
@@ -477,6 +496,8 @@ public sealed class ClangdNavigator : IDisposable
 
             var kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
             var plain = await uses.ConfigureAwait(false);
+            // 선언 위치에서 다시 찾았으면 요청 위치의 선언 제외 결과도 같은 이유로 다른 파일이 빠져 있으므로 선언 위치의 것과 합칩니다.
+            if (site is not null) plain = plain is null || site.Uses is null ? null : plain.Concat(site.Uses).Distinct().ToArray();
             // 결과 수 제한에 걸리면 두 참조 결과가 서로 다른 위치에서 잘려 차이가 선언 묶음이 아닙니다.
             if (plain is not null && (limited || plain.Count >= ReferenceLimit)) plain = null;
             var definitions = await definition.ConfigureAwait(false);
@@ -539,6 +560,74 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         return dropped.Count == 0 ? locations : locations.Where(l => !dropped.Contains(l)).ToArray();
+    }
+
+    private sealed class DeclarationSiteReferences
+    {
+        public DeclarationSiteReferences(IReadOnlyList<NavigationLocation> locations, bool limited, IReadOnlyList<NavigationLocation>? uses)
+        {
+            Locations = locations;
+            Limited = limited;
+            Uses = uses;
+        }
+
+        /// <summary>요청 위치의 결과와 선언 위치의 결과를 합친 위치입니다.</summary>
+        public IReadOnlyList<NavigationLocation> Locations { get; }
+
+        /// <summary>선언 위치의 결과가 결과 수 상한에 걸렸습니다.</summary>
+        public bool Limited { get; }
+
+        /// <summary>선언 위치의 선언 제외 참조 결과입니다. 받지 못했으면 null입니다.</summary>
+        public IReadOnlyList<NavigationLocation>? Uses { get; }
+    }
+
+    /// <summary>
+    /// 결과가 요청 문서 안에만 있고 대표 선언이 다른 파일에 있으면, 선언 위치에서 다시 찾아 합칩니다. 사용 위치에서 clangd가 이름을 그 위치의
+    /// 재선언으로 잡고 그 재선언의 심볼 ID로 색인을 묻는데, 색인은 다른 ID로 기록해 다른 파일의 참조가 모두 빠지는 경우가 있습니다
+    /// (<c>using</c> 별칭을 <c>typedef</c>로 다시 선언, 예: Unreal <c>FTransform</c>. clangd 22.1 확인, 2026-10-09 정확도 시험). 선언 위치에서
+    /// 물으면 색인과 같은 ID로 찾습니다.
+    /// </summary>
+    /// <remarks>
+    /// 다른 파일의 결과가 하나라도 있으면 색인 조회가 된 것이므로 보지 않습니다. 네임스페이스는 색인에 참조가 없어 원래 요청 파일만 찾으므로
+    /// 보지 않습니다(<see cref="NavigationResult.CurrentFileOnly"/>). 선언 위치의 대표 심볼이 같은 USR일 때만 합치며, 닫혀 있던 선언 파일은
+    /// 열었다가 닫습니다. 보완하지 않았으면 null입니다.
+    /// </remarks>
+    private async Task<DeclarationSiteReferences?> DeclarationSiteReferencesAsync(NavigationQuery query, SemanticSymbol symbol,
+        IReadOnlyList<NavigationLocation> locations, IProgress<string>? progress, CancellationToken cancellationToken)
+    {
+        if (symbol.PrimaryDeclaration is not { } declaration || symbol.Usr.Length == 0 || NavigationResult.IsNamespace(symbol.Usr) ||
+            string.Equals(declaration.Path, query.Path, StringComparison.OrdinalIgnoreCase) ||
+            locations.Any(l => !string.Equals(l.Path, query.Path, StringComparison.OrdinalIgnoreCase)))
+        {
+            return null;
+        }
+
+        var path = declaration.Path;
+        int? version = null;
+        if (documents.AcquireIfOpen(path) is null)
+        {
+            if (SourceLinePreview.ReadText(path) is not { } text) return null;
+            progress?.Report($"선언 파일에서 참조 확인 중: {Path.GetFileName(path)}");
+            version = documents.Acquire(new DocumentText(path, text));
+        }
+
+        try
+        {
+            if (version is { } opened) await AwaitPchCheckAsync(path, opened, progress, cancellationToken).ConfigureAwait(false);
+            var at =await session.SymbolInfoAsync(path, declaration.Line, declaration.Character, cancellationToken, symbol.Name).ConfigureAwait(false);
+            if (at is null || !string.Equals(at.Usr, symbol.Usr, StringComparison.Ordinal)) return null;
+            var uses = Quietly(session.ReferencesAsync(path, declaration.Line, declaration.Character, false, cancellationToken));
+            var (more, rawCount) = await session.ReferencesCountedAsync(path, declaration.Line, declaration.Character, true, cancellationToken).ConfigureAwait(false);
+            var inOpen = more.Count(l => documents.Contains(l.Path));
+            var merged = locations.Concat(more).Distinct()
+                .OrderBy(l => l.Path, StringComparer.OrdinalIgnoreCase).ThenBy(l => l.Line).ThenBy(l => l.Character).ToArray();
+            return new DeclarationSiteReferences(merged, rawCount + inOpen >= ReferenceLimit, await uses.ConfigureAwait(false));
+        }
+        finally
+        {
+            documents.Release(path);
+            if (version is not null) documents.TryClose(path);
+        }
     }
 
     /// <summary>

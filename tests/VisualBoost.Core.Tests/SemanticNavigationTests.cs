@@ -308,6 +308,9 @@ internal static class SemanticNavigationTests
         Check(ClangdNavigator.QualifierCandidates(qualified, "std").SequenceEqual(new[] { (0, 0), (0, qualified.IndexOf("std::x", StringComparison.Ordinal)), (1, second.IndexOf("std ::", StringComparison.Ordinal)) }) &&
               ClangdNavigator.QualifierCandidates(qualified, "TBox").SequenceEqual(new[] { (1, second.IndexOf("TBox", StringComparison.Ordinal)) }),
             "한정자 후보: " + string.Join(",", ClangdNavigator.QualifierCandidates(qualified, "std")));
+        Check(NavigationResult.IsNamespace("c:@N@std") && NavigationResult.IsNamespace("c:@N@UE@N@Math") && NavigationResult.IsNamespace("c:a.cpp@aN") &&
+              !NavigationResult.IsNamespace("c:@N@UE@N@Math@S@FVector") && !NavigationResult.IsNamespace("c:@S@FName") && !NavigationResult.IsNamespace("c:a.h@12@macro@N"),
+            "네임스페이스 USR 판단");
         // 코드 안의 이름: 주석·문자열·문자·원시 문자열은 빼고, 전처리 줄(이어진 줄 포함)은 표시합니다.
         var words = "int TEXT_x; // TEXT\n#define M(x) TEXT(x) \\\n   TEXT\n/* TEXT\n TEXT */ auto s = TEXT(\"TEXT\"); char c = 'T'; auto r = R\"(TEXT)\"; TEXT\r\n" +
                     "#if X\n#elif Y\n#  else\n#endif\n#include \"a.h\"\n";
@@ -1554,18 +1557,26 @@ internal static class SemanticNavigationTests
             {
                 "#pragma once", "struct FBase", "{", "    virtual ~FBase() {}", "    virtual int Tick(int Value);", "};",
                 "struct FDerived : FBase", "{", "    int Tick(int Value) override;", "};",
-                "namespace ns { template <class T> struct TBox { static int Value; }; }"
+                "namespace ns { template <class T> struct TBox { static int Value; }; }",
+                "namespace math { template <class T> struct TVec; }", "using FVec = math::TVec<double>;"
             };
-            var bodyLines = new[] { "#include \"Base.h\"", "int FBase::Tick(int Value) { return Value; }", "int FDerived::Tick(int Value) { return FBase::Tick(Value) + 1; }" };
+            // using 별칭을 다른 헤더에서 typedef로 다시 선언합니다. 사용 위치에서 찾으면 clangd가 다른 파일의 참조를 모두 빠뜨립니다.
+            var vecLines = new[] { "#pragma once", "#include \"Base.h\"", "namespace math { template <class T> struct TVec { static const TVec Zero; }; }", "typedef math::TVec<double> FVec;" };
+            var bodyLines = new[]
+            {
+                "#include \"Vec.h\"", "int FBase::Tick(int Value) { return Value; }", "int FDerived::Tick(int Value) { return FBase::Tick(Value) + 1; }",
+                "const FVec* BodyVec() { return &FVec::Zero; }"
+            };
             var callerLines = new[]
             {
-                "#include \"Base.h\"", "int CallBase(FBase& B) { return B.Tick(1); }", "int CallDerived(FDerived& D) { return D.Tick(2); }",
-                "int UseBox() { return ns::TBox<int>::Value + int(sizeof(ns::TBox<char>)); }"
+                "#include \"Vec.h\"", "int CallBase(FBase& B) { return B.Tick(1); }", "int CallDerived(FDerived& D) { return D.Tick(2); }",
+                "int UseBox() { return ns::TBox<int>::Value + int(sizeof(ns::TBox<char>)); }", "const FVec* CallerVec(FVec& V) { return &V; }"
             };
             var header = Path.Combine(source, "Base.h");
             var body = Path.Combine(source, "Base.cpp");
             var caller = Path.Combine(source, "Caller.cpp");
             Write(header, string.Join("\n", headerLines) + "\n");
+            Write(Path.Combine(source, "Vec.h"), string.Join("\n", vecLines) + "\n");
             Write(body, string.Join("\n", bodyLines) + "\n");
             var callerText = string.Join("\n", callerLines) + "\n";
             Write(caller, callerText);
@@ -1602,11 +1613,23 @@ internal static class SemanticNavigationTests
             Check(baseReferences.SequenceEqual(expectedBase), "기반 함수 참조에 재정의 함수 선언·정의 없음: " + string.Join(",", baseReferences));
 
             // 템플릿 인수가 붙은 이름 앞의 한정자는 clang 색인이 빠뜨리므로 요청 문서에서 AST로 확인해 더합니다.
-            var namespaceReferences = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 3, callerLines[3].IndexOf("ns::", StringComparison.Ordinal)),
-                timeout.Token).Result.Locations.Where(l => l.Path == caller).Select(l => (l.Line, l.Character)).ToArray();
+            var namespaceResult = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 3, callerLines[3].IndexOf("ns::", StringComparison.Ordinal)),
+                timeout.Token).Result;
+            var namespaceReferences = namespaceResult.Locations.Where(l => l.Path == caller).Select(l => (l.Line, l.Character)).ToArray();
+            Check(namespaceResult.CurrentFileOnly && !navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1,
+                callerLines[1].IndexOf(".Tick", StringComparison.Ordinal) + 1), timeout.Token).Result.CurrentFileOnly, "네임스페이스는 요청 파일만 찾았다고 알림");
             Check(namespaceReferences.Contains((3, callerLines[3].IndexOf("ns::", StringComparison.Ordinal))) &&
                   namespaceReferences.Contains((3, callerLines[3].LastIndexOf("ns::", StringComparison.Ordinal))),
                 "템플릿 앞 한정자 보완: " + string.Join(",", namespaceReferences));
+
+            // 재선언된 별칭은 선언 위치에서 다시 찾아 다른 파일의 참조를 채웁니다.
+            var aliasReferences = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 4, callerLines[4].IndexOf("FVec", StringComparison.Ordinal)),
+                timeout.Token).Result.Locations.Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character)).ToArray();
+            Check(aliasReferences.Contains(Key("Base.h", 12, headerLines[12].IndexOf("FVec", StringComparison.Ordinal))) &&
+                  aliasReferences.Contains(Key("Base.cpp", 3, bodyLines[3].IndexOf("FVec", StringComparison.Ordinal))) &&
+                  aliasReferences.Contains(Key("Base.cpp", 3, bodyLines[3].LastIndexOf("FVec", StringComparison.Ordinal))) &&
+                  aliasReferences.Contains(Key("Caller.cpp", 4, callerLines[4].LastIndexOf("FVec", StringComparison.Ordinal))),
+                "재선언된 별칭 참조: " + string.Join(",", aliasReferences));
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally

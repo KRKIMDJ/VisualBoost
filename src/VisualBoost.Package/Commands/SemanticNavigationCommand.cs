@@ -235,6 +235,7 @@ internal sealed class SemanticNavigationCommand
         var notes = new List<string>();
         if (kind == Kind.Definition) notes.Add("정의 후보가 여러 개입니다");
         if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
+        if (kind == Kind.References && result.CurrentFileOnly) notes.Add("네임스페이스는 이 파일의 참조만 찾습니다");
         if (kind == Kind.References && result.ResolvedOnDemand) notes.Add("색인에 없던 정의 파일을 분석해 더했습니다");
         if (incomplete.Length > 0) notes.Add(incomplete);
         if (broken.Length > 0) notes.Add(broken);
