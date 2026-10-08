@@ -138,11 +138,12 @@ internal sealed class SemanticNavigationCommand
         int referenceLimit;
         bool limited;
         IReadOnlyList<string> lines = Array.Empty<string>();
+        DocumentErrors? errors = null;
         try
         {
             try
             {
-                (result, limited, referenceLimit, lines) = await Task.Run(async () =>
+                (result, limited, referenceLimit, lines, errors) = await Task.Run(async () =>
                 {
                     var navigator = await service.GetNavigatorAsync(request.Token).ConfigureAwait(false);
                     var found = kind == Kind.Definition
@@ -167,7 +168,8 @@ internal sealed class SemanticNavigationCommand
                         }
                     }
 
-                    return (found, limited, navigator.ReferenceLimit, preview);
+                    // 요청 문서가 분석 오류로 심볼을 해석하지 못했을 수 있으므로 첫 오류를 함께 알립니다.
+                    return (found, limited, navigator.ReferenceLimit, preview, navigator.ErrorsOf(path));
                 }, timeout.Token);
             }
             catch (SemanticNavigationUnavailableException exception)
@@ -208,9 +210,13 @@ internal sealed class SemanticNavigationCommand
         var incomplete = result.Progress.Active
             ? $"색인 진행 중 {result.Progress.Done:N0}/{result.Progress.Total:N0} · 결과가 불완전할 수 있습니다"
             : string.Empty;
+        var broken = errors is null
+            ? string.Empty
+            : $"이 파일에 분석 오류 {errors.Count:N0}개 · {errors.FirstLine + 1}행 {errors.FirstMessage}";
         if (result.Locations.Count == 0)
         {
-            await NotifyAsync((kind == Kind.Definition ? "정의를 찾지 못했습니다." : "참조를 찾지 못했습니다.") + (incomplete.Length > 0 ? " " + incomplete : string.Empty));
+            await NotifyAsync((kind == Kind.Definition ? "정의를 찾지 못했습니다." : "참조를 찾지 못했습니다.") +
+                              (broken.Length > 0 ? " " + broken : string.Empty) + (incomplete.Length > 0 ? " " + incomplete : string.Empty));
             return;
         }
 
@@ -230,6 +236,7 @@ internal sealed class SemanticNavigationCommand
         if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
         if (kind == Kind.References && result.ResolvedOnDemand) notes.Add("색인에 없던 정의 파일을 분석해 더했습니다");
         if (incomplete.Length > 0) notes.Add(incomplete);
+        if (broken.Length > 0) notes.Add(broken);
         var dte = await package.GetServiceAsync(typeof(Microsoft.VisualStudio.Shell.Interop.SDTE)) as DTE2;
         Assumes.Present(dte);
         var solutionPath = dte.Solution?.FullName;

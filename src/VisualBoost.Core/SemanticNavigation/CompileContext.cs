@@ -86,6 +86,14 @@ public sealed class CompileContext
 
     internal static string OverrideDirectoryOf(string directory) => Path.Combine(directory, "modules");
 
+    /// <summary>
+    /// clangd가 database를 읽고 background index를 시작하도록 잠시 여는 빈 문서입니다. database에 자기 명령을 두어
+    /// clangd가 가까운 TU의 명령(공유 PCH 포함)을 빌려 빈 문서에 큰 헤더 분석을 하지 않게 합니다.
+    /// </summary>
+    public string IndexStartPath => Path.Combine(Directory, IndexStartFileName);
+
+    internal const string IndexStartFileName = "visualboost-index-start.cpp";
+
     public bool IsAvailable => Kind != CompileContextKind.None;
 }
 
@@ -164,7 +172,7 @@ public static class CompileContextBuilder
                     CompileContext.OverrideDirectoryOf(directory));
                 if (result.Commands.Count > 0)
                 {
-                    var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(result.Commands));
+                    var changed = WriteDatabase(directory, paths.ToReal(result.Commands));
                     var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0}" +
                                   (result.Supplemented > 0 ? $", 빌드 기록 없는 파일 {result.Supplemented:N0}개 보완" : string.Empty) +
                                   (result.UnreadableDirectories > 0 ? $", 읽지 못해 건너뛴 소스 폴더 {result.UnreadableDirectories:N0}개" : string.Empty) + ")";
@@ -181,7 +189,7 @@ public static class CompileContextBuilder
             var commands = CompileCommandDatabase.Read(database);
             if (commands.Count > 0)
             {
-                var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(commands));
+                var changed = WriteDatabase(directory, paths.ToReal(commands));
                 return new CompileContext(CompileContextKind.Database, directory, commands, $"{database} · 컴파일 명령 {commands.Count:N0}개", null,
                     engineRoot, changed, paths);
             }
@@ -195,7 +203,7 @@ public static class CompileContextBuilder
             var (ninjaCommands, error) = NinjaCompileCommands.Query(sources!.NinjaPath!, buildDirectory, compiler, TimeSpan.FromMinutes(1), cancellationToken);
             if (ninjaCommands.Count > 0)
             {
-                var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(ninjaCommands));
+                var changed = WriteDatabase(directory, paths.ToReal(ninjaCommands));
                 var summary = $"Ninja 빌드 파일({buildDirectory}) · 컴파일 명령 {ninjaCommands.Count:N0}개";
                 return new CompileContext(CompileContextKind.Ninja, directory, ninjaCommands, summary, null, engineRoot, changed, paths);
             }
@@ -209,7 +217,7 @@ public static class CompileContextBuilder
                 TimeSpan.FromMinutes(3), cancellationToken);
             if (result.Commands.Count > 0)
             {
-                var changed = CompileCommandDatabase.WriteIfChanged(directory, paths.ToReal(result.Commands));
+                var changed = WriteDatabase(directory, paths.ToReal(result.Commands));
                 var summary = $"C++ 프로젝트 {result.AnsweredProjects:N0}/{result.Projects:N0}개의 MSBuild 설계 시점 명령 · 컴파일 명령 {result.Commands.Count:N0}개";
                 return new CompileContext(CompileContextKind.MsBuild, directory, result.Commands, summary, null, engineRoot, changed, paths);
             }
@@ -219,6 +227,30 @@ public static class CompileContextBuilder
 
         return new CompileContext(CompileContextKind.None, directory, Array.Empty<CompileCommand>(), string.Empty,
             unrealReason ?? toolReason ?? "compile_commands.json을 찾지 못했습니다.", engineRoot, false);
+    }
+
+    /// <summary>
+    /// database를 쓰고 색인 시작 문서(<see cref="CompileContext.IndexStartPath"/>)의 명령을 덧붙입니다. 명령이 없으면 clangd가
+    /// 가까운 TU 명령을 빌려 빈 문서에도 강제 include(Unreal 공유 PCH 등)를 분석했습니다(테스트 전용 UE 샘플에서 15.7초, 수 GB).
+    /// 덮어쓰기 명령(<c>compilationDatabaseChanges</c>)으로 주면 clangd가 database를 찾지 않아 background index가 시작하지 않으므로
+    /// database 안에 둡니다. background index도 이 빈 파일을 읽으므로 캐시 폴더에 빈 파일을 둡니다.
+    /// </summary>
+    private static bool WriteDatabase(string directory, IEnumerable<CompileCommand> commands)
+    {
+        var list = commands.ToList();
+        if (list.Count > 0)
+        {
+            var probe = Path.Combine(directory, CompileContext.IndexStartFileName).Replace('\\', '/');
+            var sample = list[0].Arguments;
+            var arguments = new List<string> { sample[0] };
+            if (sample.Count > 1 && sample[1].StartsWith("--driver-mode=", StringComparison.Ordinal)) arguments.Add(sample[1]);
+            arguments.Add(probe);
+            list.Add(new CompileCommand(directory.Replace('\\', '/'), probe, arguments.ToArray()));
+            System.IO.Directory.CreateDirectory(directory);
+            if (!File.Exists(probe) || new FileInfo(probe).Length != 0) File.WriteAllText(probe, string.Empty);
+        }
+
+        return CompileCommandDatabase.WriteIfChanged(directory, list);
     }
 
     private static IEnumerable<string> SafeFiles(string directory, string pattern)

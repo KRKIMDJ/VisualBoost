@@ -117,6 +117,19 @@ internal static class SemanticNavigationTests
         Check(ClangdLaunchOptions.ResolveWorkerCount(3) == 3 && ClangdLaunchOptions.ResolveWorkerCount(0) >= 1, "지정한 작업 수 우선");
     }
 
+    public static void RunDocumentErrors()
+    {
+        var diagnostics = JsonValue.Parse("[" +
+            "{\"severity\":2,\"range\":{\"start\":{\"line\":1,\"character\":0}},\"message\":\"unused variable\"}," +
+            "{\"severity\":1,\"range\":{\"start\":{\"line\":9,\"character\":2}},\"message\":\"use of undeclared identifier 'GEngine'\"}," +
+            "{\"severity\":1,\"range\":{\"start\":{\"line\":4,\"character\":7}},\"message\":\"member access into incomplete type 'ULocalPlayer'\\n\\nLocalPlayer.h:3: note: forward declaration\"}]");
+        var errors = DocumentErrors.From(diagnostics.Items);
+        Check(errors is { Count: 2, FirstLine: 4, FirstMessage: "member access into incomplete type 'ULocalPlayer'" },
+            "오류만 세고 가장 앞 오류의 첫 줄 메시지: " + errors?.FirstLine + " " + errors?.FirstMessage);
+        Check(DocumentErrors.From(JsonValue.Parse("[{\"severity\":2,\"message\":\"w\"}]").Items) is null && DocumentErrors.From(JsonValue.Parse("[]").Items) is null,
+            "경고만 있거나 비면 오류 요약 없음");
+    }
+
     public static void RunMemoryPolicy()
     {
         const long Gib = 1024L * 1024 * 1024;
@@ -294,8 +307,12 @@ internal static class SemanticNavigationTests
             var context = CompileContextBuilder.Prepare(Path.Combine(link, "App.sln"), Path.Combine(root, "cache"), null, "clang-cl.exe");
             var written = CompileCommandDatabase.Read(Path.Combine(context.Directory, CompileCommandDatabase.FileName));
             var realSource = Path.Combine(target, "App", "Main.cpp").Replace('\\', '/');
-            Check(context.Paths.Count == 1 && context.Commands[0].File == source && written.Count == 1 && written[0].File == realSource &&
+            Check(context.Paths.Count == 1 && context.Commands[0].File == source && written.Count == 2 && written[0].File == realSource &&
                   written[0].Arguments[2] == source, "링크를 거쳐 연 Solution의 compile_commands.json은 실제 파일 경로: " + written[0].File);
+            // 색인 시작용 빈 문서는 자기 명령을 가져 가까운 TU의 강제 include를 빌리지 않습니다.
+            var probe = context.IndexStartPath.Replace('\\', '/');
+            Check(context.Commands.Count == 1 && written[1].File == probe && written[1].Arguments.SequenceEqual(new[] { "clang-cl.exe", probe }) &&
+                  File.Exists(probe) && new FileInfo(probe).Length == 0, "색인 시작 문서의 자기 명령과 빈 파일: " + string.Join(" ", written[1].Arguments));
         }
         finally
         {
@@ -372,6 +389,7 @@ internal static class SemanticNavigationTests
             var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
             var pch = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "GameEditor", "Development", "UnrealEd", "SharedPCH.UnrealEd.h").Replace('\\', '/');
             var definitions = Path.Combine(build, "Definitions.Game.h").Replace('\\', '/');
+            Write(pch, "#pragma once\n");
             Write(Path.Combine(build, "Game.Shared.rsp"), "/nologo\n/I \"Runtime/Core/Public\"\n/DWITH_EDITOR=1\n/errorReport:prompt\n/d2ExtendedWarningInfo\n/W4\n");
             string Rsp(string file) => $"\"{file.Replace('\\', '/')}\"\n@\"{Path.Combine(build, "Game.Shared.rsp").Replace('\\', '/')}\"\n/FI\"{pch}\"\n/FI\"{definitions}\"\n/Yu\"{pch}\"\n/Fp\"{pch}.pch\"\n/Fo\"x.obj\"\n/experimental:log \"x.sarif\"\n/sourceDependencies \"x.json\"\n/TP\n/std:c++20\n";
             Write(Path.Combine(build, "A.cpp.obj.rsp"), Rsp(Path.Combine(source, "A.cpp")));
@@ -415,8 +433,11 @@ internal static class SemanticNavigationTests
             Check(a.Arguments[0] == "cl.exe" && a.Arguments[1] == "--driver-mode=cl" && a.Arguments.Last() == a.File, "컴파일러·source 위치");
             Check(!a.Arguments.Any(x => x.StartsWith("/Yu") || x.StartsWith("/Fp") || x.StartsWith("/Fo") || x.StartsWith("/d2") || x.StartsWith("/errorReport") ||
                                          x == "/experimental:log" || x == "x.sarif" || x == "/sourceDependencies"), "PCH·출력·로그 옵션 제거");
-            Check(!a.Arguments.Contains(pch) && !a.Arguments.Any(x => x.StartsWith("/FI")), "공유 PCH 강제 include 제거");
             var include = Array.IndexOf(a.Arguments.ToArray(), definitions);
+            var pchInclude = Array.IndexOf(a.Arguments.ToArray(), pch);
+            // 공유 PCH에 기대는 프로젝트 소스가 흔하므로 실제 빌드처럼 텍스트로 포함합니다(빌드 순서대로 정의 헤더 앞).
+            Check(!a.Arguments.Any(x => x.StartsWith("/FI")) && pchInclude >= 3 && a.Arguments[pchInclude - 2] == "-include" && pchInclude < include,
+                "공유 PCH 헤더는 -Xclang -include로 유지");
             Check(include >= 3 && a.Arguments[include - 3] == "-Xclang" && a.Arguments[include - 2] == "-include" && a.Arguments[include - 1] == "-Xclang", "정의 헤더는 -Xclang -include");
             Check(a.Arguments.Contains("Runtime/Core/Public") && a.Arguments.Contains("/DWITH_EDITOR=1") && a.Arguments.Contains("/std:c++20"), "공유 응답 파일 펼침");
 
@@ -445,6 +466,7 @@ internal static class SemanticNavigationTests
             var t = supplemented.Commands.Single(c => c.File.EndsWith("/T.cpp", StringComparison.Ordinal));
             Check(t.Arguments.Contains(Path.Combine(tools, "Private").Replace('\\', '/')) && File.Exists(Path.Combine(root, "modules", "Tools.h")),
                 "빌드하지 않은 모듈은 근사 명령");
+            Check(t.Arguments.Contains(pch), "같은 프로젝트 모듈 근사 명령은 공유 PCH 유지");
             Check(UnrealCompileCommands.Build(project, engine, variant!, "cl.exe").Supplemented == 3, "재정의 폴더가 없으면 같은 모듈 보완만");
 
             // 상위를 가리키는 junction은 따라가지 않습니다(같은 파일을 다른 경로로 거듭 보완하지 않음).
@@ -487,6 +509,16 @@ internal static class SemanticNavigationTests
                   synthesized.Arguments[overrideIndex - 2] == "-include" &&
                   synthesized.Arguments.Select((x, i) => (x, i)).Where(p => p.x == "-include").All(p => p.i <= overrideIndex - 2),
                   "모듈 API 매크로 재정의 헤더는 마지막 강제 include");
+            // 공유 PCH가 든 명령을 바탕으로: 엔진 cpp는 PCH를 빼고(include를 스스로 갖춤), 같은 프로젝트 모듈 근사는 남깁니다.
+            var withPch = result.Commands.Where(c => c.Arguments.Contains(pch)).ToArray();
+            var widget = Path.Combine(engineModule, "Private", "Widget.cpp");
+            var engineApprox = UnrealCompileCommands.Synthesize(widget, withPch, Path.Combine(output, "modules"))!;
+            var projectApprox = UnrealCompileCommands.Synthesize(widget, withPch, Path.Combine(output, "modules"), sharedPrecompiledHeader: true)!;
+            Check(withPch.Length > 0 && !engineApprox.Arguments.Contains(pch) && engineApprox.Arguments.Contains(definitions) && projectApprox.Arguments.Contains(pch),
+                "엔진 cpp 근사 명령은 공유 PCH 제외, 프로젝트 모듈 근사는 유지");
+            File.Delete(pch);
+            Check(!UnrealCompileCommands.Build(project, engine, variant!, "cl.exe").Commands.Single(c => c.File.EndsWith("/A.cpp", StringComparison.Ordinal))
+                .Arguments.Contains(pch), "없는 PCH 헤더는 빼서 치명 오류를 피함");
             Check(UnrealCompileCommands.Synthesize(Path.Combine(root, "loose.cpp"), result.Commands, output) is null, "모듈 밖 파일은 근사하지 않음");
         }
         finally
@@ -811,6 +843,16 @@ internal static class SemanticNavigationTests
             Check(!missing.ResolvedOnDemand && missing.Locations.Single().Path.EndsWith("Calc.h", StringComparison.OrdinalIgnoreCase) && missingReports.Count == 0,
                 "색인을 마친 명령 있는 후보는 다시 열지 않음: " + string.Join(",", missing.Locations) + " / " + string.Join(",", missingReports));
             Check(!navigator.IsBusy && navigator.LastRequestUtc >= navigator.StartedUtc, "요청이 끝나면 유휴 상태와 마지막 요청 시각");
+
+            // 분석 오류가 있는 문서: 결과가 비면 명령이 첫 오류를 함께 알리도록 오류 요약을 남깁니다.
+            Check(navigator.ErrorsOf(caller) is null, "오류 없는 문서는 오류 요약 없음");
+            var brokenText = "#include \"Mod.h\"\nint Use() { return Missing(3); }\n";
+            var broken = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(use, brokenText, 3), 1,
+                brokenText.Split('\n')[1].IndexOf("Missing", StringComparison.Ordinal)), null, timeout.Token).Result;
+            var useErrors = default(DocumentErrors);
+            Check(broken.Locations.Count == 0 && SpinUntil(() => (useErrors = navigator.ErrorsOf(use)) is not null, 10000) &&
+                  useErrors!.Count >= 1 && useErrors.FirstLine == 1 && useErrors.FirstMessage.Contains("Missing"),
+                "분석 오류 요약(첫 오류 줄·메시지): " + useErrors?.FirstLine + " " + useErrors?.FirstMessage);
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             Check(navigator.HasExited, "정상 종료");
         }

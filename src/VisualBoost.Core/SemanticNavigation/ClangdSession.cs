@@ -41,6 +41,8 @@ public sealed class ClangdLaunchOptions
     /// 색인 중 메모리와 발열이 컸습니다(2026-10-08 회사 사용 피드백). 테스트 전용 UE 5.8 샘플(TU 305개, 16스레드 PC)에서 작업 8개는
     /// 첫 색인 155초·최고 5.1 GB·CPU 970초, 작업 4개는 217초·2.3 GB·823초였습니다. 물리 코어를 넘는 작업은 빨라지는 몫보다 메모리와
     /// CPU 사용이 더 늘어 그 사이 값을 씁니다. 메모리를 모르면(0) 예전 기본값(코어의 1/4)에 같은 상한 8을 둡니다(2026-10-07·2026-10-09 검토).
+    /// Unreal 공유 PCH를 텍스트로 포함한 뒤(0.44.3) 같은 샘플의 작업 8개는 첫 색인 479초·최고 17.4 GB로, 작업당 약 2.2 GB가 들어
+    /// 작업당 2.5 GiB 가정과 맞습니다.
     /// </remarks>
     public static int DefaultWorkerCount(int processors, long memoryBytes)
     {
@@ -85,6 +87,38 @@ internal static class PhysicalMemory
     [System.Runtime.InteropServices.DllImport("kernel32.dll", SetLastError = true)]
     [return: System.Runtime.InteropServices.MarshalAs(System.Runtime.InteropServices.UnmanagedType.Bool)]
     private static extern bool GlobalMemoryStatusEx(ref MemoryStatus status);
+}
+
+/// <summary>
+/// 열린 문서의 최근 진단 중 오류 요약입니다. 탐색 결과가 비었을 때 심볼이 정말 없는지, 컴파일 문맥이 깨져(필요한 헤더 누락 등)
+/// 분석하지 못했는지 사용자가 구분하도록 첫 오류를 함께 보입니다.
+/// </summary>
+public sealed class DocumentErrors
+{
+    public DocumentErrors(int count, int firstLine, string firstMessage)
+    {
+        Count = count;
+        FirstLine = firstLine;
+        FirstMessage = firstMessage;
+    }
+
+    public int Count { get; }
+
+    /// <summary>문서에서 가장 앞에 있는 오류의 줄(0부터)입니다. 뒤 오류는 앞 오류에서 번진 경우가 많습니다.</summary>
+    public int FirstLine { get; }
+
+    /// <summary>그 오류 메시지의 첫 줄입니다.</summary>
+    public string FirstMessage { get; }
+
+    /// <summary>JSON 진단 배열에서 오류(severity 1)만 요약합니다. 오류가 없으면 null입니다.</summary>
+    public static DocumentErrors? From(IReadOnlyList<JsonValue> diagnostics)
+    {
+        var errors = diagnostics.Where(d => d["severity"].AsInt32() == 1).ToArray();
+        if (errors.Length == 0) return null;
+        var first = errors.OrderBy(d => d["range"]["start"]["line"].AsInt32() ?? int.MaxValue).First();
+        var message = (first["message"].AsString() ?? string.Empty).Split('\n')[0].Trim();
+        return new DocumentErrors(errors.Length, first["range"]["start"]["line"].AsInt32() ?? 0, message);
+    }
 }
 
 /// <summary>clangd background index의 진행 상태입니다. 진행 알림이 한 번도 없으면 <see cref="Started"/>가 false입니다.</summary>
@@ -156,6 +190,7 @@ public sealed class ClangdSession : IDisposable
     private readonly ClangdLaunchOptions options;
     private readonly object stateLock = new();
     private readonly Dictionary<string, int> diagnosticsVersions = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, DocumentErrors> documentErrors = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<DiagnosticsWaiter> diagnosticsWaiters = new();
     private readonly StreamWriter? log;
     private long logBytes;
@@ -296,9 +331,20 @@ public sealed class ClangdSession : IDisposable
     public void SaveDocument(string path) =>
         connection.Notify("textDocument/didSave", JsonValue.Object(("textDocument", JsonValue.Object(("uri", ToUri(path))))));
 
+    /// <summary>열린 문서의 최근 진단 중 오류 요약입니다. 오류가 없거나 진단 전이면 null입니다.</summary>
+    public DocumentErrors? ErrorsOf(string path)
+    {
+        lock (stateLock) return documentErrors.TryGetValue(path, out var errors) ? errors : null;
+    }
+
     public void CloseDocument(string path)
     {
-        lock (stateLock) diagnosticsVersions.Remove(path);
+        lock (stateLock)
+        {
+            diagnosticsVersions.Remove(path);
+            documentErrors.Remove(path);
+        }
+
         connection.Notify("textDocument/didClose", JsonValue.Object(("textDocument", JsonValue.Object(("uri", ToUri(path))))));
     }
 
@@ -545,10 +591,19 @@ public sealed class ClangdSession : IDisposable
             var path = options.Paths.ToGiven(received);
             // 버전 없는 진단은 열린 문서가 아니므로 0으로 취급합니다.
             var version = parameters["version"].AsInt32() ?? 0;
+            var errors = DocumentErrors.From(parameters["diagnostics"].Items);
             List<DiagnosticsWaiter> ready;
             lock (stateLock)
             {
-                diagnosticsVersions[path] = Math.Max(version, diagnosticsVersions.TryGetValue(path, out var known) ? known : int.MinValue);
+                var known = diagnosticsVersions.TryGetValue(path, out var previous) ? previous : int.MinValue;
+                if (version >= known)
+                {
+                    // 늦게 도착한 이전 버전의 진단으로 최신 오류 요약을 덮지 않습니다.
+                    if (errors is null) documentErrors.Remove(path);
+                    else documentErrors[path] = errors;
+                }
+
+                diagnosticsVersions[path] = Math.Max(version, known);
                 ready = diagnosticsWaiters.Where(w => string.Equals(w.Path, path, StringComparison.OrdinalIgnoreCase) && version >= w.MinimumVersion).ToList();
                 foreach (var waiter in ready) diagnosticsWaiters.Remove(waiter);
             }

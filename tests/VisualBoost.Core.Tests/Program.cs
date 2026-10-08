@@ -24,6 +24,7 @@ internal static class Program
         Run("클래스 자신의 정의 이름 참조 제외", SemanticNavigationTests.RunOwnDefinitionReferences);
         Run("clangd 색인 작업 수 기본값", SemanticNavigationTests.RunWorkerDefaults);
         Run("clangd 메모리 정리 판단", SemanticNavigationTests.RunMemoryPolicy);
+        Run("열린 문서 분석 오류 요약", SemanticNavigationTests.RunDocumentErrors);
         Run("링크를 거친 Solution의 clangd 결과 경로 보정", SemanticNavigationTests.RunPathAliases);
         Run("LSP 연결 요청·통지·취소·끊김", SemanticNavigationTests.RunConnection);
         Run("Unreal 응답 파일 compilation database", SemanticNavigationTests.RunUnrealCommands);

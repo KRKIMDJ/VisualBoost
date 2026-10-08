@@ -78,9 +78,12 @@ public sealed class UnrealCompileCommandResult
 /// UBT를 다시 실행하지 않고 프로젝트·엔진 폴더에 아무것도 쓰지 않습니다. 근거와 측정은 R&D
 /// `ClangdFindings`의 "일반 빌드 응답 파일 변환"에 있습니다.
 /// - 파일별 응답 파일은 그대로, unity 응답 파일은 unity cpp의 #include 목록으로 개별 cpp에 펼칩니다.
-/// - MSVC PCH(/Yu /Yc /Fp)와 출력·로그 옵션을 빼고, /Yu 대상인 공유 PCH 헤더의 강제 include도 뺍니다.
-///   텍스트로 넣으면 TU마다 거대한 헤더를 다시 분석해 비용이 몇 배가 되며, UBT의 clang database 모드도 PCH를 끕니다.
-/// - 남은 강제 include는 clang driver가 옆의 MSVC .pch를 자동 선택하지 않도록 -Xclang -include로 바꿉니다.
+/// - MSVC PCH(/Yu /Yc /Fp)와 출력·로그 옵션을 빼되, /Yu 대상인 PCH 헤더의 강제 include는 텍스트 포함으로 남깁니다.
+///   Unreal 프로젝트 소스는 공유 PCH가 넣어 주는 엔진 헤더에 기대는 경우가 흔해, 빼면 실제 빌드는 통과하는 TU가 불완전 타입·
+///   미선언 이름 오류로 분석되고 그 TU의 정의·참조가 색인에서 조용히 빠집니다(2026-10-09 검토: 실제 프로젝트 TU 82개 중 30개 오류,
+///   포함하면 0개). TU마다 큰 헤더를 다시 분석하는 비용(첫 분석 약 2배)은 정확성을 위해 감수합니다. 엔진 cpp 근사 명령은
+///   <see cref="Synthesize"/>에서 다시 뺍니다.
+/// - 강제 include는 clang driver가 옆의 MSVC .pch를 자동 선택하지 않도록 -Xclang -include로 바꿉니다.
 /// - UBT 컴파일 작업 경로는 항상 &lt;Engine&gt;/Engine/Source입니다.
 /// </remarks>
 public static class UnrealCompileCommands
@@ -288,7 +291,7 @@ public static class UnrealCompileCommands
                 }
                 else if (overrideDirectory is not null && built.Length > 0 && !IsExternal(directory, module))
                 {
-                    command = Synthesize(source, built, overrideDirectory);
+                    command = Synthesize(source, built, overrideDirectory, sharedPrecompiledHeader: true);
                 }
 
                 if (command is null) continue;
@@ -353,8 +356,12 @@ public static class UnrealCompileCommands
     /// 프로젝트 정의 헤더가 의존 모듈 API 매크로를 dllimport로 정의하므로, 소속 모듈 매크로는 그 뒤에
     /// 강제 include하는 작은 헤더(<paramref name="overrideDirectory"/>/&lt;Module&gt;.h)에서 다시 비웁니다.
     /// </summary>
+    /// <param name="sharedPrecompiledHeader">
+    /// 프로젝트 명령의 공유 PCH 헤더(<c>SharedPCH.*</c>)를 남깁니다. 같은 프로젝트의 빌드하지 않은 모듈처럼 공유 PCH에 기댈 수 있는
+    /// 소스에 씁니다. 엔진 cpp는 include를 스스로 갖추므로 빼서 정의 확정 분석 시간을 줄입니다. 다른 모듈의 전용 PCH(<c>PCH.*</c>)는 항상 뺍니다.
+    /// </param>
     public static CompileCommand? Synthesize(string file, IReadOnlyList<CompileCommand> projectCommands, string overrideDirectory,
-        string platform = "Win64", string target = "UnrealEditor")
+        string platform = "Win64", string target = "UnrealEditor", bool sharedPrecompiledHeader = false)
     {
         if (projectCommands.Count == 0 || OwningModule(file) is not (string moduleDirectory, string module))
         {
@@ -362,7 +369,7 @@ public static class UnrealCompileCommands
         }
 
         var baseCommand = projectCommands.OrderByDescending(c => c.Arguments.Count(a => a == "/I")).First();
-        var head = baseCommand.Arguments.Take(baseCommand.Arguments.Count - 1);
+        var head = WithoutPrecompiledHeaders(baseCommand.Arguments.Take(baseCommand.Arguments.Count - 1).ToArray(), sharedPrecompiledHeader);
         var plugin = Ancestors(moduleDirectory).FirstOrDefault(d => SafeFiles(d, "*.uplugin").Any());
         var engineDirectory = Ancestors(moduleDirectory).FirstOrDefault(d => string.Equals(Path.GetFileName(d), "Engine", StringComparison.OrdinalIgnoreCase));
         var generatedRoot = Path.Combine(plugin ?? engineDirectory ?? moduleDirectory, "Intermediate", "Build", platform, target, "Inc", module);
@@ -393,6 +400,29 @@ public static class UnrealCompileCommands
         extra.AddRange(new[] { "-Xclang", "-include", "-Xclang", Normalize(overrideHeader) });
         var normalizedFile = Normalize(file);
         return new CompileCommand(baseCommand.Directory, normalizedFile, head.Concat(extra).Concat(new[] { normalizedFile }).ToArray());
+    }
+
+    /// <summary>UBT가 만든 PCH 래퍼 헤더(<c>SharedPCH.*</c>, 모듈 전용 <c>PCH.*</c>)의 강제 include를 뺍니다.</summary>
+    private static IReadOnlyList<string> WithoutPrecompiledHeaders(IReadOnlyList<string> arguments, bool keepShared)
+    {
+        var result = new List<string>(arguments.Count);
+        for (var i = 0; i < arguments.Count; i++)
+        {
+            if (i + 3 < arguments.Count && arguments[i] == "-Xclang" && arguments[i + 1] == "-include" && arguments[i + 2] == "-Xclang")
+            {
+                var name = Path.GetFileName(arguments[i + 3]);
+                var shared = name.StartsWith("SharedPCH.", StringComparison.OrdinalIgnoreCase);
+                if (shared && !keepShared || !shared && name.StartsWith("PCH.", StringComparison.OrdinalIgnoreCase))
+                {
+                    i += 3;
+                    continue;
+                }
+            }
+
+            result.Add(arguments[i]);
+        }
+
+        return result;
     }
 
     /// <summary>파일 위쪽에서 <c>*.Build.cs</c>가 있는 폴더를 모듈 루트로 봅니다.</summary>
@@ -481,8 +511,9 @@ public static class UnrealCompileCommands
 
             if (token.StartsWith("/FI", StringComparison.Ordinal))
             {
+                // PCH 헤더도 실제 빌드처럼 텍스트로 포함합니다. 단, 생성 폴더를 지워 헤더가 없으면 모든 TU가 치명 오류로 멈추므로 뺍니다.
                 var header = Normalize(token.Substring(3));
-                if (!pch.Contains(header))
+                if (!pch.Contains(header) || File.Exists(header))
                 {
                     result.AddRange(new[] { "-Xclang", "-include", "-Xclang", header });
                 }

@@ -255,6 +255,9 @@ public sealed class ClangdNavigator : IDisposable
 
     public bool IsOpen(string path) => documents.Contains(path);
 
+    /// <summary>clangd에 열린 문서의 최근 진단 중 오류 요약입니다. 오류가 없거나 열리지 않았으면 null입니다.</summary>
+    public DocumentErrors? ErrorsOf(string path) => session.ErrorsOf(path);
+
     public async Task<NavigationResult> DefinitionAsync(NavigationQuery query, IProgress<string>? progress, CancellationToken cancellationToken)
     {
         using var tracked = TrackRequest();
@@ -523,7 +526,7 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     private async Task StartBackgroundIndexAsync(CancellationToken cancellationToken)
     {
-        var probe = Path.Combine(Context.Directory, "visualboost-index-start.cpp");
+        var probe = Context.IndexStartPath;
         var version = documents.Acquire(new DocumentText(probe, string.Empty));
         try
         {
@@ -610,7 +613,7 @@ public sealed class ClangdNavigator : IDisposable
             // 엔진 cpp와 명령이 없는 Unreal 프로젝트 파일은 근사 명령을 줍니다. 명령이 있는 파일은 database의 명령을 그대로 씁니다.
             // 그 밖(명령 없는 일반 프로젝트 파일)은 clangd가 가까운 파일의 명령으로 추정합니다.
             var command = engine || Context.Kind == CompileContextKind.Unreal && !HasCommand(candidate)
-                ? UnrealCompileCommands.Synthesize(candidate, Context.Commands, Context.OverrideDirectory)
+                ? UnrealCompileCommands.Synthesize(candidate, Context.Commands, Context.OverrideDirectory, sharedPrecompiledHeader: !engine)
                 : null;
             var text = engine && command is null ? null : SourceLinePreview.ReadText(candidate);
             if (text is null)
