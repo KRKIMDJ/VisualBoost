@@ -67,6 +67,8 @@ internal sealed class SemanticNavigationService : IDisposable
     private static readonly TimeSpan ExitWindow = TimeSpan.FromMinutes(10);
     private static readonly TimeSpan ExitPause = TimeSpan.FromMinutes(5);
     private const int MaxExitPauses = 3;
+    // 한 clangd가 이만큼 정상 동작한 뒤의 종료는 이전 쉼과 무관한 것으로 보고 쉼 횟수를 되돌립니다(드문 종료 묶음이 쌓여 멈추지 않게).
+    private static readonly TimeSpan ExitPauseReset = TimeSpan.FromHours(1);
 
     private static readonly TimeSpan MemoryCheckInterval = TimeSpan.FromSeconds(30);
 
@@ -521,6 +523,7 @@ internal sealed class SemanticNavigationService : IDisposable
                     monitor = null;
                     unexpected = true;
                     var now = DateTime.UtcNow;
+                    if (now - source.StartedUtc >= ExitPauseReset) exitPauses = 0;
                     unexpectedExits.Enqueue(now);
                     while (unexpectedExits.Count > 0 && now - unexpectedExits.Peek() > ExitWindow) unexpectedExits.Dequeue();
                     if (unexpectedExits.Count >= MaxUnexpectedExits)

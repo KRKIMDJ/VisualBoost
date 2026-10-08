@@ -447,6 +447,24 @@ internal static class SemanticNavigationTests
                 "빌드하지 않은 모듈은 근사 명령");
             Check(UnrealCompileCommands.Build(project, engine, variant!, "cl.exe").Supplemented == 3, "재정의 폴더가 없으면 같은 모듈 보완만");
 
+            // 상위를 가리키는 junction은 따라가지 않습니다(같은 파일을 다른 경로로 거듭 보완하지 않음).
+            var loop = Path.Combine(source, "Private", "Loop");
+            using (var mklink = Process.Start(new ProcessStartInfo("cmd.exe", $"/c mklink /J \"{loop}\" \"{source}\"") { CreateNoWindow = true, UseShellExecute = false }))
+            {
+                mklink!.WaitForExit();
+                Check(mklink.ExitCode == 0 && Directory.Exists(Path.Combine(loop, "Private")), "테스트 junction 생성");
+            }
+
+            try
+            {
+                var looped = UnrealCompileCommands.Build(project, engine, variant!, "cl.exe", default, Path.Combine(root, "modules"));
+                Check(looped.Supplemented == 4 && looped.Commands.Count == supplemented.Commands.Count, "상위를 가리키는 junction은 따라가지 않음: " + looped.Supplemented);
+            }
+            finally
+            {
+                Directory.Delete(loop);
+            }
+
             var output = Path.Combine(root, "db");
             CompileCommandDatabase.Write(output, result.Commands);
             var reread = CompileCommandDatabase.Read(Path.Combine(output, CompileCommandDatabase.FileName));

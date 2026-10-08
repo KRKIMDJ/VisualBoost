@@ -303,22 +303,26 @@ public static class UnrealCompileCommands
     /// <summary>
     /// 보완할 소스를 폴더 단위로 모읍니다. 읽지 못한 폴더(접근 거부·경로 길이 초과)는 그 폴더만 건너뛰고 <paramref name="unreadable"/>에 셉니다.
     /// </summary>
+    /// <remarks>
+    /// 정션·심볼릭 링크 폴더는 따라가지 않습니다. 상위를 가리키는 링크가 있으면 같은 파일을 다른 경로로 거듭 보완하고 경로 길이 한계까지
+    /// 내려가기 때문입니다. 링크 안의 파일도 빌드했으면 응답 파일 명령으로 들어오므로, 빠지는 것은 빌드 전 새 파일뿐입니다.
+    /// </remarks>
     private static List<string> SupplementSources(string root, ref int unreadable, CancellationToken cancellationToken)
     {
         var sources = new List<string>();
         if (!Directory.Exists(root)) return sources;
-        var pending = new Stack<string>();
-        pending.Push(root);
+        var pending = new Stack<DirectoryInfo>();
+        pending.Push(new DirectoryInfo(root));
         while (pending.Count > 0)
         {
             cancellationToken.ThrowIfCancellationRequested();
             var directory = pending.Pop();
             try
             {
-                sources.AddRange(Directory.EnumerateFiles(directory).Where(DefinitionCandidates.IsSource));
-                foreach (var child in Directory.EnumerateDirectories(directory))
+                sources.AddRange(directory.EnumerateFiles().Select(f => f.FullName).Where(DefinitionCandidates.IsSource));
+                foreach (var child in directory.EnumerateDirectories())
                 {
-                    if (!SkippedSupplementFolders.Contains(Path.GetFileName(child))) pending.Push(child);
+                    if ((child.Attributes & FileAttributes.ReparsePoint) == 0 && !SkippedSupplementFolders.Contains(child.Name)) pending.Push(child);
                 }
             }
             catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
