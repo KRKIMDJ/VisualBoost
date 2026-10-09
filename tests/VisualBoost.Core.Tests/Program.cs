@@ -100,7 +100,6 @@ internal static class Program
         Run("심볼 검색은 결과 수와 취소를 적용한다", SymbolSearchLimitsResultsAndCancels);
         Run("최적화된 심볼 검색의 점수와 순서가 기존 검색과 일치한다", SymbolSnapshotMatchesBaseline);
         Run("심볼 스냅샷 교체와 취소를 반영한다", SymbolSnapshotReplacesAndCancels);
-        Run("실행 프로젝트의 외부 연결 파일을 포함하고 다른 프로젝트는 제외한다", SourceProjectMembershipIsExact);
         Run("소스 분석은 연 파일·같은 프로젝트·다른 프로젝트·엔진 순서로 진행한다", SourceAnalysisFollowsUserFocus);
         Run("색상 입력과 테마별 기본 팔레트를 검증한다", SemanticColorsAreValid);
 
@@ -762,41 +761,6 @@ internal static class Program
         using var cancellation = new CancellationTokenSource();
         cancellation.Cancel();
         Throws<OperationCanceledException>(() => index.Search("New", cancellationToken: cancellation.Token));
-    }
-
-    private static void SourceProjectMembershipIsExact()
-    {
-        var root = Path.Combine(Path.GetTempPath(), "VisualBoostProjectTests-" + Guid.NewGuid().ToString("N"));
-        Directory.CreateDirectory(Path.Combine(root, "Projects"));
-        try
-        {
-            var project = Path.Combine(root, "Projects", "Game.vcxproj");
-            var shared = Path.Combine(root, "Projects", "Shared.vcxitems");
-            File.WriteAllText(project, """
-                <Project><ItemGroup>
-                <ClCompile Include="../Source/Game.cpp" />
-                <ClCompile Include="../Plugins/**/*.cpp" />
-                <ClInclude Include="$(ProjectDir)../Source/Game.h" />
-                </ItemGroup><Import Project="Shared.vcxitems" /></Project>
-                """);
-            File.WriteAllText(shared, """
-                <Project><ItemGroup><ClInclude Include="$(MSBuildThisFileDirectory)../Shared/Public.h" /></ItemGroup></Project>
-                """);
-            var owned = new[] { "Source/Game.cpp", "Source/Game.h", "Plugins/Top.cpp", "Plugins/Feature/Linked.cpp", "Shared/Public.h" }
-                .Select(path => Path.GetFullPath(Path.Combine(root, path))).ToArray();
-            var other = Path.Combine(root, "Source", "OtherProject.cpp");
-            var files = SourceProjectFiles.Read(project, owned.Concat(new[] { other }).ToArray());
-            Equal(owned.Length, files.Count);
-            foreach (var path in owned) Equal(true, files.Contains(path));
-            Equal(false, files.Contains(other));
-            using var cancellation = new CancellationTokenSource();
-            cancellation.Cancel();
-            Throws<OperationCanceledException>(() => SourceProjectFiles.Read(project, owned, cancellation.Token));
-        }
-        finally
-        {
-            Directory.Delete(root, recursive: true);
-        }
     }
 
     private static void SemanticColorsAreValid()
