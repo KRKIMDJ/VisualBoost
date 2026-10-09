@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
@@ -462,9 +463,12 @@ public static class UnrealCompileCommands
         Directory.CreateDirectory(overrideDirectory);
         var overrideHeader = Path.Combine(overrideDirectory, module + ".h");
         var content = OverrideHeader(module, engineDirectory is not null, environment);
-        if (!File.Exists(overrideHeader) || File.ReadAllText(overrideHeader) != content)
+        lock (WriteLock(overrideHeader))
         {
-            File.WriteAllText(overrideHeader, content);
+            if (!File.Exists(overrideHeader) || File.ReadAllText(overrideHeader) != content)
+            {
+                File.WriteAllText(overrideHeader, content);
+            }
         }
 
         extra.AddRange(new[] { "-Xclang", "-include", "-Xclang", Normalize(overrideHeader) });
@@ -556,11 +560,20 @@ public static class UnrealCompileCommands
         foreach (var name in names)
         {
             var stub = Path.Combine(folder, name + ".gen.cpp");
-            if (!File.Exists(stub)) File.WriteAllText(stub, string.Empty);
+            lock (WriteLock(stub))
+            {
+                if (!File.Exists(stub)) File.WriteAllText(stub, string.Empty);
+            }
         }
 
         return folder;
     }
+
+    // 캐시 폴더의 재정의 헤더·생성 소스 대체 파일은 문서 열기(문서 집합 잠금 안), 요청 시점 정의 확정, 시작 때 기억한 파일 복원이 동시에
+    // 비교하고 쓸 수 있어 경로마다 잠급니다. 잠그지 않으면 한쪽이 공유 위반으로 명령 없이 문서를 열었습니다(2026-10-09 검토 61).
+    private static readonly ConcurrentDictionary<string, object> WriteLocks = new(StringComparer.OrdinalIgnoreCase);
+
+    private static object WriteLock(string path) => WriteLocks.GetOrAdd(Path.GetFullPath(path), _ => new object());
 
     private static bool IsIdentifier(string name) =>
         name.Length > 0 && (char.IsLetter(name[0]) || name[0] == '_') && name.All(c => char.IsLetterOrDigit(c) || c == '_');

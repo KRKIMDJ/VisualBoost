@@ -993,6 +993,47 @@ internal static class SemanticNavigationTests
                   DefinitionSourceStore.Capacity, "상한까지만 기억(오래된 것부터 버림)");
             File.WriteAllText(Path.Combine(root, "cache", DefinitionSourceStore.FileName), "{ broken");
             Check(store.Load().Count == 0 && store.Record(files[0]) && store.Load().Count == 1, "깨진 기록은 버리고 새로 기억");
+            // 읽기가 일시적으로 막히면(다른 VS의 바꿔치기, 백신 잠금) 빈 목록 위에 쓰지 않고 기억을 지킵니다(검토 62).
+            store.Record(files[2]);
+            using (new FileStream(Path.Combine(root, "cache", DefinitionSourceStore.FileName), FileMode.Open, FileAccess.Read, FileShare.None))
+            {
+                Check(!store.Record(files[0]) && store.Load().Count == 0, "읽지 못하면 기록하지 않음");
+            }
+
+            Check(store.Load().Count == 2, "막혔던 동안의 기록 시도가 기억을 지우지 않음");
+
+            // 색인 파일 확인: 원본보다 늦게 쓴 같은 이름 색인 파일이 있어야 기억한 파일을 다시 보냅니다(검토 59).
+            var index = Path.Combine(root, "index");
+            Write(Path.Combine(index, "F0.cpp.0123456789ABCDEF.idx"), "x");
+            var sourceTime = DateTime.UtcNow.AddMinutes(-10);
+            File.SetLastWriteTimeUtc(files[0], sourceTime);
+            File.SetLastWriteTimeUtc(Path.Combine(index, "F0.cpp.0123456789ABCDEF.idx"), sourceTime.AddMinutes(1));
+            Check(new ClangdIndexShards(index).HasCurrentShard(files[0]) && !new ClangdIndexShards(index).HasCurrentShard(files[2]), "원본보다 새 색인 파일");
+            File.SetLastWriteTimeUtc(files[0], sourceTime.AddMinutes(2));
+            Check(!new ClangdIndexShards(index).HasCurrentShard(files[0]) && !new ClangdIndexShards(Path.Combine(root, "none")).HasCurrentShard(files[0]),
+                "원본이 더 새롭거나 색인 폴더가 없으면 없음");
+
+            // 재정의 헤더·생성 소스 대체 파일을 여러 경로가 동시에 써도 공유 위반이 나지 않습니다(검토 61).
+            var module = Path.Combine(root, "Engine", "Source", "Runtime", "Mod");
+            Write(Path.Combine(module, "Mod.Build.cs"), "");
+            var engineFile = Path.Combine(module, "Private", "Mod.cpp");
+            Write(engineFile, "#include UE_INLINE_GENERATED_CPP_BY_NAME(Mod)\n");
+            var projectCommands = new[] { new CompileCommand(root, Path.Combine(root, "Game", "A.cpp"), new[] { "clang-cl.exe", "/I", "x", Path.Combine(root, "Game", "A.cpp") }) };
+            var overrides = Path.Combine(root, "overrides");
+            var errors = new System.Collections.Concurrent.ConcurrentBag<Exception>();
+            Parallel.For(0, 32, _ =>
+            {
+                try
+                {
+                    UnrealCompileCommands.Synthesize(engineFile, projectCommands, overrides);
+                }
+                catch (Exception exception)
+                {
+                    errors.Add(exception);
+                }
+            });
+            Check(errors.IsEmpty && File.Exists(Path.Combine(overrides, "Mod.h")) && File.Exists(Path.Combine(overrides, "generated-stubs", "Mod.gen.cpp")),
+                "동시 근사 명령 생성: " + string.Join(" | ", errors.Select(e => e.Message)));
         }
         finally
         {

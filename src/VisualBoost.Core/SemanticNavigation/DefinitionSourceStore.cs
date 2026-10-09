@@ -37,16 +37,20 @@ public sealed class DefinitionSourceStore
     /// <summary>기억한 파일입니다(최근 순). 지금 없는 파일은 뺍니다.</summary>
     public IReadOnlyList<string> Load()
     {
-        lock (gate) return Read().Where(File.Exists).ToArray();
+        lock (gate) return Read()?.Where(File.Exists).ToArray() ?? Array.Empty<string>();
     }
 
-    /// <summary>파일을 맨 앞에 기억합니다. 이미 맨 앞이면 쓰지 않습니다. 기록 파일을 쓰지 못하면 false입니다.</summary>
+    /// <summary>
+    /// 파일을 맨 앞에 기억합니다. 이미 맨 앞이면 쓰지 않습니다. 기록 파일을 읽거나 쓰지 못하면 false입니다. 읽기가 일시적으로 실패했을 때(다른
+    /// VS의 바꿔치기, 백신 검사 중 잠금) 빈 목록 위에 쓰면 그동안의 기억을 모두 잃으므로 이번 기록을 건너뜁니다(2026-10-09 검토 62).
+    /// </summary>
     public bool Record(string file)
     {
         var full = Path.GetFullPath(file);
         lock (gate)
         {
             var files = Read();
+            if (files is null) return false;
             if (files.Count > 0 && string.Equals(files[0], full, StringComparison.OrdinalIgnoreCase)) return true;
             files.RemoveAll(f => string.Equals(f, full, StringComparison.OrdinalIgnoreCase));
             files.Insert(0, full);
@@ -67,16 +71,27 @@ public sealed class DefinitionSourceStore
         }
     }
 
-    private List<string> Read()
+    /// <summary>기록한 파일 목록입니다. 기록이 없거나 깨졌으면 빈 목록, 읽지 못했으면(일시적 잠금) null입니다.</summary>
+    private List<string>? Read()
     {
+        string text;
         try
         {
             if (!File.Exists(path)) return new List<string>();
-            return JsonValue.Parse(File.ReadAllText(path))["files"].Items.Select(i => i.AsString()).OfType<string>().ToList();
+            text = File.ReadAllText(path);
         }
-        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is FormatException)
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
         {
-            // 읽지 못한 기록은 버리고 새로 기억합니다. 잃는 것은 다음 시작의 미리 읽기뿐입니다.
+            return null;
+        }
+
+        try
+        {
+            return JsonValue.Parse(text)["files"].Items.Select(i => i.AsString()).OfType<string>().ToList();
+        }
+        catch (FormatException)
+        {
+            // 깨진 기록은 버리고 새로 기억합니다. 잃는 것은 다음 시작의 미리 읽기뿐입니다.
             return new List<string>();
         }
     }

@@ -93,6 +93,16 @@ public sealed class ClangdIndexShards
         return found;
     }
 
+    /// <summary>
+    /// 그 파일 이름의 색인 파일 중 원본보다 늦게 쓴 것이 있는지 봅니다. 내용은 읽지 않으므로 다른 폴더의 같은 이름 파일 색인으로 참이 될 수
+    /// 있습니다. clangd에 명령을 다시 줘도 다시 색인하지 않을 파일을 고를 때 씁니다.
+    /// </summary>
+    public bool HasCurrentShard(string path)
+    {
+        var sourceWritten = SafeWriteTime(path);
+        return sourceWritten != DateTime.MinValue && ShardsNamed(Path.GetFileName(path)).Any(s => SafeWriteTime(s) >= sourceWritten);
+    }
+
     /// <summary>같은 이름 파일의 색인 파일들입니다. 목록에 없으면 새로 생긴 색인 파일일 수 있어 목록을 다시 만듭니다(5초에 한 번까지).</summary>
     private IReadOnlyList<string> ShardsNamed(string fileName)
     {

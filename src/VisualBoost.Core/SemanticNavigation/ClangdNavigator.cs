@@ -406,6 +406,7 @@ public sealed class ClangdNavigator : IDisposable
         using var tracked = TrackRequest();
         SyncOpenDocuments(query);
         var opened = documents.Acquire(query.Document);
+        PrioritizeEditorDocument(query.Document);
         try
         {
             await AwaitPchCheckAsync(query.Path, opened, progress, cancellationToken).ConfigureAwait(false);
@@ -488,6 +489,7 @@ public sealed class ClangdNavigator : IDisposable
     {
         SyncOpenDocuments(query);
         var opened = documents.Acquire(query.Document);
+        PrioritizeEditorDocument(query.Document);
         // 역할 표식 근거(선언 제외 참조, 정의·선언 이동)는 표시 보조라 본 요청 뒤에 함께 보내고, 본 결과가 온 뒤 정한 시간까지만 기다립니다.
         // clangd는 한 파일의 AST 요청을 받은 순서대로 하나씩 처리하고 이미 시작한 요청은 취소로 멈추지 않습니다. 그래서 결과 표시에 꼭 필요한
         // symbolInfo와 짧은 정의·선언 요청을 본 요청 바로 뒤에 두고, 본 요청만큼 걸릴 수 있는 선언 제외 참조는 맨 뒤에 보냅니다(2026-10-07 검토).
@@ -1183,6 +1185,7 @@ public sealed class ClangdNavigator : IDisposable
         {
             documents.Acquire(document);
             documents.Release(document.Path);
+            PrioritizeEditorDocument(document);
         }
         catch (LspConnectionClosedException)
         {
@@ -1310,12 +1313,18 @@ public sealed class ClangdNavigator : IDisposable
     /// 이전 clangd가 근사 명령으로 색인한 소스(<see cref="DefinitionSourceStore"/>)에 같은 명령을 다시 줘 저장된 색인을 읽게 합니다. clangd는
     /// 명령을 받은 파일의 색인 파일을 읽고, 내용이 바뀌었을 때만 다시 색인합니다. 시작 뒤 작업 스레드에서 부릅니다.
     /// </summary>
+    /// <remarks>
+    /// 원본보다 새 색인 파일이 있는 파일만 보냅니다. 색인 형식 변경으로 색인을 지웠거나 엔진을 업데이트한 뒤에 모두 보내면 기억한 엔진 cpp(최대
+    /// 256개)가 프로젝트 첫 색인과 같은 대기열에 섞여 색인 완료가 크게 늦어집니다(2026-10-09 검토 59). 빠진 파일은 그 정의를 찾을 때 요청 시점에
+    /// 다시 분석하고 기억합니다.
+    /// </remarks>
     private void RestoreDefinitionSources()
     {
         var commands = new List<CompileCommand>();
         foreach (var file in definitionSources!.Load())
         {
             if (lifetime.IsCancellationRequested) return;
+            if (!shards.HasCurrentShard(Context.Paths.ToReal(file))) continue;
             try
             {
                 if (ApproximateCommand(file) is { } command) commands.Add(command);
@@ -1371,7 +1380,6 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         session.OpenDocument(path, text, version);
-        if (options.PrioritizeOpenDocuments && !Progress.Completed && !IsQueueMarker(path)) RaiseIndexPriority(path, text);
     }
 
     /// <summary>색인 대기열 앞당기기에 여는 빈 헤더의 폴더입니다(<see cref="IndexQueuePriority"/>).</summary>
@@ -1385,9 +1393,19 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <summary>
-    /// 색인이 끝나기 전에 연 문서와 관련된 TU를 clangd 색인 대기열 앞으로 올립니다. 표시와 같은 이름의 빈 헤더를 잠시 열면 clangd가 그 이름의
-    /// TU를 올립니다(<see cref="IndexQueuePriority"/>). 문서 집합 잠금 안(열기 콜백)에서 불리므로 표시만 정하고 파일 쓰기와 알림은 작업 스레드에서
-    /// 합니다.
+    /// 편집기 문서(예열한 초점 문서, 요청 문서)를 연 뒤 색인이 끝나지 않았으면 그 문서와 관련된 TU를 clangd 색인 대기열 앞으로 올립니다. 요청 중
+    /// 잠시 여는 선언·정의 헤더와 정의 후보 cpp는 사용자가 보는 문서가 아니고 수가 많아(모듈 정의 헤더 최대 64개) 올리지 않습니다(2026-10-09 검토
+    /// 60). 측정이 보인 것처럼 적게 올려야 효과가 있습니다.
+    /// </summary>
+    private void PrioritizeEditorDocument(DocumentText document)
+    {
+        if (!options.PrioritizeOpenDocuments || Progress.Completed || HasExited) return;
+        RaiseIndexPriority(document.Path, document.Text);
+    }
+
+    /// <summary>
+    /// 연 문서와 관련된 TU를 clangd 색인 대기열 앞으로 올립니다. 표시와 같은 이름의 빈 헤더를 잠시 열면 clangd가 그 이름의 TU를 올립니다
+    /// (<see cref="IndexQueuePriority"/>). 표시만 정하고 파일 쓰기와 알림은 작업 스레드에서 합니다.
     /// </summary>
     /// <remarks>
     /// clangd의 앞당김은 한 단계뿐이라 함께 올린 작업 사이의 순서는 정해지지 않습니다. 관련 TU까지 한꺼번에 올리면 연 문서 자신(include한 헤더
