@@ -150,7 +150,7 @@ internal sealed class SemanticNavigationCommand
                         ? await navigator.DefinitionAsync(query, progress, request.Token).ConfigureAwait(false)
                         : await navigator.ReferencesAsync(query, request.Token, progress).ConfigureAwait(false);
                     var ordered = Order(found.Locations, path);
-                    found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles, found.Limited);
+                    found = found.WithLocations(ordered);
                     // 결과가 하나인 정의 이동은 미리보기가 필요 없습니다.
                     var preview = kind == Kind.References || ordered.Count > 1
                         ? SourceLinePreview.LoadLines(ordered, p => openTexts.TryGetValue(p, out var open) ? open.Text : null, timeout.Token)
@@ -160,12 +160,12 @@ internal sealed class SemanticNavigationCommand
                     if (kind == Kind.References)
                     {
                         // 클래스 자신의 멤버 정의 머리(Class::Member)와 생성자·소멸자 이름, 찾는 이름이 쓰이지 않은 매크로 자리는 쓰는 곳이 아니므로 뺍니다.
-                        var kept = OwnDefinitionReferences.Kept(ordered, preview, IsType(found.SymbolKind), found.Symbol?.Name);
+                        var kept = OwnDefinitionReferences.Kept(ordered, preview, IsType(found.SymbolKind), found.Symbol?.Name, found.Symbol?.ContainerName);
                         if (kept.Count < ordered.Count)
                         {
                             ordered = kept.Select(i => ordered[i]).ToArray();
                             preview = kept.Select(i => preview[i]).ToArray();
-                            found = new NavigationResult(ordered, found.Symbol, found.Progress, found.ResolvedOnDemand, found.SymbolKind, found.Roles, found.Limited);
+                            found = found.WithLocations(ordered);
                         }
                     }
 
@@ -236,6 +236,7 @@ internal sealed class SemanticNavigationCommand
         if (kind == Kind.Definition) notes.Add("정의 후보가 여러 개입니다");
         if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
         if (kind == Kind.References && result.CurrentFileOnly) notes.Add("네임스페이스는 이 파일의 참조만 찾습니다");
+        if (kind == Kind.References && result.UncheckedDefinitionFiles > 0) notes.Add($"다른 모듈 정의 헤더 {result.UncheckedDefinitionFiles:N0}개는 확인하지 않았습니다");
         if (kind == Kind.References && result.ResolvedOnDemand) notes.Add("색인에 없던 정의 파일을 분석해 더했습니다");
         if (incomplete.Length > 0) notes.Add(incomplete);
         if (broken.Length > 0) notes.Add(broken);

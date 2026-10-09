@@ -5,6 +5,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Text.RegularExpressions;
 using System.Threading;
 using System.Threading.Tasks;
 using VisualBoost.Core.Analysis;
@@ -154,9 +155,11 @@ public readonly struct BackgroundIndexProgress
 public sealed class SemanticSymbol
 {
     public SemanticSymbol(string name, string containerName, string usr, NavigationLocation? declaration = null, NavigationLocation? definition = null,
-        IReadOnlyList<string>? ids = null, IReadOnlyList<string>? usrs = null, string? id = null, NavigationLocation? primaryDeclaration = null)
+        IReadOnlyList<string>? ids = null, IReadOnlyList<string>? usrs = null, string? id = null, NavigationLocation? primaryDeclaration = null,
+        IReadOnlyList<string>? overloadIds = null)
     {
         Id = id ?? string.Empty;
+        OverloadIds = overloadIds ?? Array.Empty<string>();
         PrimaryDeclaration = primaryDeclaration ?? declaration;
         Name = name;
         ContainerName = containerName;
@@ -177,6 +180,12 @@ public sealed class SemanticSymbol
 
     /// <summary>대표 항목의 심볼 ID(대문자 16진수)입니다. clangd 색인 파일의 심볼 ID와 같은 표기이며, 없으면 빈 문자열입니다.</summary>
     public string Id { get; }
+
+    /// <summary>
+    /// 오버로드를 정하지 못한 위치(템플릿 안의 의존 호출 <c>Forward&lt;Args&gt;(args)</c>, 여러 오버로드를 가리키는 using 선언)에서
+    /// symbolInfo가 함께 돌려준 같은 이름 함수 후보들의 ID입니다. 후보가 하나뿐이면 빈 목록입니다.
+    /// </summary>
+    public IReadOnlyList<string> OverloadIds { get; }
 
     /// <summary>요청 파일 AST가 아는 대표 선언 위치(<c>declarationRange</c>)입니다. 응답에 없거나 심볼이 여럿이면 null입니다.</summary>
     public NavigationLocation? Declaration { get; }
@@ -503,8 +512,27 @@ public sealed class ClangdSession : IDisposable
             result.Items.Count == 1 ? options.Paths.ToGiven(NavigationLocation.FromLsp(first[field])).FirstOrDefault() : null;
         var ids = result.Items.Select(i => i["id"].AsString()).Where(i => !string.IsNullOrEmpty(i)).Select(i => i!.ToUpperInvariant()).Distinct().ToArray();
         var usrs = result.Items.Select(i => i["usr"].AsString()).Where(u => !string.IsNullOrEmpty(u)).Select(u => u!).Distinct().ToArray();
+        // 같은 이름의 함수 항목이 여럿이면 clang이 오버로드를 정하지 못한 위치입니다. 별칭과 원래 선언(typedef A::X X)처럼 함수가 아닌 같은 이름은
+        // 후보로 보지 않습니다.
+        var sameName = result.Items.Where(i => string.Equals(i["name"].AsString(), name, StringComparison.Ordinal)).ToArray();
+        var overloads = sameName.Length > 1 && sameName.All(i => IsFunctionUsr(i["usr"].AsString(), name))
+            ? sameName.Select(i => i["id"].AsString()).Where(i => !string.IsNullOrEmpty(i)).Select(i => i!.ToUpperInvariant()).Distinct().ToArray()
+            : null;
         return new SemanticSymbol(name, container, first["usr"].AsString() ?? string.Empty, Range("declarationRange"), Range("definitionRange"), ids, usrs,
-            first["id"].AsString()?.ToUpperInvariant(), options.Paths.ToGiven(NavigationLocation.FromLsp(first["declarationRange"])).FirstOrDefault());
+            first["id"].AsString()?.ToUpperInvariant(), options.Paths.ToGiven(NavigationLocation.FromLsp(first["declarationRange"])).FirstOrDefault(),
+            overloads is { Length: > 1 } ? overloads : null);
+    }
+
+    /// <summary>
+    /// clang USR이 이름이 <paramref name="name"/>인 함수(<c>@F@이름#</c>)나 함수 템플릿(<c>@FT@&gt;…이름#</c>)의 것인지 봅니다. 그 함수 안의
+    /// 지역 변수(<c>@F@함수#@x</c>)는 이름이 달라 맞지 않고, 필드(<c>@FI@</c>)·매크로도 아닙니다.
+    /// </summary>
+    public static bool IsFunctionUsr(string? usr, string name)
+    {
+        if (usr is not { Length: > 0 } || name.Length == 0 || usr.Contains("@macro@")) return false;
+        var escaped = Regex.Escape(name);
+        return Regex.IsMatch(usr, "@F@" + escaped + "#", RegexOptions.CultureInvariant) ||
+               Regex.IsMatch(usr, "@FT@>[^@]*" + escaped + "#", RegexOptions.CultureInvariant);
     }
 
     /// <summary>

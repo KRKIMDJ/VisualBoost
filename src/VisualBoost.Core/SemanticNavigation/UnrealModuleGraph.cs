@@ -86,10 +86,14 @@ public sealed class UnrealModuleGraph
     private const int MaxModules = 1500;
     private static readonly ConcurrentDictionary<string, UnrealModuleGraph> Graphs = new(StringComparer.OrdinalIgnoreCase);
 
-    // 모듈 규칙 파일이 들어 있지 않은 큰 폴더입니다. 훑는 시간을 줄입니다.
-    private static readonly HashSet<string> SkippedFolders = new(StringComparer.OrdinalIgnoreCase)
+    // 모듈 규칙 파일이 들어 있지 않은 큰 폴더입니다. 훑는 시간을 줄입니다. 빌드 산출물 폴더는 어디서나 건너뛰고, 나머지는 플러그인 루트
+    // 바로 아래에서만 건너뜁니다. 엔진 소스 안에는 같은 이름의 모듈이 있습니다(UE 5.8 Developer/DerivedDataCache, Editor/Documentation,
+    // 2026-10-09 검토 42).
+    private static readonly HashSet<string> SkippedFolders = new(StringComparer.OrdinalIgnoreCase) { "Intermediate", "Binaries", ".git", ".vs" };
+
+    private static readonly HashSet<string> SkippedPluginFolders = new(StringComparer.OrdinalIgnoreCase)
     {
-        "Intermediate", "Binaries", "Content", "Resources", "Shaders", "Config", "Documentation", "Saved", "DerivedDataCache", ".git", ".vs"
+        "Content", "Resources", "Shaders", "Config", "Documentation", "Saved", "DerivedDataCache"
     };
 
     private static readonly Regex Call = new(
@@ -107,6 +111,7 @@ public sealed class UnrealModuleGraph
     private readonly string engineDirectory;
     private readonly string? projectDirectory;
     private readonly ConcurrentDictionary<string, UnrealModuleRules?> rules = new(StringComparer.OrdinalIgnoreCase);
+    private readonly ConcurrentDictionary<string, UnrealModuleEnvironment> environments = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, string>? directories;
     private bool rescanned;
 
@@ -136,7 +141,15 @@ public sealed class UnrealModuleGraph
     /// 공개 의존 사슬의 공개 경로 순으로 모읍니다(UBT의 전파 규칙).
     /// </summary>
     /// <param name="target">생성 헤더 폴더(<c>Intermediate/Build/플랫폼/대상/Inc</c>)의 대상 이름입니다.</param>
-    public UnrealModuleEnvironment Environment(string module, string moduleDirectory, string platform = "Win64", string target = "UnrealEditor")
+    /// <remarks>
+    /// 결과는 (모듈, 폴더, 플랫폼, 대상)마다 담아 둡니다. 문서를 처음 열 때마다 의존 사슬(엔진 모듈 중앙값 약 170개)과 폴더 확인을 다시 돌면
+    /// 그 사이 문서 집합 잠금을 잡고 있게 됩니다(2026-10-09 검토 45). 규칙은 처음 읽은 뒤 바꾸지 않으므로 담아 둔 값도 같습니다.
+    /// </remarks>
+    public UnrealModuleEnvironment Environment(string module, string moduleDirectory, string platform = "Win64", string target = "UnrealEditor") =>
+        environments.GetOrAdd(string.Join("|", module, Path.GetFullPath(moduleDirectory), platform, target),
+            _ => BuildEnvironment(module, moduleDirectory, platform, target));
+
+    private UnrealModuleEnvironment BuildEnvironment(string module, string moduleDirectory, string platform, string target)
     {
         var root = RulesOf(module) ?? new UnrealModuleRules(module, moduleDirectory, IsUnder(moduleDirectory, engineDirectory));
         var includes = new List<string>();
@@ -231,7 +244,8 @@ public sealed class UnrealModuleGraph
     {
         lock (gate)
         {
-            // 모르는 모듈을 찾으면 그 사이 추가된 플러그인일 수 있으므로 세션마다 한 번 다시 훑습니다.
+            // 모르는 모듈을 찾으면 그 사이 추가된 플러그인일 수 있으므로 한 번 다시 훑습니다. 그래프는 프로세스 동안 공유하므로 VS 실행마다
+            // 한 번입니다. 규칙 파일 수정은 VS를 다시 시작해야 반영됩니다.
             if (directories is null || wanted is not null && !directories.ContainsKey(wanted) && !rescanned)
             {
                 rescanned = directories is not null;
@@ -262,17 +276,21 @@ public sealed class UnrealModuleGraph
                 var directory = pending.Pop();
                 try
                 {
-                    var rule = directory.EnumerateFiles("*.Build.cs").FirstOrDefault();
-                    if (rule is not null)
+                    var files = directory.EnumerateFiles().Select(f => f.Name).ToArray();
+                    var modules = files.Where(f => f.EndsWith(".Build.cs", StringComparison.OrdinalIgnoreCase)).ToArray();
+                    if (modules.Length > 0)
                     {
-                        // 모듈 폴더 안에는 다른 모듈이 없습니다(설치형 엔진 UE 5.8 확인).
-                        found[rule.Name.Substring(0, rule.Name.Length - ".Build.cs".Length)] = directory.FullName;
+                        // 모듈 폴더 안에는 다른 모듈이 없습니다(설치형 엔진 UE 5.8 확인). 한 폴더에 규칙 파일이 여럿이면(예: 서드파티 묶음) 모두 등록합니다.
+                        foreach (var rule in modules) found[rule.Substring(0, rule.Length - ".Build.cs".Length)] = directory.FullName;
                         continue;
                     }
 
+                    var plugin = files.Any(f => f.EndsWith(".uplugin", StringComparison.OrdinalIgnoreCase));
                     foreach (var child in directory.EnumerateDirectories())
                     {
-                        if ((child.Attributes & FileAttributes.ReparsePoint) == 0 && !SkippedFolders.Contains(child.Name)) pending.Push(child);
+                        if ((child.Attributes & FileAttributes.ReparsePoint) != 0 || SkippedFolders.Contains(child.Name)) continue;
+                        if (plugin && SkippedPluginFolders.Contains(child.Name)) continue;
+                        pending.Push(child);
                     }
                 }
                 catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)

@@ -141,12 +141,17 @@ public sealed class ClangdMemoryPolicy
         megabytes > 0 ? megabytes * 1024L * 1024 : DefaultLimitBytes(PhysicalMemory.TotalBytes());
 
     /// <summary>
-    /// 기본 상한입니다. 물리 메모리의 1/8이되 2~8 GiB로 맞춥니다. 메모리를 모르면 3 GiB입니다.
+    /// 기본 상한입니다. 물리 메모리의 1/8이되 2~4 GiB로 맞춥니다. 메모리를 모르면 3 GiB입니다.
     /// </summary>
+    /// <remarks>
+    /// 0.45.1까지 최대 8 GiB였으나, 실제 Unreal 프로젝트에서 서로 다른 파일 60곳을 연속 조회하면 clangd가 6.5~6.7 GB까지 올라도
+    /// 64 GB PC의 기준(7.7 GB)을 넘지 않아 정리하지 않았습니다(2026-10-09 정확도 시험, 회사 피드백의 장기 점유와 같은 모양).
+    /// 정리 뒤 기준 사용량이 상한에 가까우면 <see cref="ShouldRestart"/>가 상한을 올리므로 큰 프로젝트에서 되풀이하지 않습니다.
+    /// </remarks>
     public static long DefaultLimitBytes(long physicalBytes)
     {
         const long gib = 1024L * 1024 * 1024;
         if (physicalBytes <= 0) return 3 * gib;
-        return Math.Max(2 * gib, Math.Min(8 * gib, physicalBytes / 8));
+        return Math.Max(2 * gib, Math.Min(4 * gib, physicalBytes / 8));
     }
 }

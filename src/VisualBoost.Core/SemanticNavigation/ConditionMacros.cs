@@ -22,7 +22,10 @@ public static class ConditionMacros
     private static readonly Regex DefinedOrUndefined = new(@"^[ \t]*#[ \t]*(?:define|undef)[ \t]+([A-Za-z_]\w*)", RegexOptions.Multiline | RegexOptions.CultureInvariant);
     private static readonly Regex Builtin = new(@"\b(?:defined|__has_include|__has_include_next|__has_feature|__has_extension|__has_builtin|__has_attribute|__has_cpp_attribute|__has_declspec_attribute|__has_warning|__is_identifier)\s*(\((?:[^()]|\([^()]*\))*\)|[A-Za-z_]\w*)",
         RegexOptions.CultureInvariant);
-    private static readonly Regex Identifier = new(@"[A-Za-z_]\w*", RegexOptions.CultureInvariant);
+    // 앞 경계가 없으면 숫자 접미사·16진수의 글자(`201703L`의 L, `0x0600`의 x0600)를 이름으로 뽑았습니다(2026-10-09 검토 49).
+    private static readonly Regex Identifier = new(@"\b[A-Za-z_]\w*", RegexOptions.CultureInvariant);
+    private static readonly Regex BlockComment = new(@"/\*.*?\*/", RegexOptions.Singleline | RegexOptions.CultureInvariant);
+    private static readonly Regex Conditional = new(@"^[ \t]*#[ \t]*(?<kind>if|ifdef|ifndef|elif|else|endif)\b(?<rest>.*)$", RegexOptions.CultureInvariant);
 
     private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
     {
@@ -36,7 +39,7 @@ public static class ConditionMacros
         var local = new HashSet<string>(DefinedOrUndefined.Matches(text).Cast<Match>().Select(m => m.Groups[1].Value), StringComparer.Ordinal);
         var names = new List<string>();
         var seen = new HashSet<string>(StringComparer.Ordinal);
-        foreach (Match match in Directive.Matches(JoinContinuations(text)))
+        foreach (Match match in Directive.Matches(ActiveText(JoinContinuations(text))))
         {
             var expression = StripComments(match.Groups[2].Value);
             expression = Builtin.Replace(expression, " ");
@@ -75,6 +78,44 @@ public static class ConditionMacros
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// 여러 줄 주석과 <c>#if 0</c> 구역을 지운 글자입니다. 그 안의 조건식은 컴파일되지 않으므로 PCH 의존 판단에 쓰지 않습니다(검토 49).
+    /// 줄 번호가 바뀌지 않게 지운 자리의 줄바꿈은 남깁니다.
+    /// </summary>
+    private static string ActiveText(string text)
+    {
+        text = BlockComment.Replace(text, m => new string('\n', m.Value.Count(c => c == '\n')));
+        var lines = text.Split('\n');
+        var skipDepth = 0;
+        for (var i = 0; i < lines.Length; i++)
+        {
+            var match = Conditional.Match(lines[i]);
+            var kind = match.Success ? match.Groups["kind"].Value : null;
+            if (skipDepth > 0)
+            {
+                if (kind is "if" or "ifdef" or "ifndef") skipDepth++;
+                else if (kind == "endif" || skipDepth == 1 && kind is "else" or "elif") skipDepth--;
+                // 건너뛰던 구역을 끝낸 #else·#elif 줄은 남겨 그 조건식을 봅니다.
+                if (!(skipDepth == 0 && kind is "else" or "elif")) lines[i] = string.Empty;
+                continue;
+            }
+
+            if (kind == "if" && WithoutLineComment(match.Groups["rest"].Value).Trim() is "0" or "false")
+            {
+                skipDepth = 1;
+                lines[i] = string.Empty;
+            }
+        }
+
+        return string.Join("\n", lines);
+    }
+
+    private static string WithoutLineComment(string text)
+    {
+        var comment = text.IndexOf("//", StringComparison.Ordinal);
+        return comment < 0 ? text : text.Substring(0, comment);
     }
 
     private static bool IsReserved(string name) => name.Length > 1 && name[0] == '_' && (name[1] == '_' || char.IsUpper(name[1]));

@@ -29,18 +29,41 @@ public static class OwnDefinitionReferences
     /// <summary>뺄 위치를 제외한 위치의 순번을 입력 순서대로 돌려줍니다.</summary>
     /// <param name="lines">위치마다의 원래 줄 글자(<see cref="SourceLinePreview.LoadLines"/>)입니다.</param>
     /// <param name="symbolName">찾는 심볼 이름입니다. 주면 그 이름이 쓰이지 않은 위치(<see cref="IsMacroExpansion"/>)도 뺍니다.</param>
-    public static IReadOnlyList<int> Kept(IReadOnlyList<NavigationLocation> locations, IReadOnlyList<string> lines, bool symbolIsType, string? symbolName = null)
+    /// <param name="symbolContainer">찾는 심볼의 소속 이름입니다. 생성자면(<see cref="IsConstructor"/>) 이름이 쓰이지 않은 위치를 빼지 않습니다.</param>
+    public static IReadOnlyList<int> Kept(IReadOnlyList<NavigationLocation> locations, IReadOnlyList<string> lines, bool symbolIsType, string? symbolName = null,
+        string? symbolContainer = null)
     {
         if (locations is null) throw new ArgumentNullException(nameof(locations));
         if (lines is null) throw new ArgumentNullException(nameof(lines));
+        // clangd는 생성자 사용을 그 생성자를 부르는 식의 위치에 기록하므로 생성자 이름이 쓰이지 않은 자리가 정상 사용처입니다:
+        // `: Super(1)`의 Super, `FAlias First(3);`의 First, `ABase Second(4);`의 Second, `new FAlias(5)`의 FAlias(2026-10-09 검토 39, clangd 22 확인).
+        var expansionName = IsConstructor(symbolName, symbolContainer) ? null : symbolName;
         var kept = new List<int>(locations.Count);
         for (var i = 0; i < locations.Count; i++)
         {
             var line = i < lines.Count ? lines[i] : null;
-            if (!IsOwnDefinitionName(locations[i], line, symbolIsType) && !IsMacroExpansion(locations[i], line, symbolName)) kept.Add(i);
+            if (!IsOwnDefinitionName(locations[i], line, symbolIsType) && !IsMacroExpansion(locations[i], line, expansionName)) kept.Add(i);
         }
 
         return kept;
+    }
+
+    /// <summary>이름이 소속 클래스의 마지막 이름(템플릿 인수 제외)과 같으면 생성자로 봅니다.</summary>
+    public static bool IsConstructor(string? symbolName, string? symbolContainer)
+    {
+        if (symbolName is not { Length: > 0 } || symbolContainer is not { Length: > 0 }) return false;
+        var plain = new System.Text.StringBuilder(symbolContainer.Length);
+        var depth = 0;
+        foreach (var ch in symbolContainer.TrimEnd(':'))
+        {
+            if (ch == '<') depth++;
+            else if (ch == '>' && depth > 0) depth--;
+            else if (depth == 0) plain.Append(ch);
+        }
+
+        var text = plain.ToString();
+        var separator = text.LastIndexOf("::", StringComparison.Ordinal);
+        return string.Equals(separator < 0 ? text : text.Substring(separator + 2), symbolName, StringComparison.Ordinal);
     }
 
     /// <summary>

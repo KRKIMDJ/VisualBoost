@@ -133,9 +133,9 @@ internal static class SemanticNavigationTests
     public static void RunMemoryPolicy()
     {
         const long Gib = 1024L * 1024 * 1024;
-        Check(ClangdMemoryPolicy.DefaultLimitBytes(64 * Gib) == 8 * Gib && ClangdMemoryPolicy.DefaultLimitBytes(32 * Gib) == 4 * Gib &&
-              ClangdMemoryPolicy.DefaultLimitBytes(8 * Gib) == 2 * Gib && ClangdMemoryPolicy.DefaultLimitBytes(256 * Gib) == 8 * Gib &&
-              ClangdMemoryPolicy.DefaultLimitBytes(0) == 3 * Gib, "메모리 정리 기준 기본값(물리 메모리의 1/8, 2~8 GiB)");
+        Check(ClangdMemoryPolicy.DefaultLimitBytes(64 * Gib) == 4 * Gib && ClangdMemoryPolicy.DefaultLimitBytes(24 * Gib) == 3 * Gib &&
+              ClangdMemoryPolicy.DefaultLimitBytes(8 * Gib) == 2 * Gib && ClangdMemoryPolicy.DefaultLimitBytes(256 * Gib) == 4 * Gib &&
+              ClangdMemoryPolicy.DefaultLimitBytes(0) == 3 * Gib, "메모리 정리 기준 기본값(물리 메모리의 1/8, 2~4 GiB)");
         Check(ClangdMemoryPolicy.ResolveLimitBytes(2048) == 2 * Gib && ClangdMemoryPolicy.ResolveLimitBytes(0) >= 2 * Gib, "지정한 정리 기준 우선");
 
         var idle = TimeSpan.FromMinutes(10);
@@ -286,6 +286,14 @@ internal static class SemanticNavigationTests
             "#ifdef IGNORED_IFDEF\n#undef UNDEFINED_HERE\n#if UNDEFINED_HERE\n#endif\n");
         Check(used.SequenceEqual(new[] { "WITH_EDITOR", "PLATFORM_WINDOWS", "WITH_CONTINUED", "UE_VERSION_NEWER_THAN" }),
             "조건식 매크로(defined·인수·예약·키워드·주석·파일 안 정의 제외, 줄 이음 포함): " + string.Join(",", used));
+        var inactive = ConditionMacros.Used(
+            "#if __cplusplus >= 201703L && WINVER >= 0x0600 && HAS_REAL\n#endif\n/*\n#if IN_BLOCK_COMMENT\n#endif\n*/\n" +
+            "#if 0\n#if IN_DISABLED\n#endif\n#elif AFTER_DISABLED\n#endif\n#if 0 // off\n#  if ALSO_DISABLED\n#  endif\n#else\n#if IN_ELSE\n#endif\n#endif\n");
+        Check(inactive.SequenceEqual(new[] { "WINVER", "HAS_REAL", "AFTER_DISABLED", "IN_ELSE" }),
+            "숫자 접미사·16진수 글자, 여러 줄 주석, #if 0 구역은 빼고 #else·#elif는 봄: " + string.Join(",", inactive));
+        // 닫힌 파일 매크로 인수 보완: #undef 뒤 다시 #define하기 전의 같은 이름은 그 매크로가 아닙니다.
+        var undefined = ClangdNavigator.UndefinedLines("#define M(x) x\nM(1)\n#undef M\nM(2)\n#define M 3\nM\n", "M");
+        Check(!undefined(1) && undefined(3) && !undefined(5) && !ClangdNavigator.UndefinedLines("M(1)\n", "M")(0), "#undef 뒤 구간");
 
         // 매크로가 펼친 위치: 범위 글자가 찾는 이름과 다른 식별자일 때만 뺍니다.
         var fname = new NavigationLocation(@"C:\p\a.h", 3, 1, 3, 15);
@@ -297,6 +305,16 @@ internal static class SemanticNavigationTests
             "매크로가 펼친 위치 판단");
         var kept = OwnDefinitionReferences.Kept(new[] { fname, new NavigationLocation(@"C:\p\a.h", 4, 1, 4, 6) }, new[] { "\tGENERATED_BODY()", "\tFName X;" }, true, "FName");
         Check(kept.SequenceEqual(new[] { 1 }), "이름을 주면 매크로가 펼친 위치를 뺌");
+        var ctorLines = new[] { "    : Super(1)", "    FAlias First(3);", "    ABase Second(4);", "    auto* P = new FAlias(5);" };
+        NavigationLocation CtorAt(int line, string word) =>
+            new(@"C:\p\c.cpp", line, ctorLines[line].IndexOf(word, StringComparison.Ordinal), line, ctorLines[line].IndexOf(word, StringComparison.Ordinal) + word.Length, "AUser::AUser");
+        var ctorUses = new[] { CtorAt(0, "Super"), CtorAt(1, "First"), CtorAt(2, "Second"), CtorAt(3, "FAlias") };
+        Check(OwnDefinitionReferences.Kept(ctorUses, ctorLines, false, "ABase", "ABase").Count == 4 &&
+              OwnDefinitionReferences.Kept(ctorUses, ctorLines, false, "ABase", "ns::Outer").Count == 0,
+            "생성자 사용처(위임·별칭·지역 변수·new)는 이름이 쓰이지 않아도 남김(검토 39)");
+        Check(OwnDefinitionReferences.IsConstructor("TBox", "ns::TBox<T>") && OwnDefinitionReferences.IsConstructor("ABase", "ABase") &&
+              !OwnDefinitionReferences.IsConstructor("Make", "TBox") && !OwnDefinitionReferences.IsConstructor("TBox", null) &&
+              !OwnDefinitionReferences.IsConstructor("Box", "TBox"), "생성자 판단");
         // 요청 위치에 쓰인 이름: symbolInfo의 대표 항목(별칭·매크로)을 고르는 근거입니다.
         const string Spelled = "int a;\r\n  using FPair = TTuple<int>; x2 = 1;\n";
         Check(ClangdNavigator.IdentifierAt(Spelled, 1, 8) == "FPair" && ClangdNavigator.IdentifierAt(Spelled, 1, 13) == "FPair" &&
@@ -347,6 +365,12 @@ internal static class SemanticNavigationTests
             Check(ClangdIndexShards.Parse(IndexShard(ClangdIndexShards.FormatVersion + 1, DocumentUri.FromPath(source), false, references)) is null, "다른 형식 버전은 읽지 않음");
             Check(Throws<InvalidDataException>(() => ClangdIndexShards.Parse(plain.Take(plain.Length - 9).ToArray())) &&
                   Throws<InvalidDataException>(() => ClangdIndexShards.Parse(Encoding.ASCII.GetBytes("RIFF\0\0\0\0XXXX"))), "깨진 색인 파일");
+            byte[] Riff(params (string Id, byte[] Data)[] chunks) => Encoding.ASCII.GetBytes("RIFF\0\0\0\0CdIx")
+                .Concat(chunks.SelectMany(c => Encoding.ASCII.GetBytes(c.Id).Concat(BitConverter.GetBytes((uint)c.Data.Length)).Concat(c.Data))).ToArray();
+            var overflow = Encoding.ASCII.GetBytes("RIFF\0\0\0\0CdIxmeta").Concat(BitConverter.GetBytes(0xFFFFFFF0u)).Concat(new byte[8]).ToArray();
+            var huge = Riff(("meta", BitConverter.GetBytes(ClangdIndexShards.FormatVersion)), ("stri", BitConverter.GetBytes(0x7FFFFFF0u).Concat(new byte[] { 0x78, 0x9C, 1, 2 }).ToArray()));
+            Check(Throws<InvalidDataException>(() => ClangdIndexShards.Parse(overflow)) && Throws<InvalidDataException>(() => ClangdIndexShards.Parse(huge)),
+                "넘치는 길이·큰 문자열 표 크기도 형식 오류(검토 41)");
 
             // 같은 이름의 다른 파일 색인은 경로로 가르고, 원본보다 오래된 색인 파일은 믿지 않습니다.
             var shard = Path.Combine(index, "Use.cpp.0123456789ABCDEF.idx");
@@ -442,7 +466,8 @@ internal static class SemanticNavigationTests
                 return path;
             }
 
-            var core = Module(runtime, "Core", "PublicDefinitions.Add(\"WITH_CORE_FLAG=1\");\nPublicDefinitions.Add(\"WITH_COMPUTED=\" + (Target.bX ? \"1\" : \"0\"));", "Public", "Internal");
+            var core = Module(runtime, "Core", "PublicDefinitions.Add(\"WITH_CORE_FLAG=1\");\nPublicDefinitions.Add(\"WITH_COMPUTED=\" + (Target.bX ? \"1\" : \"0\"));\n" +
+                "if (!Supported) { PublicDefinitions.Add(\"WITH_SPLIT=0\"); return; }\nPublicDefinitions.Add(\"WITH_SPLIT=1\");", "Public", "Internal");
             var renderCore = Module(runtime, "RenderCore", "", "Public");
             var renderer = Module(runtime, "Renderer", "PublicDependencyModuleNames.Add(\"RenderCore\");", "Public", "Private");
             var unused = Module(runtime, "Unused", "", "Public");
@@ -460,8 +485,18 @@ internal static class SemanticNavigationTests
 
             var project = Path.Combine(root, "Game");
             var gameModule = Module(Path.Combine(project, "Source"), "Game", "PublicDependencyModuleNames.Add(\"Engine\");", "Private");
+            // 엔진 소스 안에는 건너뛰는 폴더 이름과 같은 모듈이 있습니다(UE 5.8 Developer/DerivedDataCache, Editor/Documentation, 검토 42).
+            var dataCache = Module(Path.Combine(engineRoot, "Engine", "Source", "Developer"), "DerivedDataCache", "", "Public");
+            var documentation = Module(Path.Combine(engineRoot, "Engine", "Source", "Editor"), "Documentation", "", "Public");
+            Module(Path.Combine(plugin, "Content"), "NotAModule", "", "Public");
+            var vorbis = Path.Combine(engineRoot, "Engine", "Source", "ThirdParty", "Vorbis");
+            Write(Path.Combine(vorbis, "Vorbis.Build.cs"), "");
+            Write(Path.Combine(vorbis, "VorbisFile.Build.cs"), "");
             var graph = UnrealModuleGraph.For(engineRoot, project);
             graph.Prepare();
+            Check(graph.DirectoryOf("DerivedDataCache") == dataCache && graph.DirectoryOf("Documentation") == documentation && graph.DirectoryOf("NotAModule") is null &&
+                  graph.DirectoryOf("Vorbis") == vorbis && graph.DirectoryOf("VorbisFile") == vorbis,
+                "엔진 안의 같은 이름 모듈은 찾고 플러그인 Content는 건너뜀, 한 폴더의 규칙 파일은 모두 등록");
             Check(graph.DirectoryOf("Renderer") == renderer && graph.DirectoryOf("Missing") is null && graph.RulesOf("MaterialEditorTools")!.ShortName == "MatEd",
                 "모듈 위치와 짧은 이름");
 
@@ -473,7 +508,8 @@ internal static class SemanticNavigationTests
                   At(Path.Combine(engineModule, "Private")) < 0 && At(Path.Combine(unused, "Public")) < 0,
                 "공개 의존 사슬만 전파(비공개 의존의 의존·주석 제외), 엔진 플러그인은 엔진 Internal을 봄: " + string.Join(" | ", includes.Select(d => d.Substring(root.Length))));
             Check(At(Path.GetDirectoryName(editor)!) > At(Path.Combine(core, "Public")), "상위 폴더 경로는 뒤에");
-            Check(environment.ApiModules.SequenceEqual(new[] { "MaterialEditorTools", "Engine", "Core" }) && environment.Definitions.SequenceEqual(new[] { "WITH_CORE_FLAG=1" }),
+            Check(environment.ApiModules.SequenceEqual(new[] { "MaterialEditorTools", "Engine", "Core" }) &&
+                  environment.Definitions.SequenceEqual(new[] { "WITH_CORE_FLAG=1", "WITH_SPLIT=0", "WITH_SPLIT=1" }),
                 "API 모듈과 상수 정의(계산식 제외): " + string.Join(",", environment.ApiModules) + " / " + string.Join(",", environment.Definitions));
             var engineEnvironment = graph.Environment("Engine", engineModule);
             Check(engineEnvironment.IncludeDirectories.Contains(Path.Combine(core, "Internal")) && engineEnvironment.IncludeDirectories.Contains(Path.Combine(renderer, "Public")) &&
@@ -494,6 +530,7 @@ internal static class SemanticNavigationTests
             var header = File.ReadAllText(Path.Combine(overrides, "MaterialEditorTools.h"));
             Check(header.Contains("#define MATERIALEDITORTOOLS_API\n") && header.Contains("#ifndef ENGINE_API\n#define ENGINE_API\n#endif\n") &&
                   header.Contains("#ifndef WITH_CORE_FLAG\n#define WITH_CORE_FLAG 1\n#endif\n") && header.Contains("#define UE_IS_ENGINE_MODULE 1") &&
+                  header.Contains("#ifndef WITH_SPLIT\n#define WITH_SPLIT 1\n#endif\n") && !header.Contains("#define WITH_SPLIT 0") &&
                   !header.Contains("WITH_COMPUTED"), "재정의 헤더: " + header);
             var stubs = Path.Combine(overrides, "generated-stubs");
             Check(File.Exists(Path.Combine(stubs, "Widget.gen.cpp")) && arguments[arguments.Count - 2] == stubs.Replace('\\', '/') && arguments[arguments.Count - 3] == "/I",
@@ -1572,18 +1609,28 @@ internal static class SemanticNavigationTests
             {
                 "#include \"Vec.h\"", "int CallBase(FBase& B) { return B.Tick(1); }", "int CallDerived(FDerived& D) { return D.Tick(2); }",
                 "int UseBox() { return ns::TBox<int>::Value + int(sizeof(ns::TBox<char>)); }", "const FVec* CallerVec(FVec& V) { return &V; }",
-                "int UseTool() { FTool Tool(1); return Tool.Count; }"
+                "int UseTool() { FTool Tool(1); return Tool.Count; }",
+                "struct FToolUser : FTool { using Super = FTool; FToolUser() : Super(2) {} };", "using FToolAlias = FTool;",
+                "FTool* MakeTool() { FToolAlias First(3); return new FToolAlias(4); }",
+                "template <class T> T& Pick(T& V) { return V; }", "template <class T> const T& Pick(const T& V) { return V; }",
+                "template <class T> void Relay(T& V) { Pick<T>(V); Pick<T>(V); }"
             };
+            // 두 줄의 Tick이 같은 열에 있어, 저장하지 않은 내용에서 줄이 밀리면 디스크 기준 색인 파일의 위치가 다른 함수 호출과 겹칩니다(검토 40).
+            var swapLines = new[] { "#include \"Base.h\"", "int SwapA(FDerived& D, FBase& B) { return D.Tick(1); }", "int SwapB(FDerived& D, FBase& B) { return B.Tick(2); }" };
             var header = Path.Combine(source, "Base.h");
             var body = Path.Combine(source, "Base.cpp");
             var caller = Path.Combine(source, "Caller.cpp");
+            var swap = Path.Combine(source, "Swap.cpp");
+            var swapText = string.Join("\n", swapLines) + "\n";
+            Write(swap, swapText);
             Write(header, string.Join("\n", headerLines) + "\n");
             Write(Path.Combine(source, "Vec.h"), string.Join("\n", vecLines) + "\n");
-            Write(body, string.Join("\n", bodyLines) + "\n");
+            var bodyText = string.Join("\n", bodyLines) + "\n";
+            Write(body, bodyText);
             var callerText = string.Join("\n", callerLines) + "\n";
             Write(caller, callerText);
             var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
-            foreach (var file in new[] { body, caller })
+            foreach (var file in new[] { body, caller, swap })
             {
                 Write(Path.Combine(build, Path.GetFileName(file) + ".obj.rsp"), $"\"{file.Replace('\\', '/')}\"\n/I \"{source.Replace('\\', '/')}\"\n/TP\n/std:c++17\n/c\n");
             }
@@ -1597,7 +1644,8 @@ internal static class SemanticNavigationTests
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
             string Key(string file, int line, int character) => file + ":" + line + ":" + character;
             string[] Found(int line) => navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), line, callerLines[line].IndexOf(".Tick", StringComparison.Ordinal) + 1),
-                timeout.Token).Result.Locations.Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character)).OrderBy(k => k, StringComparer.Ordinal).ToArray();
+                timeout.Token).Result.Locations.Where(l => l.Path != swap).Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character))
+                .OrderBy(k => k, StringComparer.Ordinal).ToArray();
 
             var derived = Found(2);
             var expectedDerived = new[]
@@ -1639,6 +1687,44 @@ internal static class SemanticNavigationTests
             Check(toolResult.SymbolKind is SourceSymbolKind.Struct or SourceSymbolKind.Class or SourceSymbolKind.Type &&
                   toolResult.Locations.Any(l => l.Path == body && l.Line == 4 && l.Character == bodyLines[4].LastIndexOf("FTool", StringComparison.Ordinal)),
                 $"생성자 이름이 든 클래스 참조의 종류: {toolResult.SymbolKind} · " + string.Join(",", toolResult.Locations.Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character))));
+
+            // 생성자 사용은 생성자 이름이 쓰이지 않은 자리(위임의 별칭, 지역 변수 이름, new 뒤 별칭)에 기록되며 표시 단계에서도 남아야 합니다(검토 39).
+            var constructor = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(body, bodyText, 1), 4, bodyLines[4].LastIndexOf("FTool", StringComparison.Ordinal)),
+                timeout.Token).Result;
+            var constructorLines = constructor.Locations.Select(l => File.ReadAllLines(l.Path) is var all && l.Line < all.Length ? all[l.Line] : string.Empty).ToArray();
+            var shown = OwnDefinitionReferences.Kept(constructor.Locations, constructorLines, false, constructor.Symbol?.Name, constructor.Symbol?.ContainerName)
+                .Select(i => constructor.Locations[i]).Select(l => Key(Path.GetFileName(l.Path), l.Line, l.Character)).ToArray();
+            var constructorUses = new[]
+            {
+                Key("Caller.cpp", 5, callerLines[5].IndexOf("Tool(1)", StringComparison.Ordinal)), Key("Caller.cpp", 6, callerLines[6].IndexOf("Super(2)", StringComparison.Ordinal)),
+                Key("Caller.cpp", 8, callerLines[8].IndexOf("First", StringComparison.Ordinal)), Key("Caller.cpp", 8, callerLines[8].IndexOf("FToolAlias(4)", StringComparison.Ordinal))
+            };
+            Check(constructorUses.All(shown.Contains), $"생성자 사용처 유지({constructor.Symbol?.Name}/{constructor.Symbol?.ContainerName}): " + string.Join(",", shown));
+
+            // 템플릿 안의 의존 호출은 오버로드가 정해지지 않아 후보 모두를 찾습니다. clangd는 열린 문서의 정해지지 않은 호출을 돌려주지 않으므로
+            // 누른 위치와 같은 문서의 같은 호출을 더해야 합니다(독립 표본 Forward<Args>(args)).
+            var pickLine = callerLines[11];
+            var pick = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 11, pickLine.IndexOf("Pick", StringComparison.Ordinal)),
+                timeout.Token).Result;
+            var picks = pick.Locations.Where(l => l.Path == caller).Select(l => (l.Line, l.Character)).ToArray();
+            Check(pick.Symbol?.OverloadIds.Count == 2 && picks.Contains((11, pickLine.IndexOf("Pick", StringComparison.Ordinal))) &&
+                  picks.Contains((11, pickLine.LastIndexOf("Pick", StringComparison.Ordinal))) && picks.Contains((9, callerLines[9].IndexOf("Pick", StringComparison.Ordinal))) &&
+                  picks.Contains((10, callerLines[10].IndexOf("Pick", StringComparison.Ordinal))),
+                $"오버로드 미정 호출의 후보 {pick.Symbol?.OverloadIds.Count}개 참조: " + string.Join(",", picks));
+
+            // 열린 다른 문서는 저장하지 않은 내용 기준으로 확인합니다. 빈 줄을 넣어 줄을 밀면 디스크 색인 파일의 같은 위치는 기반 함수 호출입니다.
+            var shiftedLines = new[] { swapLines[0], "" }.Concat(swapLines.Skip(1)).ToArray();
+            var shiftedText = string.Join("\n", shiftedLines) + "\n";
+            navigator.Warm(new DocumentText(swap, swapText, 1));
+            navigator.Update(new DocumentText(swap, shiftedText, 2));
+            var tickColumn = shiftedLines[2].IndexOf(".Tick", StringComparison.Ordinal) + 1;
+            // 요청 문서로 한 번 물어 clangd가 바뀐 내용을 분석하고 열린 문서 색인을 갱신하게 합니다.
+            var fromSwap = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(swap, shiftedText, 2), 2, tickColumn), timeout.Token).Result.Locations
+                .Where(l => l.Path == swap).Select(l => (l.Line, l.Character)).ToArray();
+            Check(fromSwap.SequenceEqual(new[] { (2, tickColumn) }), "요청 문서(저장 안 함)의 재정의 함수 참조: " + string.Join(",", fromSwap));
+            var fromCaller = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 2, callerLines[2].IndexOf(".Tick", StringComparison.Ordinal) + 1),
+                timeout.Token).Result.Locations.Where(l => l.Path == swap).Select(l => (l.Line, l.Character)).ToArray();
+            Check(fromCaller.SequenceEqual(new[] { (2, tickColumn) }), "열린 다른 문서(저장 안 함)는 그 내용으로 확인: " + string.Join(",", fromCaller));
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally
@@ -1685,6 +1771,11 @@ internal static class SemanticNavigationTests
               ClangdNavigator.KindFromUsr("c:Definitions.Game.h@878@macro@GAME_API") is null &&
               ClangdNavigator.KindFromUsr("c:@N@UE") is null && ClangdNavigator.KindFromUsr("") is null, "함수·필드·열거자·매크로·네임스페이스는 타입 아님");
 
+        Check(ClangdSession.IsFunctionUsr("c:@FT@>1#TForward#&^std::remove_reference<type-parameter-0-0>:::type#&&t0.0#", "Forward") &&
+              ClangdSession.IsFunctionUsr("c:@N@x@F@Get#&$@N@ns@S@T#", "Get") && ClangdSession.IsFunctionUsr("c:@S@FBox@F@Get#1", "Get") &&
+              !ClangdSession.IsFunctionUsr("c:@F@Get#@Count", "Count") && !ClangdSession.IsFunctionUsr("c:@S@FBox@FI@Get", "Get") &&
+              !ClangdSession.IsFunctionUsr("c:@S@Get", "Get") && !ClangdSession.IsFunctionUsr("c:a.h@10@macro@Get", "Get") &&
+              !ClangdSession.IsFunctionUsr("c:@F@GetAll#", "Get"), "함수·함수 템플릿 USR 판정(지역 변수·필드·타입·매크로·다른 이름 제외)");
         var symbol = new SemanticSymbol("GetKind", "FSphere", "c:@S@FSphere@F@GetKind#1");
         NavigationLocation At(string line, string? container) =>
             new("C:/p/A.h", 3, line.IndexOf("GetKind", StringComparison.Ordinal), 3, line.IndexOf("GetKind", StringComparison.Ordinal) + 7, container);
@@ -1703,6 +1794,8 @@ internal static class SemanticNavigationTests
         var superAt = new NavigationLocation("C:/p/A.h", 3, call.IndexOf("GetKind", StringComparison.Ordinal), 3, 0, "FOther::Use");
         var arrowAt = new NavigationLocation("C:/p/A.h", 3, call.LastIndexOf("GetKind", StringComparison.Ordinal), 3, 0, "FOther::Use");
         var plain = "    int GetKind() const;";
+        var inlineBody = "    virtual void Foo() override { GetKind(); }";
+        Check(!ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(inlineBody, "FOther::Foo"), inlineBody), "한 줄 inline 본문 안의 호출은 남김(검토 47)");
         Check(!ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, superAt, call) && !ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, arrowAt, call) &&
               !ClangdNavigator.IsOtherClassVirtualDeclaration(symbol, At(plain, "FOther"), plain), "호출·가상 표시 없는 선언은 남김");
     }

@@ -158,12 +158,16 @@ public static class CompileContextBuilder
     /// <param name="solutionPath">Solution 파일 또는 폴더 열기 작업 영역 폴더입니다.</param>
     /// <param name="sources">compile_commands.json이 없을 때 쓸 빌드 도구입니다.</param>
     /// <param name="pchMode">Unreal 공유 PCH 헤더를 분석 명령에 넣는 방식입니다.</param>
+    /// <param name="resetIndex">
+    /// 색인 형식 번호가 바뀌었으면 색인 파일을 지웁니다. clangd를 띄우기 전에만 참으로 부릅니다. 실행 중인 clangd 아래에서 지우면 쓰는 중인
+    /// 파일만 남아 일부만 지워집니다(2026-10-09 검토 52).
+    /// </param>
     public static CompileContext Prepare(string solutionPath, string cacheRoot, string? engineRoot, string compiler, CancellationToken cancellationToken = default,
-        CompileCommandSources? sources = null, UnrealPchMode pchMode = UnrealPchMode.Auto)
+        CompileCommandSources? sources = null, UnrealPchMode pchMode = UnrealPchMode.Auto, bool resetIndex = true)
     {
         var solutionDirectory = WorkspaceDirectory(solutionPath);
         var directory = CacheDirectory(cacheRoot, solutionPath);
-        ResetIndexIfFormatChanged(directory);
+        if (resetIndex) ResetIndexIfFormatChanged(directory);
         // 링크를 거쳐 연 작업 영역이면 clangd에는 실제 경로를 줍니다(PathAliases 참고).
         var paths = PathAliases.ForRoots(new[] { solutionDirectory, engineRoot });
         string? unrealReason = null;

@@ -503,15 +503,29 @@ public static class UnrealCompileCommands
             text.Append($"#ifndef {name}_API\n#define {name}_API\n#endif\n#ifndef {name}_NON_ATTRIBUTED_API\n#define {name}_NON_ATTRIBUTED_API\n#endif\n");
         }
 
-        var defined = new HashSet<string>(StringComparer.Ordinal);
+        // 규칙 파일은 조건 갈래를 해석하지 않고 문자열 상수만 읽으므로 같은 이름이 여러 값으로 나올 수 있습니다(예: 지원하지 않는 플랫폼에서
+        // 일찍 return하는 갈래의 `WITH_HARFBUZZ=0`이 Win64 갈래의 `=1`보다 먼저 나옴). 0으로 두면 그 기능 구역이 진단 없이 비활성으로 분석되므로
+        // 0이 아닌 첫 값을 고릅니다. Win64 편집기 대상은 대개 기능을 켭니다(2026-10-09 검토 43).
+        var values = new Dictionary<string, string>(StringComparer.Ordinal);
+        var order = new List<string>();
         foreach (var definition in environment.Definitions)
         {
             var equals = definition.IndexOf('=');
             var name = equals < 0 ? definition : definition.Substring(0, equals);
-            if (!IsIdentifier(name) || !defined.Add(name)) continue;
+            if (!IsIdentifier(name)) continue;
             var value = equals < 0 ? "1" : definition.Substring(equals + 1).Replace("\\\"", "\"");
-            text.Append($"#ifndef {name}\n#define {name} {value}\n#endif\n");
+            if (!values.TryGetValue(name, out var chosen))
+            {
+                values[name] = value;
+                order.Add(name);
+            }
+            else if (chosen.Trim() == "0" && value.Trim() != "0")
+            {
+                values[name] = value;
+            }
         }
+
+        foreach (var name in order) text.Append($"#ifndef {name}\n#define {name} {values[name]}\n#endif\n");
 
         return text.ToString();
     }

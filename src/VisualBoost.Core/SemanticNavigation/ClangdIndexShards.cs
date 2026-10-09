@@ -142,11 +142,17 @@ public sealed class ClangdIndexShards
         IReadOnlyList<IndexedReference>? references;
         try
         {
-            references = Parse(File.ReadAllBytes(shard));
+            references = Parse(ReadShared(shard));
         }
-        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is InvalidDataException)
+        catch (InvalidDataException)
         {
+            // 깨진 내용은 clangd가 다시 쓸 때(수정 시각이 바뀜)까지 같은 결과이므로 담아 둡니다.
             references = null;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            // clangd가 쓰는 중인 공유 위반처럼 일시적일 수 있어 담지 않고 다음 요청에서 다시 읽습니다(2026-10-09 검토 41).
+            return null;
         }
 
         lock (gate)
@@ -158,7 +164,30 @@ public sealed class ClangdIndexShards
         return references;
     }
 
-    /// <summary>색인 파일 내용에서 참조를 읽습니다. 형식 버전이 다르면 null입니다. 깨진 내용이면 <see cref="InvalidDataException"/>입니다.</summary>
+    /// <summary>clangd가 같은 파일을 다시 쓰거나 지우는 중에도 열 수 있게 공유 모드를 넓혀 읽습니다.</summary>
+    private static byte[] ReadShared(string path)
+    {
+        using var stream = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+        if (stream.Length > MaxShardBytes) throw new InvalidDataException("clangd 색인 파일이 너무 큽니다.");
+        var data = new byte[stream.Length];
+        var read = 0;
+        while (read < data.Length)
+        {
+            var n = stream.Read(data, read, data.Length - read);
+            if (n == 0) throw new InvalidDataException("clangd 색인 파일이 읽는 중에 줄었습니다.");
+            read += n;
+        }
+
+        return data;
+    }
+
+    /// <summary>색인 파일 하나와 풀어 낸 문자열 표의 크기 상한입니다. 깨진 크기 값으로 큰 메모리를 잡지 않게 합니다.</summary>
+    private const int MaxShardBytes = 256 * 1024 * 1024;
+
+    /// <summary>
+    /// 색인 파일 내용에서 참조를 읽습니다. 형식 버전이 다르면 null입니다. 깨진 내용이면 어느 경우든 <see cref="InvalidDataException"/>입니다
+    /// (길이·번호는 범위를 넘치지 않게 검사합니다, 2026-10-09 검토 41).
+    /// </summary>
     public static IReadOnlyList<IndexedReference>? Parse(byte[] data)
     {
         if (data.Length < 12 || Encoding.ASCII.GetString(data, 0, 4) != "RIFF" || Encoding.ASCII.GetString(data, 8, 4) != "CdIx")
@@ -171,8 +200,9 @@ public sealed class ClangdIndexShards
         while (position + 8 <= data.Length)
         {
             var id = Encoding.ASCII.GetString(data, position, 4);
-            var length = checked((int)BitConverter.ToUInt32(data, position + 4));
-            if (position + 8 + length > data.Length) throw new InvalidDataException("clangd 색인 파일이 잘렸습니다.");
+            var declared = BitConverter.ToUInt32(data, position + 4);
+            if (declared > (uint)(data.Length - position - 8)) throw new InvalidDataException("clangd 색인 파일이 잘렸습니다.");
+            var length = (int)declared;
             chunks[id] = (position + 8, length);
             position += 8 + length + (length & 1);
         }
@@ -182,7 +212,7 @@ public sealed class ClangdIndexShards
         var strings = Strings(data, stri.Offset, stri.Length);
         var references = new List<IndexedReference>();
         if (!chunks.TryGetValue("refs", out var refs)) return references;
-        var paths = new Dictionary<int, string>();
+        var paths = new Dictionary<uint, string>();
         var reader = new Reader(data, refs.Offset, refs.Offset + refs.Length);
         while (!reader.AtEnd)
         {
@@ -191,16 +221,16 @@ public sealed class ClangdIndexShards
             for (var i = 0; i < count; i++)
             {
                 var kind = reader.Byte();
-                var file = (int)reader.Var();
-                var line = (int)reader.Var();
-                var character = (int)reader.Var();
-                var endLine = (int)reader.Var();
-                var endCharacter = (int)reader.Var();
+                var file = reader.Var();
+                var line = reader.Int();
+                var character = reader.Int();
+                var endLine = reader.Int();
+                var endCharacter = reader.Int();
                 reader.Id();
                 if (!paths.TryGetValue(file, out var path))
                 {
-                    if (file >= strings.Count) throw new InvalidDataException("문자열 번호가 범위를 벗어났습니다.");
-                    path = DocumentUri.ToPath(strings[file]) ?? string.Empty;
+                    if (file >= (uint)strings.Count) throw new InvalidDataException("문자열 번호가 범위를 벗어났습니다.");
+                    path = DocumentUri.ToPath(strings[(int)file]) ?? string.Empty;
                     paths[file] = path;
                 }
 
@@ -216,6 +246,7 @@ public sealed class ClangdIndexShards
     {
         if (length < 4) throw new InvalidDataException("문자열 표가 짧습니다.");
         var size = BitConverter.ToUInt32(data, offset);
+        if (size > MaxShardBytes) throw new InvalidDataException("문자열 표 크기가 너무 큽니다.");
         byte[] raw;
         if (size == 0)
         {
@@ -302,6 +333,14 @@ public sealed class ClangdIndexShards
             for (var i = 0; i < 8; i++) text.Append(data[position + i].ToString("X2", System.Globalization.CultureInfo.InvariantCulture));
             position += 8;
             return text.ToString();
+        }
+
+        /// <summary><see cref="Var"/>를 줄·열 같은 음이 아닌 <see cref="int"/>로 읽습니다.</summary>
+        public int Int()
+        {
+            var value = Var();
+            if (value > int.MaxValue) throw new InvalidDataException("위치 값이 범위를 벗어났습니다.");
+            return (int)value;
         }
 
         /// <summary>7비트씩 낮은 자리부터, 높은 비트가 이어짐 표시인 가변 길이 정수입니다.</summary>

@@ -241,11 +241,13 @@ internal sealed class SemanticNavigationService : IDisposable
         ClangdNavigator? current;
         string? solution;
         int observed;
+        UnrealPchMode pchMode;
         lock (gate)
         {
             current = navigator;
             solution = solutionPath;
             observed = generation;
+            pchMode = settings.PchMode;
             if (unavailableReason is not null)
             {
                 // 빌드 전이라 쓸 수 없던 경우와 반복 종료로 멈춘 경우는 다음 요청에서 다시 시도합니다.
@@ -266,8 +268,9 @@ internal sealed class SemanticNavigationService : IDisposable
             {
                 var compiler = Path.Combine(Path.GetDirectoryName(clangdPath ?? string.Empty) ?? string.Empty, "clang-cl.exe");
                 var sources = await CollectSourcesAsync(CancellationToken.None).ConfigureAwait(false);
+                // 실행 중인 clangd의 문맥과 같은 공유 PCH 방식으로 비교해야 명령이 실제로 바뀌었는지 알 수 있습니다. 색인 파일은 실행 중이므로 건드리지 않습니다.
                 var context = CompileContextBuilder.Prepare(solution, cacheRoot, current.Context.EngineRoot, File.Exists(compiler) ? compiler : "clang-cl.exe",
-                    CancellationToken.None, sources);
+                    CancellationToken.None, sources, pchMode, resetIndex: false);
                 bool restart;
                 lock (gate) restart = context.Changed && observed == generation && ReferenceEquals(navigator, current);
                 if (restart) Restart();
@@ -470,6 +473,7 @@ internal sealed class SemanticNavigationService : IDisposable
             }
 
             created.Changed += () => OnNavigatorChanged(created);
+            created.AuxiliaryFailed += message => ActivityLog.LogWarning("VisualBoost/SemanticNavigation", message);
             if (created.HasExited) OnNavigatorChanged(created);
             RaiseStateChanged();
             // 시작 전에 들어온 활성 문서 예열은 탐색기가 없어 버려졌고, 다시 시작하면 열린 문서의 분석이 사라지므로 다시 예열합니다.
@@ -885,6 +889,12 @@ internal sealed class SemanticNavigationService : IDisposable
                 catch (Exception exception) when (exception is LspConnectionClosedException || exception is ObjectDisposedException || exception is IOException)
                 {
                     // 종료된 세션에 대한 늦은 알림입니다. 종료 처리는 StateChanged 경로가 맡습니다.
+                }
+                catch (Exception exception) when (exception is not OutOfMemoryException)
+                {
+                    // 예상하지 못한 예외가 이 루프를 빠져나가면 running이 참으로 남아 이후 알림(예열·갱신·저장)이 세션 끝까지 처리되지 않습니다
+                    // (2026-10-09 검토 44). 기록하고 다음 알림으로 넘어갑니다.
+                    ActivityLog.LogError("VisualBoost/SemanticNavigation", "문서 알림 처리 중 오류: " + exception);
                 }
             }
         }

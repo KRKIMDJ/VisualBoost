@@ -35,7 +35,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     }
 
     [Category("정의·참조 탐색"), DisplayName("clangd 메모리 정리 기준(MB)"), DefaultValue(0)]
-    [Description("clangd가 이보다 많은 메모리를 쥐고 있으면 색인과 탐색이 멈춘 동안 다시 시작해 메모리를 돌려받습니다. 색인을 마친 뒤에는 이 기준과 상관없이 한 번 다시 시작합니다. 저장된 색인은 그대로 씁니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~8 GB). 1024~65536 범위로 적용됩니다.")]
+    [Description("clangd가 이보다 많은 메모리를 쥐고 있으면 색인과 탐색이 멈춘 동안 다시 시작해 메모리를 돌려받습니다. 색인을 마친 뒤에는 이 기준과 상관없이 한 번 다시 시작합니다. 저장된 색인은 그대로 씁니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~4 GB). 1024~65536 범위로 적용됩니다.")]
     public int MemoryLimitMegabytes
     {
         get => memoryLimitMegabytes;
