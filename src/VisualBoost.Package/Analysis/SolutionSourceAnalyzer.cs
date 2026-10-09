@@ -27,6 +27,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     private int includeEdgeCount;
     private string? cachedSolution;
     private IReadOnlyDictionary<string, CachedSourceAnalysis>? loadedCache;
+    // 지난 세션에 마친 분석을 불러와 이름 인덱스에 공개했는지입니다(CachedSymbolsPublished).
+    private volatile bool cachedSymbolsPublished;
     private string? discoverySolution;
     private readonly HashSet<string> discoveredCacheFiles = new(StringComparer.OrdinalIgnoreCase);
     // 진행 중인 분석 패스의 대기열입니다. 사용자가 연 파일을 앞으로 옮길 때만 다른 스레드에서 읽습니다.
@@ -65,6 +67,12 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     }
 
     public int SymbolCount => symbols.Count;
+
+    /// <summary>
+    /// 지난 세션에 마친 분석을 불러와 이름 인덱스에 공개했습니다. 분석 캐시는 끝까지 마친 패스만 저장하므로, 이번 분석이 끝나기 전에도 이름
+    /// 인덱스가 Solution 전체를 담습니다(그 뒤 바뀐 파일만 예전 내용). 잠금 없이 읽습니다.
+    /// </summary>
+    public bool CachedSymbolsPublished => cachedSymbolsPublished;
 
     /// <summary>이름 인덱스의 공개 번호입니다(<see cref="SourceSymbolIndex.Revision"/>). 잠금 없이 읽습니다.</summary>
     public int SymbolRevision => symbols.Revision;
@@ -345,6 +353,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         var allowed = allowedFiles is null ? null : new HashSet<string>(allowedFiles, StringComparer.OrdinalIgnoreCase);
         symbols.ReplaceAll(cached.Where(entry => allowed is null || allowed.Contains(entry.Key))
             .SelectMany(entry => entry.Value.Analysis.Symbols), cancellationToken);
+        cachedSymbolsPublished = cached.Count > 0;
     }
 
     public IReadOnlyList<SourceSymbolLocation> FindSymbol(string name) => symbols.Find(name);
@@ -361,6 +370,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         {
             discoverySolution = null;
             discoveredCacheFiles.Clear();
+            cachedSymbolsPublished = false;
             symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>());
             includeGraph = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
             includeEdgeCount = 0;

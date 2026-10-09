@@ -462,6 +462,9 @@ internal sealed class SemanticNavigationService : IDisposable
                 FindSymbols = name => fileIndex.FindSymbol(name),
                 // 캐시에서 먼저 공개한 기호도 파일 확인이 끝나야 다 찬 것으로 봅니다(색인 단위 보충 헤더는 모듈에 기록되므로).
                 SymbolsReady = () => fileIndex.GetSnapshot() is { } snapshot && snapshot.State != SolutionFileIndexState.Building && !snapshot.IsAnalyzing,
+                // 정의 이동의 이름 인덱스 지름길은 지난 세션의 분석을 공개했으면 분석이 끝나기 전에도 씁니다.
+                DefinitionSymbolsReady = () => fileIndex.GetSnapshot() is { } snapshot && snapshot.State != SolutionFileIndexState.Building &&
+                                               (!snapshot.IsAnalyzing || snapshot.HasCachedSymbols),
                 FindByStem = stem => fileIndex.FindByStem(stem)
             }, cancellationToken).ConfigureAwait(false);
 

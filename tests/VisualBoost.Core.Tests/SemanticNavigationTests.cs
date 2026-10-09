@@ -1750,7 +1750,22 @@ internal static class SemanticNavigationTests
                 new CollectProgress(flagReports), timeout.Token).Result;
             Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
                 "PCH가 정의하는 조건 매크로에 기대는 문서는 PCH로 다시 분석: " + string.Join(",", twice.Locations) + " / " + string.Join("|", flagReports));
+            var store = new DocumentSupplementStore(navigator.Context.Directory);
+            Check(SpinUntil(() => store.LoadPch().Contains(Path.GetFullPath(u5)) && store.LoadPch().Contains(Path.GetFullPath(flag)), 10000),
+                "PCH로 돌아간 문서를 기억: " + string.Join(",", store.LoadPch().Select(Path.GetFileName)));
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+
+            // 다음 세션은 기억한 문서를 처음부터 PCH로 엽니다(문서를 열어 분석하도록 색인 파일 정의 경로는 끔).
+            options.DefinitionFromIndexFiles = false;
+            using var next = ClangdNavigator.StartAsync(options, CancellationToken.None).Result;
+            Check(SpinUntil(() => next.Progress.Completed, 30000), "다음 세션 색인 완료");
+            var nextReports = new List<string>();
+            var nextDefinition = next.DefinitionAsync(new NavigationQuery(new DocumentText(u5, u5Text, 1), 0, u5Text.IndexOf("Value", StringComparison.Ordinal)),
+                new CollectProgress(nextReports), timeout.Token).Result;
+            Check(nextDefinition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") && next.IsOpen(u5) &&
+                  SpinUntil(() => next.ErrorsOf(u5) is null, 10000) && !nextReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                "기억한 문서는 다음 세션에 처음부터 PCH로 분석: " + string.Join(",", nextDefinition.Locations) + " / " + string.Join("|", nextReports));
+            next.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally
         {
@@ -2059,6 +2074,12 @@ internal static class SemanticNavigationTests
             File.WriteAllText(Path.Combine(storeDirectory, DocumentSupplementStore.FileName), "{broken");
             Check(supplementStore.Load().Count == 0 && supplementStore.Record(doc, new[] { header }) && supplementStore.Load().Count == 1,
                 "깨진 기록은 버리고 새로 기억");
+            Check(supplementStore.RecordPch(doc) && supplementStore.LoadPch().Contains(Path.GetFullPath(doc)) && supplementStore.Load().Count == 0,
+                "공유 PCH가 필요한 문서 기억(보충 헤더 기억을 대신함)");
+            File.SetLastWriteTimeUtc(doc, File.GetLastWriteTimeUtc(doc).AddSeconds(5));
+            Check(supplementStore.LoadPch().Count == 0, "기억한 뒤 수정한 문서는 PCH 기억을 쓰지 않음");
+            Check(supplementStore.RecordPch(doc) && supplementStore.Record(doc, new[] { header }) && supplementStore.LoadPch().Count == 0 &&
+                  supplementStore.Load().Count == 1, "보충 헤더 기억이 PCH 기억을 대신함");
             Check(supplementStore.Forget(doc) && supplementStore.Load().Count == 0 && supplementStore.Forget(doc), "기억 지우기(없어도 성공)");
         }
         finally

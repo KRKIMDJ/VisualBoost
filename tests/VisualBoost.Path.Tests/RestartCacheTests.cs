@@ -43,6 +43,7 @@ internal static class RestartCacheTests
             reopened.PublishCachedDiscovery(solution, new[] { file }, default);
             reopened.PublishCachedDiscovery(solution, new[] { file }, default);
             Check(reopened.FindSymbol("A").Count == 1, "수집 도중 확인된 파일의 저장 심볼을 중복 없이 공개");
+            Check(!reopened.CachedSymbolsPublished, "수집 도중 공개한 일부 저장 심볼은 전체 공개로 보지 않음");
             reopened.Clear();
             reopened.PublishCachedDiscovery(solution, new[] { file }, default);
             Check(reopened.SymbolCount == 0, "Clear 뒤 늦은 수집 결과 제외");
@@ -53,7 +54,13 @@ internal static class RestartCacheTests
                 Check(reopened.SymbolCount == 0, "취소된 수집 세대의 저장 심볼 제외");
             }
             reopened.LoadCachedSymbols(solution, default, new[] { file });
-            Check(reopened.FindSymbol("A").Count == 1, "후처리 취소 후 새 인스턴스에서 저장된 심볼 즉시 복원");
+            Check(reopened.FindSymbol("A").Count == 1 && reopened.CachedSymbolsPublished, "후처리 취소 후 새 인스턴스에서 저장된 심볼 즉시 복원(전체 공개 표시)");
+            reopened.LoadCachedSymbols(solution + ".none", default);
+            Check(!reopened.CachedSymbolsPublished, "저장된 분석이 없으면 전체 공개로 보지 않음");
+            reopened.LoadCachedSymbols(solution, default, new[] { file });
+            reopened.Clear();
+            Check(!reopened.CachedSymbolsPublished, "Clear 뒤 전체 공개 표시 해제");
+            reopened.LoadCachedSymbols(solution, default, new[] { file });
             reopened.Analyze(solution, new[] { file }, Array.Empty<string>(), default, phases.Add);
             Check(!phases.Any(p => p.Stage == SourceAnalysisStage.Parsing || p.Stage == SourceAnalysisStage.Saving), "재실행 무변경 파일 재파싱·재저장 0회");
             Check(File.GetLastWriteTimeUtc(stored) == sentinel, "무변경 캐시 파일 실제 쓰기 없음");

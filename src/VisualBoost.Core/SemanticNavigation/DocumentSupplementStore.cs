@@ -1,19 +1,22 @@
 using System;
 using System.Collections.Concurrent;
 using System.Collections.Generic;
+using System.Globalization;
 using System.IO;
 using System.Linq;
 
 namespace VisualBoost.Core.SemanticNavigation;
 
 /// <summary>
-/// 공유 PCH 없이 연 문서의 분석 오류를 풀려고 넣은 보충 헤더(<see cref="IncludeSupplements"/>)를 문서마다 캐시 폴더에 기억합니다. 스레드 안전합니다.
+/// 공유 PCH 없이 연 문서의 분석 판단을 문서마다 캐시 폴더에 기억합니다. 스레드 안전합니다. 기억하는 판단은 둘입니다: 분석 오류를 풀려고 넣은
+/// 보충 헤더(<see cref="IncludeSupplements"/>), 보충으로도 풀지 못해 공유 PCH로 분석한 문서.
 /// </summary>
 /// <remarks>
 /// 문서 보충은 첫 분석(대형 TU 4~10초)에서 오류를 본 뒤 헤더를 골라 다시 분석하므로, 세션마다 그 문서의 첫 탐색이 분석 한 번을 더 기다렸습니다.
 /// 디스크 내용 그대로인 문서가 보충 헤더로 오류 없이 분석된 경우만 기억해, 다음 세션에서 그 문서를 열 때 처음부터 넣습니다. 그 문서에만 넣고
-/// 모듈에는 배우지 않습니다(편집 중 코드로 고른 헤더가 다른 파일에 퍼지지 않게, 피드백 검토 65). 공유 PCH로 돌아간 문서는 기억을 지웁니다.
-/// 최근에 쓴 순서로 <see cref="Capacity"/>개 문서까지 둡니다.
+/// 모듈에는 배우지 않습니다(편집 중 코드로 고른 헤더가 다른 파일에 퍼지지 않게, 피드백 검토 65). 공유 PCH가 필요했던 문서는 PCH 없이 → 보충 →
+/// PCH 세 번을 분석했으므로, 기억할 때의 파일 수정 시각이 그대로면 다음 세션에서 처음부터 PCH로 엽니다(바뀌었으면 다시 판단). 최근에 쓴 순서로
+/// <see cref="Capacity"/>개 문서까지 둡니다.
 /// </remarks>
 public sealed class DocumentSupplementStore
 {
@@ -38,12 +41,27 @@ public sealed class DocumentSupplementStore
     public IReadOnlyDictionary<string, IReadOnlyList<string>> Load()
     {
         var result = new Dictionary<string, IReadOnlyList<string>>(StringComparer.OrdinalIgnoreCase);
-        List<(string Document, IReadOnlyList<string> Headers)>? entries;
+        List<Entry>? entries;
         lock (gate) entries = Read();
-        foreach (var (document, headers) in entries ?? new List<(string, IReadOnlyList<string>)>())
+        foreach (var entry in entries ?? new List<Entry>())
         {
-            var present = headers.Where(File.Exists).ToArray();
-            if (present.Length > 0 && File.Exists(document) && !result.ContainsKey(document)) result[document] = present;
+            if (entry.PchWritten is not null) continue;
+            var present = entry.Headers.Where(File.Exists).ToArray();
+            if (present.Length > 0 && File.Exists(entry.Document) && !result.ContainsKey(entry.Document)) result[entry.Document] = present;
+        }
+
+        return result;
+    }
+
+    /// <summary>공유 PCH로 분석할 문서입니다. 기억한 뒤 수정된 문서와 없는 문서는 뺍니다.</summary>
+    public IReadOnlyCollection<string> LoadPch()
+    {
+        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        List<Entry>? entries;
+        lock (gate) entries = Read();
+        foreach (var entry in entries ?? new List<Entry>())
+        {
+            if (entry.PchWritten is { } written && WriteTicks(entry.Document) == written) result.Add(entry.Document);
         }
 
         return result;
@@ -57,21 +75,16 @@ public sealed class DocumentSupplementStore
     {
         var full = Path.GetFullPath(document);
         var normalized = headers.Select(Path.GetFullPath).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
-        lock (gate)
-        {
-            var entries = Read();
-            if (entries is null) return false;
-            if (entries.Count > 0 && string.Equals(entries[0].Document, full, StringComparison.OrdinalIgnoreCase) &&
-                entries[0].Headers.SequenceEqual(normalized, StringComparer.OrdinalIgnoreCase))
-            {
-                return true;
-            }
+        return Put(new Entry(full, normalized, null));
+    }
 
-            entries.RemoveAll(e => string.Equals(e.Document, full, StringComparison.OrdinalIgnoreCase));
-            entries.Insert(0, (full, normalized));
-            if (entries.Count > Capacity) entries.RemoveRange(Capacity, entries.Count - Capacity);
-            return Write(entries);
-        }
+    /// <summary>
+    /// 문서를 공유 PCH로 분석할 문서로 맨 앞에 기억합니다(지금 파일 수정 시각과 함께). 문서를 읽지 못하면 기억하지 않고 false입니다.
+    /// </summary>
+    public bool RecordPch(string document)
+    {
+        var full = Path.GetFullPath(document);
+        return WriteTicks(full) is { } written && Put(new Entry(full, Array.Empty<string>(), written));
     }
 
     /// <summary>문서의 기억을 지웁니다. 기억이 없으면 쓰지 않습니다. 기록 파일을 읽거나 쓰지 못하면 false입니다.</summary>
@@ -86,14 +99,48 @@ public sealed class DocumentSupplementStore
         }
     }
 
-    private bool Write(List<(string Document, IReadOnlyList<string> Headers)> entries)
+    private bool Put(Entry entry)
+    {
+        lock (gate)
+        {
+            var entries = Read();
+            if (entries is null) return false;
+            if (entries.Count > 0 && string.Equals(entries[0].Document, entry.Document, StringComparison.OrdinalIgnoreCase) &&
+                entries[0].PchWritten == entry.PchWritten && entries[0].Headers.SequenceEqual(entry.Headers, StringComparer.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+
+            entries.RemoveAll(e => string.Equals(e.Document, entry.Document, StringComparison.OrdinalIgnoreCase));
+            entries.Insert(0, entry);
+            if (entries.Count > Capacity) entries.RemoveRange(Capacity, entries.Count - Capacity);
+            return Write(entries);
+        }
+    }
+
+    private static long? WriteTicks(string document)
+    {
+        try
+        {
+            return File.Exists(document) ? File.GetLastWriteTimeUtc(document).Ticks : null;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException ||
+                                          exception is NotSupportedException)
+        {
+            return null;
+        }
+    }
+
+    private bool Write(List<Entry> entries)
     {
         try
         {
             Directory.CreateDirectory(Path.GetDirectoryName(path)!);
             var temporary = path + ".tmp";
-            var json = JsonValue.Object(("documents", JsonValue.Array(entries.Select(e =>
-                JsonValue.Object(("path", e.Document), ("headers", JsonValue.Array(e.Headers.Select(h => (JsonValue)h))))))));
+            // 수정 시각(tick)은 double로 정확히 담을 수 없어 문자열로 씁니다.
+            var json = JsonValue.Object(("documents", JsonValue.Array(entries.Select(e => e.PchWritten is { } written
+                ? JsonValue.Object(("path", e.Document), ("pchWritten", written.ToString(CultureInfo.InvariantCulture)))
+                : JsonValue.Object(("path", e.Document), ("headers", JsonValue.Array(e.Headers.Select(h => (JsonValue)h))))))));
             File.WriteAllText(temporary, json.ToJson());
             if (File.Exists(path)) File.Replace(temporary, path, null);
             else File.Move(temporary, path);
@@ -106,12 +153,12 @@ public sealed class DocumentSupplementStore
     }
 
     /// <summary>기록입니다(최근 순). 기록이 없거나 깨졌으면 빈 목록, 읽지 못했으면(일시적 잠금) null입니다.</summary>
-    private List<(string Document, IReadOnlyList<string> Headers)>? Read()
+    private List<Entry>? Read()
     {
         string text;
         try
         {
-            if (!File.Exists(path)) return new List<(string, IReadOnlyList<string>)>();
+            if (!File.Exists(path)) return new List<Entry>();
             text = File.ReadAllText(path);
         }
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
@@ -121,16 +168,47 @@ public sealed class DocumentSupplementStore
 
         try
         {
-            return JsonValue.Parse(text)["documents"].Items
-                .Select(item => (Document: item["path"].AsString(), Headers: (IReadOnlyList<string>)item["headers"].Items.Select(h => h.AsString()).OfType<string>().ToArray()))
-                .Where(e => e.Document is not null && e.Headers.Count > 0)
-                .Select(e => (e.Document!, e.Headers))
-                .ToList();
+            var entries = new List<Entry>();
+            foreach (var item in JsonValue.Parse(text)["documents"].Items)
+            {
+                if (item["path"].AsString() is not { } document) continue;
+                if (item["pchWritten"].AsString() is { } stamp)
+                {
+                    if (long.TryParse(stamp, NumberStyles.Integer, CultureInfo.InvariantCulture, out var written))
+                    {
+                        entries.Add(new Entry(document, Array.Empty<string>(), written));
+                    }
+
+                    continue;
+                }
+
+                var headers = item["headers"].Items.Select(h => h.AsString()).OfType<string>().ToArray();
+                if (headers.Length > 0) entries.Add(new Entry(document, headers, null));
+            }
+
+            return entries;
         }
         catch (FormatException)
         {
             // 깨진 기록은 버리고 새로 기억합니다. 잃는 것은 다음 세션의 미리 넣기뿐입니다.
-            return new List<(string, IReadOnlyList<string>)>();
+            return new List<Entry>();
         }
+    }
+
+    private sealed class Entry
+    {
+        public Entry(string document, IReadOnlyList<string> headers, long? pchWritten)
+        {
+            Document = document;
+            Headers = headers;
+            PchWritten = pchWritten;
+        }
+
+        public string Document { get; }
+
+        public IReadOnlyList<string> Headers { get; }
+
+        /// <summary>공유 PCH로 분석할 문서면 기억할 때의 파일 수정 시각(UTC tick)입니다. 보충 헤더 기억이면 null입니다.</summary>
+        public long? PchWritten { get; }
     }
 }

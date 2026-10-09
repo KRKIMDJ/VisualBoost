@@ -24,7 +24,8 @@ internal sealed class SolutionFileIndexSnapshot
         string? lastError,
         string? analysisError,
         SourceAnalysisProgress? analysisProgress = null,
-        bool isRefreshing = false)
+        bool isRefreshing = false,
+        bool hasCachedSymbols = false)
     {
         State = state;
         FileCount = fileCount;
@@ -37,6 +38,7 @@ internal sealed class SolutionFileIndexSnapshot
         AnalysisError = analysisError;
         AnalysisProgress = analysisProgress;
         IsRefreshing = isRefreshing;
+        HasCachedSymbols = hasCachedSymbols;
     }
 
     public SolutionFileIndexState State { get; }
@@ -60,4 +62,7 @@ internal sealed class SolutionFileIndexSnapshot
 
     /// <summary>저장된 파일 목록이 있는 Solution을 다시 수집 중입니다(파일 검색은 그동안 수집된 목록으로 동작).</summary>
     public bool IsRefreshing { get; }
+
+    /// <summary>지난 세션에 마친 소스 분석을 불러와 심볼을 공개했습니다(분석 중이라도 Solution 전체의 이름을 담음).</summary>
+    public bool HasCachedSymbols { get; }
 }

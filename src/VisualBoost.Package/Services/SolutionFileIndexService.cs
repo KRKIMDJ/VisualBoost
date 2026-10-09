@@ -240,7 +240,8 @@ internal sealed class SolutionFileIndexService : IDisposable
                 lastError,
                 analysisError,
                 analysisProgress,
-                refreshing);
+                refreshing,
+                sourceAnalyzer.CachedSymbolsPublished);
         }
     }
 

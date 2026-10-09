@@ -50,6 +50,17 @@ public sealed class ClangdNavigatorOptions
     public Func<bool>? SymbolsReady { get; set; }
 
     /// <summary>
+    /// 정의 이동이 이름 인덱스의 유일한 정의로 바로 가도 되는지입니다(<see cref="DefinitionCandidates.UniqueDefinition"/>). 지난 세션에 마친 분석을
+    /// 불러와 공개했으면 이번 분석이 끝나기 전이라도 참으로 둡니다. 없으면 <see cref="SymbolsReady"/>를 따릅니다.
+    /// </summary>
+    /// <remarks>
+    /// 분석 중에 공개되는 처음 분석의 일부 결과에서는 정의 하나가 실제로 유일하지 않을 수 있지만, 저장된 분석은 끝까지 마친 패스만 저장되어 그
+    /// 문제가 없습니다. 그 뒤 바뀐 파일은 정의 자리의 이름을 현재 내용으로 다시 확인하므로 틀린 곳으로 가지 않습니다. VS를 연 직후 분석을
+    /// 마칠 때까지(Unreal 엔진 규모 수 분) 엔진 정의마다 후보 cpp를 열던 대기(2~17초)를 없앱니다.
+    /// </remarks>
+    public Func<bool>? DefinitionSymbolsReady { get; set; }
+
+    /// <summary>
     /// <see cref="SymbolsReady"/>를 기다리는 상한입니다. 넘으면 지금까지의 이름 인덱스로 검사하고, 그 세션에서는 다시 기다리지 않습니다.
     /// 기다리는 동안 검사 대상 모듈의 단위 전환과 메모리 정리·다시 읽기가 미뤄지므로 끝없이 기다리지 않습니다.
     /// </summary>
@@ -234,6 +245,8 @@ public sealed class ClangdNavigator : IDisposable
     // 시작값이며, 기록은 처음 쓸 때 한 번 읽고 바꾸지 않습니다.
     private readonly DocumentSupplementStore? supplementStore;
     private readonly Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>? storedSupplements;
+    // 지난 세션에 공유 PCH가 필요했고 그 뒤 수정되지 않은 문서입니다(DocumentSupplementStore.LoadPch). 처음부터 PCH로 엽니다.
+    private readonly Lazy<IReadOnlyCollection<string>>? storedPchDocuments;
     // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
@@ -274,14 +287,20 @@ public sealed class ClangdNavigator : IDisposable
         rememberedSources = definitionSources is { } store
             ? new Lazy<HashSet<string>>(() => new HashSet<string>(store.Load(), StringComparer.OrdinalIgnoreCase))
             : null;
-        if (context.Plan is { SupplementsEnabled: true, Mode: UnrealPchMode.Auto })
+        if (context.Plan is { Mode: UnrealPchMode.Auto } autoPlan)
         {
             var supplements = new DocumentSupplementStore(context.Directory);
             supplementStore = supplements;
-            storedSupplements = new Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>(supplements.Load);
+            storedSupplements = autoPlan.SupplementsEnabled ? new Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>(supplements.Load) : null;
+            storedPchDocuments = new Lazy<IReadOnlyCollection<string>>(supplements.LoadPch);
             // 첫 문서를 여는 콜백(문서 집합 잠금 안)이 파일을 읽지 않게 미리 읽습니다.
             var preload = storedSupplements;
-            Observe(Task.Run(() => preload.Value));
+            var preloadPch = storedPchDocuments;
+            Observe(Task.Run(() =>
+            {
+                _ = preload?.Value;
+                _ = preloadPch.Value;
+            }));
         }
 
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
@@ -1491,6 +1510,8 @@ public sealed class ClangdNavigator : IDisposable
         {
             IReadOnlyList<string>? own;
             var stored = storedSupplements?.Value;
+            // 지난 세션에 보충으로도 풀지 못해 공유 PCH로 분석한 문서는 PCH 없이 → 보충 → PCH 세 번의 분석을 건너뛰고 처음부터 PCH로 엽니다.
+            var rememberedPch = storedPchDocuments?.Value.Contains(Path.GetFullPath(path)) == true;
             lock (pchGate)
             {
                 if (!documentOwnSupplements.TryGetValue(path, out own) && stored is not null && stored.TryGetValue(path, out var remembered))
@@ -1502,7 +1523,7 @@ public sealed class ClangdNavigator : IDisposable
                 }
             }
 
-            if (plan.DocumentCommand(path, extra: own) is { } choice)
+            if (plan.DocumentCommand(path, pch: rememberedPch ? true : null, extra: own) is { } choice)
             {
                 if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
                 {
@@ -1749,8 +1770,8 @@ public sealed class ClangdNavigator : IDisposable
             if (AuxiliaryFailed is { } handler) handler($"필요한 헤더를 고르지 못해 공유 PCH로 분석합니다({Path.GetFileName(path)}): {exception.Message}");
         }
 
-        // 보충으로 풀지 못한 문서는 다음 세션에도 같은 헤더로 시작할 이유가 없습니다.
-        supplementStore?.Forget(path);
+        // 보충으로 풀지 못한 문서는 다음 세션에 처음부터 PCH로 엽니다.
+        if (supplementStore is { } store) RememberPch(store, path);
         if (plan.DocumentCommand(path, pch: true) is { } choice)
         {
             SendSwitched(new[] { choice.Command });
@@ -1769,6 +1790,17 @@ public sealed class ClangdNavigator : IDisposable
         var sent = documents.SentText(path);
         if (sent is null || !string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) return;
         store.Record(path, headers);
+    }
+
+    /// <summary>
+    /// 공유 PCH로 돌아가는 문서를 기억합니다. 저장하지 않은 편집이 낸 오류일 수 있으면(보낸 내용이 디스크와 다름) 기억하지 않고 이전 기억(보충
+    /// 헤더 포함)만 지웁니다. 작업 스레드에서 부릅니다.
+    /// </summary>
+    private void RememberPch(DocumentSupplementStore store, string path)
+    {
+        var sent = documents.SentText(path);
+        if (sent is not null && string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) store.RecordPch(path);
+        else store.Forget(path);
     }
 
     /// <remarks>
@@ -2262,7 +2294,7 @@ public sealed class ClangdNavigator : IDisposable
 
     private IReadOnlyList<NavigationLocation>? IndexedDefinition(string name, string container, NavigationLocation declaration)
     {
-        if (options.FindSymbols is not { } find || name.Length == 0 || options.SymbolsReady is { } ready && !ready())
+        if (options.FindSymbols is not { } find || name.Length == 0 || (options.DefinitionSymbolsReady ?? options.SymbolsReady) is { } ready && !ready())
         {
             return null;
         }
