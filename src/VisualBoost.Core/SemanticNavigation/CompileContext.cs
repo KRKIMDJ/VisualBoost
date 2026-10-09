@@ -158,12 +158,13 @@ public static class CompileContextBuilder
     /// <param name="solutionPath">Solution 파일 또는 폴더 열기 작업 영역 폴더입니다.</param>
     /// <param name="sources">compile_commands.json이 없을 때 쓸 빌드 도구입니다.</param>
     /// <param name="pchMode">Unreal 공유 PCH 헤더를 분석 명령에 넣는 방식입니다.</param>
+    /// <param name="supplements">Unreal 자동 PCH에서 PCH 전에 헤더 보충을 할지입니다(자체 이름 색인이 있을 때, <see cref="IncludeSupplements"/>).</param>
     /// <param name="resetIndex">
     /// 색인 형식 번호가 바뀌었으면 색인 파일을 지웁니다. clangd를 띄우기 전에만 참으로 부릅니다. 실행 중인 clangd 아래에서 지우면 쓰는 중인
     /// 파일만 남아 일부만 지워집니다(2026-10-09 검토 52).
     /// </param>
     public static CompileContext Prepare(string solutionPath, string cacheRoot, string? engineRoot, string compiler, CancellationToken cancellationToken = default,
-        CompileCommandSources? sources = null, UnrealPchMode pchMode = UnrealPchMode.Auto, bool resetIndex = true)
+        CompileCommandSources? sources = null, UnrealPchMode pchMode = UnrealPchMode.Auto, bool resetIndex = true, bool supplements = false)
     {
         var solutionDirectory = WorkspaceDirectory(solutionPath);
         var directory = CacheDirectory(cacheRoot, solutionPath);
@@ -189,7 +190,7 @@ public static class CompileContextBuilder
                     CompileContext.OverrideDirectoryOf(directory));
                 if (result.Commands.Count > 0)
                 {
-                    var plan = UnrealIndexPlan.Create(directory, result, paths, pchMode);
+                    var plan = UnrealIndexPlan.Create(directory, result, paths, pchMode, supplements);
                     var changed = plan.Write();
                     var summary = $"Unreal {variant} · 컴파일 명령 {result.Commands.Count:N0}개(모듈 {result.Modules:N0}" +
                                   (plan.GroupedUnitCount > 0 ? $", unity 묶음 {plan.GroupedUnitCount:N0}개로 {plan.GroupedMemberCount:N0}개 색인" : string.Empty) +
@@ -288,7 +289,9 @@ public static class CompileContextBuilder
         return plan.Mode switch
         {
             UnrealPchMode.Always => ", 공유 PCH 포함",
-            UnrealPchMode.Auto when plan.PchUnitCount > 0 => $", 공유 PCH 포함 단위 {plan.PchUnitCount:N0}개",
+            UnrealPchMode.Auto when plan.PchUnitCount > 0 || plan.SupplementUnitCount > 0 =>
+                (plan.SupplementUnitCount > 0 ? $", 헤더 보충 단위 {plan.SupplementUnitCount:N0}개" : string.Empty) +
+                (plan.PchUnitCount > 0 ? $", 공유 PCH 포함 단위 {plan.PchUnitCount:N0}개" : string.Empty),
             _ => string.Empty
         };
     }

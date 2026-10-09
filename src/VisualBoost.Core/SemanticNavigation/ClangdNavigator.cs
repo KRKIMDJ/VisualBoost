@@ -194,9 +194,12 @@ public sealed class ClangdNavigator : IDisposable
     private readonly object pchGate = new();
     // PCH 없이 명령을 주고 첫 진단을 아직 보지 않은 문서입니다.
     private readonly HashSet<string> pchPending = new(StringComparer.OrdinalIgnoreCase);
-    // 분석 오류로 PCH를 넣어 다시 분석하는 문서와 그 분석의 진단 도착, PCH 명령 보내기입니다.
+    // 분석 오류로 보충 헤더나 PCH를 넣어 다시 분석하는 문서와 그 분석의 진단 도착, 명령 보내기(결과가 참이면 보충 단계)입니다.
     private readonly Dictionary<string, Task> pchReparses = new(StringComparer.OrdinalIgnoreCase);
-    private readonly Dictionary<string, Task> pchSwitches = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, Task<bool>> pchSwitches = new(StringComparer.OrdinalIgnoreCase);
+    // 문서에 보낸 명령의 보충 헤더와 이 세션에서 문서마다 보충한 횟수입니다(IncludeSupplements).
+    private readonly Dictionary<string, IReadOnlyList<string>> documentSupplements = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, int> documentSupplementRounds = new(StringComparer.OrdinalIgnoreCase);
     // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
@@ -237,7 +240,7 @@ public sealed class ClangdNavigator : IDisposable
             if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase) || IsQueueMarker(path)) return;
             OwnIndexed(path);
             Interlocked.Increment(ref indexedUnits);
-            if (autoPch && path.EndsWith(UnrealIndexPlan.PchSuffix, StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref pchUnitIndexed, 1);
+            if (autoPch && UnrealIndexPlan.IsSwitchedWrapper(path)) Volatile.Write(ref pchUnitIndexed, 1);
         };
 
         session.Exited += _ =>
@@ -343,7 +346,8 @@ public sealed class ClangdNavigator : IDisposable
 
         var compiler = Path.Combine(Path.GetDirectoryName(options.ClangdPath)!, "clang-cl.exe");
         var context = await Task.Run(() => CompileContextBuilder.Prepare(options.SolutionPath, options.CacheRoot, options.EngineRoot,
-            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, options.Sources, options.PchMode), cancellationToken).ConfigureAwait(false);
+            File.Exists(compiler) ? compiler : "clang-cl.exe", cancellationToken, options.Sources, options.PchMode, supplements: options.FindSymbols is not null),
+            cancellationToken).ConfigureAwait(false);
         if (!context.IsAvailable)
         {
             throw new SemanticNavigationUnavailableException(context.Reason ?? "컴파일 명령이 없습니다.");
@@ -1366,7 +1370,11 @@ public sealed class ClangdNavigator : IDisposable
             {
                 if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
                 {
-                    lock (pchGate) pchPending.Add(path);
+                    lock (pchGate)
+                    {
+                        pchPending.Add(path);
+                        documentSupplements[path] = choice.Supplements;
+                    }
                 }
 
                 session.UpdateCompileCommands(new[] { choice.Command });
@@ -1566,48 +1574,110 @@ public sealed class ClangdNavigator : IDisposable
         lock (pchGate)
         {
             if (!pchPending.Remove(path) || errors is null && !undefinedConditionMacros) return;
-            if (Context.Plan?.DocumentCommand(path, pch: true) is not { } choice) return;
-            // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다.
+            if (Context.Plan is not { } plan) return;
+            // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다. 보충 헤더 고르기는 파일을 읽으므로 작업 스레드에서 합니다.
             var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
             Observe(reparsed);
             pchReparses[path] = reparsed;
-            pchSwitches[path] = Task.Run(() =>
-            {
-                SendSwitched(new[] { choice.Command });
-                ReopenQuietly(path);
-            });
+            pchSwitches[path] = Task.Run(() => SwitchDocument(plan, path));
         }
     }
 
     /// <summary>
-    /// 요청 전에 그 문서의 PCH 판단을 기다립니다. 판단할 문서가 아니면 바로 돌아갑니다. PCH를 넣어 다시 분석하게 되면 진행 문구를 알리고
-    /// 명령을 보낸 뒤 돌아가므로, 이어서 보내는 요청은 clangd가 다시 분석한 뒤 답합니다.
+    /// 분석 오류가 난 PCH 없는 문서를 보충 헤더(<see cref="IncludeSupplements"/>)나 공유 PCH를 넣은 명령으로 다시 분석하게 합니다. 보충 단계면
+    /// 참입니다. 보충 단계는 다시 분석한 진단도 판단해, 그래도 오류면 더 배운 헤더로 한 번 더 보충하거나 PCH로 바꿉니다.
+    /// </summary>
+    private bool SwitchDocument(UnrealIndexPlan plan, string path)
+    {
+        if (TrySupplementDocument(plan, path)) return true;
+        if (plan.DocumentCommand(path, pch: true) is { } choice)
+        {
+            SendSwitched(new[] { choice.Command });
+            ReopenQuietly(path);
+        }
+
+        return false;
+    }
+
+    /// <remarks>
+    /// 이름 위치는 디스크 내용으로 읽습니다. 저장하지 않은 편집으로 줄이 어긋나면 이름을 찾지 못해 PCH로 돌아갑니다(결과는 같고 비용만 큼).
+    /// 다른 문서가 배운 모듈 보충 헤더가 이 문서 명령에 아직 없으면 이름을 찾지 못해도 그 헤더로 다시 분석합니다.
+    /// </remarks>
+    private bool TrySupplementDocument(UnrealIndexPlan plan, string path)
+    {
+        if (!plan.SupplementsEnabled || options.FindSymbols is not { } find || lifetime.IsCancellationRequested) return false;
+        lock (pchGate)
+        {
+            var rounds = documentSupplementRounds.TryGetValue(path, out var done) ? done : 0;
+            if (rounds >= MaxDocumentSupplementRounds) return false;
+            documentSupplementRounds[path] = rounds + 1;
+        }
+
+        var names = IncludeSupplements.Names(session.MissingNamesOf(path), SourceLinePreview.ReadText);
+        if (names.Count > 0) plan.Learn(path, IncludeSupplements.Resolve(names, find, plan.IncludeDirectoriesOf(path), SourceLinePreview.ReadText));
+        if (plan.DocumentCommand(path, pch: false) is not { WithoutPch: true } choice) return false;
+        lock (pchGate)
+        {
+            var sent = documentSupplements.TryGetValue(path, out var previous) ? previous : Array.Empty<string>();
+            if (!choice.Supplements.Any(h => !sent.Contains(h, StringComparer.OrdinalIgnoreCase))) return false;
+            documentSupplements[path] = choice.Supplements;
+            pchPending.Add(path);
+        }
+
+        SendSwitched(new[] { choice.Command });
+        ReopenQuietly(path);
+        return true;
+    }
+
+    /// <summary>문서 하나를 보충 헤더로 다시 분석하는 세션당 최대 횟수입니다. 넘으면 PCH로 바꿉니다.</summary>
+    private const int MaxDocumentSupplementRounds = 2;
+
+    /// <summary>
+    /// 요청 전에 그 문서의 PCH 판단을 기다립니다. 판단할 문서가 아니면 바로 돌아갑니다. 보충 헤더나 PCH를 넣어 다시 분석하게 되면 진행 문구를
+    /// 알리고 명령을 보낸 뒤 돌아가므로, 이어서 보내는 요청은 clangd가 다시 분석한 뒤 답합니다. 보충 단계는 다시 분석한 결과로 다시 판단하므로
+    /// 그 판단까지 기다립니다.
     /// </summary>
     private async Task AwaitPchCheckAsync(string path, int version, IProgress<string>? progress, CancellationToken cancellationToken)
     {
-        bool pending;
-        Task? sent;
-        Task? reparsed;
-        lock (pchGate)
+        Task<bool>? awaited = null;
+        for (var round = 0; round <= MaxDocumentSupplementRounds; round++)
         {
-            pending = pchPending.Contains(path);
-            pchSwitches.TryGetValue(path, out sent);
-            pchReparses.TryGetValue(path, out reparsed);
-        }
-
-        // 판단 전도 아니고 진행 중인 전환도 없으면 바로 요청합니다. 이미 보낸 전환의 다시 분석은 clangd가 요청보다 먼저 처리합니다.
-        if (!pending && (sent is null || sent.IsCompleted && reparsed is not { IsCompleted: false })) return;
-        if (pending)
-        {
-            await WaitForAnalysisAsync(path, version, options.CandidateTimeout, cancellationToken, reparse: false).ConfigureAwait(false);
+            bool pending;
+            Task<bool>? sent;
+            Task? reparsed;
             lock (pchGate)
             {
-                if (!pchSwitches.TryGetValue(path, out sent)) return;
+                pending = pchPending.Contains(path);
+                pchSwitches.TryGetValue(path, out sent);
+                pchReparses.TryGetValue(path, out reparsed);
             }
-        }
 
-        progress?.Report("공유 PCH를 넣어 다시 분석하는 중…");
-        await sent!.ConfigureAwait(false);
+            if (pending)
+            {
+                var before = sent;
+                await WaitForAnalysisAsync(path, version, options.CandidateTimeout, cancellationToken, reparse: false).ConfigureAwait(false);
+                lock (pchGate)
+                {
+                    // 시간 안에 분석이 끝나지 않았으면 더 기다리지 않고 요청합니다.
+                    if (pchPending.Contains(path)) return;
+                    pchSwitches.TryGetValue(path, out sent);
+                }
+
+                // 분석에 오류가 없어 새 전환이 없습니다.
+                if (ReferenceEquals(sent, before)) return;
+            }
+            else if (sent is not null && sent.IsCompleted && reparsed is not { IsCompleted: false })
+            {
+                // 진행 중인 전환이 없습니다. 이미 보낸 전환의 다시 분석은 clangd가 요청보다 먼저 처리합니다.
+                return;
+            }
+
+            if (sent is null || ReferenceEquals(sent, awaited)) return;
+            var supplemented = await sent.ConfigureAwait(false);
+            progress?.Report(supplemented ? "필요한 헤더를 넣어 다시 분석하는 중…" : "공유 PCH를 넣어 다시 분석하는 중…");
+            if (!supplemented) return;
+            awaited = sent;
+        }
     }
 
     private static void Observe(Task task) =>
@@ -1662,27 +1732,72 @@ public sealed class ClangdNavigator : IDisposable
         _ = Task.Run(FlushFailedUnitsAsync);
     }
 
+    /// <remarks>
+    /// 헤더 보충을 하면 바꾸기 전에 실패한 합성 TU를 컴파일러로 검사해 모르는 이름을 보고 모듈의 보충 헤더를 배웁니다(<see cref="UnrealIndexPlan.ProbeTargets"/>).
+    /// 검사하는 동안 들어온 실패는 다음 차례에 함께 처리하며, 그동안은 바쁨으로 보여 다시 시작을 미룹니다.
+    /// </remarks>
     private async Task FlushFailedUnitsAsync()
     {
+        var plan = Context.Plan!;
+        while (true)
+        {
+            try
+            {
+                await Task.Delay(options.PchSwitchDelay, lifetime.Token).ConfigureAwait(false);
+            }
+            catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
+            {
+                // 판단은 실패를 받을 때 기록했으므로 다음 세션이 전환된 단위로 시작합니다.
+                return;
+            }
+
+            string[] failed;
+            lock (pchGate)
+            {
+                failed = failedUnits.ToArray();
+                failedUnits.Clear();
+            }
+
+            foreach (var target in plan.ProbeTargets(failed))
+            {
+                plan.Learn(target, await ProbeSupplementsAsync(plan, target).ConfigureAwait(false));
+            }
+
+            SendSwitched(plan.SwitchFailed(failed));
+            lock (pchGate)
+            {
+                if (failedUnits.Count == 0)
+                {
+                    pchFlushScheduled = false;
+                    return;
+                }
+            }
+        }
+    }
+
+    /// <summary>합성 TU 검사를 기다리는 상한입니다. 넘으면 배우지 않고 다음 단계(PCH)로 넘어갑니다. 묶음 단위는 구성원 수만큼 걸립니다.</summary>
+    private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMinutes(5);
+
+    /// <summary>
+    /// 분석 오류가 난 합성 TU를 clang-cl로 검사해 모르는 이름을 보고 보충 헤더를 고릅니다(<see cref="CompilerProbe"/>). background index의
+    /// 실패 알림에는 원인이 없어서입니다. 한 번에 하나만 검사하며(호출자가 차례로 부름), 색인 단위 하나만큼(Unreal 약 1 GB·6초) 들고 끝나면
+    /// 돌려줍니다. 실패하면 빈 목록입니다.
+    /// </summary>
+    private async Task<IReadOnlyList<string>> ProbeSupplementsAsync(UnrealIndexPlan plan, string wrapper)
+    {
+        if (options.FindSymbols is not { } find || plan.CommandOfWrapper(wrapper) is not { } command) return Array.Empty<string>();
         try
         {
-            await Task.Delay(options.PchSwitchDelay, lifetime.Token).ConfigureAwait(false);
+            var names = await CompilerProbe.MissingNamesAsync(command, ProbeTimeout, lifetime.Token).ConfigureAwait(false);
+            return names is not { Count: > 0 }
+                ? Array.Empty<string>()
+                : IncludeSupplements.Resolve(names, find, IncludeSupplements.IncludeDirectories(command), SourceLinePreview.ReadText);
         }
-        catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
+        catch (ObjectDisposedException)
         {
-            // 판단은 실패를 받을 때 기록했으므로 다음 세션이 전환된 단위로 시작합니다.
-            return;
+            // 종료 중이면 판단은 다음 세션이 기록대로 이어 갑니다.
+            return Array.Empty<string>();
         }
-
-        string[] failed;
-        lock (pchGate)
-        {
-            failed = failedUnits.ToArray();
-            failedUnits.Clear();
-            pchFlushScheduled = false;
-        }
-
-        SendSwitched(Context.Plan!.MarkNeedsPch(failed));
     }
 
     /// <summary>

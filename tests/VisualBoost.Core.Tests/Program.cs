@@ -35,6 +35,8 @@ internal static class Program
         Run("Unreal 공유 PCH 방식·전환·판단 기록", SemanticNavigationTests.RunUnrealPchPlan);
         Run("색인 대기열 앞당기기·요청 시점 정의 파일 기억", SemanticNavigationTests.RunIndexQueueAndDefinitionSources);
         Run("자동 공유 PCH 통합(실패 묶음 재색인·문서 재분석)", SemanticNavigationTests.RunPchAutoIntegration);
+        Run("공유 PCH 대신 헤더 보충(진단 이름·이름 색인·강제 include)", SemanticNavigationTests.RunIncludeSupplements);
+        Run("헤더 보충 통합(실패 묶음 보충 재색인·문서 보충 재분석)", SemanticNavigationTests.RunSupplementIntegration);
         Run("clangd 세션 통합", SemanticNavigationTests.RunClangdIntegration);
         Run("clangd 문서 집합 임대·리비전·용량", SemanticNavigationTests.RunDocumentSet);
         Run("컴파일 문맥 준비", SemanticNavigationTests.RunCompileContext);

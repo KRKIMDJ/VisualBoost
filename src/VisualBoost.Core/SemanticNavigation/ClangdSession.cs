@@ -220,7 +220,7 @@ public sealed class SemanticSymbol
 public sealed class ClangdSession : IDisposable
 {
     private const string BackgroundIndexToken = "backgroundIndexProgress";
-    private static readonly string[] IsolatedEnvironment = { "INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "EXTERNAL_INCLUDE" };
+    internal static readonly string[] IsolatedEnvironment = { "INCLUDE", "LIB", "LIBPATH", "CL", "_CL_", "EXTERNAL_INCLUDE" };
 
     private readonly Process process;
     private readonly LspConnection connection;
@@ -228,6 +228,8 @@ public sealed class ClangdSession : IDisposable
     private readonly object stateLock = new();
     private readonly Dictionary<string, int> diagnosticsVersions = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, DocumentErrors> documentErrors = new(StringComparer.OrdinalIgnoreCase);
+    // 열린 문서의 최근 진단 중 모르는 이름의 위치입니다(공유 PCH 대신 헤더 보충, IncludeSupplements).
+    private readonly Dictionary<string, IReadOnlyList<DiagnosticNameSite>> missingNames = new(StringComparer.OrdinalIgnoreCase);
     private readonly List<DiagnosticsWaiter> diagnosticsWaiters = new();
     // 연 문서입니다. 닫을 때 clangd가 보내는 빈 진단을 DiagnosticsPublished로 알리지 않으려고 둡니다.
     private readonly HashSet<string> openDocuments = new(StringComparer.OrdinalIgnoreCase);
@@ -364,7 +366,8 @@ public sealed class ClangdSession : IDisposable
             ("general", JsonValue.Object(("positionEncodings", JsonValue.Array("utf-16")))),
             ("textDocument", JsonValue.Object(
                 ("synchronization", JsonValue.Object(("didSave", true))),
-                ("publishDiagnostics", JsonValue.Object(("versionSupport", true))),
+                // 관련 정보를 따로 받으면 include한 헤더에서 난 오류의 실제 위치를 메시지 해석 없이 얻습니다(IncludeSupplements).
+                ("publishDiagnostics", JsonValue.Object(("versionSupport", true), ("relatedInformation", true))),
                 ("definition", JsonValue.Object(("linkSupport", false))),
                 ("declaration", JsonValue.Object(("linkSupport", false))),
                 // clangd 확장: 참조마다 들어 있는 함수·클래스 이름(containerName)을 받습니다.
@@ -400,12 +403,19 @@ public sealed class ClangdSession : IDisposable
         lock (stateLock) return documentErrors.TryGetValue(path, out var errors) ? errors : null;
     }
 
+    /// <summary>열린 문서의 최근 진단 중 모르는 이름(미선언·불완전 타입·정의되지 않은 조건 매크로)의 위치입니다.</summary>
+    public IReadOnlyList<DiagnosticNameSite> MissingNamesOf(string path)
+    {
+        lock (stateLock) return missingNames.TryGetValue(path, out var sites) ? sites : Array.Empty<DiagnosticNameSite>();
+    }
+
     public void CloseDocument(string path)
     {
         lock (stateLock)
         {
             diagnosticsVersions.Remove(path);
             documentErrors.Remove(path);
+            missingNames.Remove(path);
             openDocuments.Remove(path);
         }
 
@@ -678,7 +688,7 @@ public sealed class ClangdSession : IDisposable
     private static string LanguageOf(string path) =>
         Path.GetExtension(path).Equals(".c", StringComparison.OrdinalIgnoreCase) ? "c" : "cpp";
 
-    private static string QuoteArgument(string argument)
+    internal static string QuoteArgument(string argument)
     {
         if (argument.Length > 0 && argument.IndexOfAny(new[] { ' ', '\t', '"' }) < 0)
         {
@@ -744,6 +754,7 @@ public sealed class ClangdSession : IDisposable
             if (parameters["version"].AsInt32() is not int version) return;
             var errors = DocumentErrors.From(parameters["diagnostics"].Items);
             var undefinedMacros = DocumentErrors.HasUndefinedConditionMacro(parameters["diagnostics"].Items);
+            var sites = IncludeSupplements.Sites(parameters["diagnostics"].Items, path, uri => DocumentUri.ToPath(uri) is string real ? options.Paths.ToGiven(real) : null);
             List<DiagnosticsWaiter> ready;
             bool publish;
             lock (stateLock)
@@ -756,6 +767,8 @@ public sealed class ClangdSession : IDisposable
                     // 늦게 도착한 이전 버전의 진단으로 최신 오류 요약을 덮지 않습니다.
                     if (errors is null) documentErrors.Remove(path);
                     else documentErrors[path] = errors;
+                    if (sites.Count == 0) missingNames.Remove(path);
+                    else missingNames[path] = sites;
                 }
 
                 diagnosticsVersions[path] = Math.Max(version, known);

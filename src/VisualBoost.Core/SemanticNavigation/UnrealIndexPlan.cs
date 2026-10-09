@@ -25,16 +25,20 @@ public enum UnrealPchMode
 /// <summary>문서로 열 때 clangd에 덮어쓰기로 줄 명령입니다.</summary>
 public sealed class UnrealDocumentCommand
 {
-    public UnrealDocumentCommand(CompileCommand command, bool withoutPch)
+    public UnrealDocumentCommand(CompileCommand command, bool withoutPch, IReadOnlyList<string>? supplements = null)
     {
         Command = command;
         WithoutPch = withoutPch;
+        Supplements = supplements ?? Array.Empty<string>();
     }
 
     public CompileCommand Command { get; }
 
     /// <summary>빌드 명령에 있던 PCH 헤더를 뺐습니다. 분석 오류가 나면 넣은 명령으로 바꿀 수 있습니다.</summary>
     public bool WithoutPch { get; }
+
+    /// <summary>공유 PCH 대신 강제 include로 넣은 보충 헤더입니다(<see cref="IncludeSupplements"/>).</summary>
+    public IReadOnlyList<string> Supplements { get; }
 }
 
 /// <summary>
@@ -54,12 +58,22 @@ public sealed class UnrealDocumentCommand
 /// 구성원 파일의 색인도 새 결과로 바꿉니다. 판단은 구성(인자·구성원)이 같은 동안 캐시 폴더에 남겨 다음 세션에서 다시 실패하지 않게 합니다.
 /// clangd는 다시 시작해도 내용이 같으면 오류가 있던 TU를 다시 색인하지 않으므로(2026-10-09 확인) 판단은 실패를 알린 즉시 기록합니다
 /// (<see cref="RecordFailure"/>). 판단을 잃으면 그 단위는 내용이 바뀔 때까지 PCH 없는 색인으로 남습니다.
+///
+/// 헤더 보충(자동이고 자체 이름 색인이 있을 때): 실패한 단위는 PCH 대신 그 모듈이 배운 보충 헤더(<see cref="IncludeSupplements"/>)를 앞에
+/// include한 합성 TU(<c>.sup.cpp</c>, 다시 실패하면 더 배운 헤더로 <c>.sup2.cpp</c>)로 먼저 바꾸고, 그래도 실패하면 PCH로 바꿉니다. 단계마다
+/// 경로가 달라 clangd가 새 TU로 색인합니다. 보충 헤더는 모듈(<c>*.Build.cs</c> 폴더)마다 배워 판단 기록에 함께 남기고, 그 모듈의 PCH 없는
+/// 문서 명령에도 강제 include로 넣습니다.
 /// </remarks>
 public sealed class UnrealIndexPlan
 {
     internal const string UnitsFolder = "units";
     internal const string DecisionsFileName = "pch-units.json";
     internal const string PchSuffix = ".pch.cpp";
+    internal const string SupplementSuffix = ".sup.cpp";
+    internal const string SecondSupplementSuffix = ".sup2.cpp";
+
+    /// <summary>헤더 보충 단계의 상한입니다. 이 단계에서도 실패하면 PCH로 바꿉니다.</summary>
+    internal const int MaxSupplementStage = 2;
 
     private readonly object gate = new();
     private readonly string directory;
@@ -73,19 +87,41 @@ public sealed class UnrealIndexPlan
     // PCH가 필요하다고 판단한 단위(단위 키 → 구성 지문)와 PCH를 넣고도 분석 오류가 난 단위(단위 키 → 그때의 구성원 파일 상태)입니다.
     private readonly Dictionary<string, string> decisions;
     private readonly Dictionary<string, string> failedWithPch;
+    // 헤더 보충 단계로 바꾼 단위(단위 키 → "구성 지문:단계")와 모듈별로 배운 보충 헤더(모듈 폴더 → 헤더)입니다. gate로 보호합니다.
+    private readonly Dictionary<string, string> stages;
+    private readonly Dictionary<string, List<string>> supplements;
+    // 보충 단계 단위에 실제로 넣은 헤더(단위 키 → 헤더)입니다. 모듈이 그 뒤 더 배워도 다시 시작할 때 같은 합성 TU를 쓰게 합니다
+    // (내용이 바뀌면 clangd가 성공한 단위도 다시 색인함).
+    private readonly Dictionary<string, List<string>> unitSupplements;
+    // 보충 단계까지 해 보고도 실패해 PCH로 바꾼 단위(단위 키 → 구성 지문)입니다. 파일 하나짜리 단위면 문서도 처음부터 PCH로 엽니다.
+    private readonly Dictionary<string, string> exhausted;
+    // 파일 폴더별 소속 모듈 폴더입니다. 모듈 찾기는 위쪽 폴더를 열거하므로 기억합니다.
+    private readonly ConcurrentDictionary<string, string?> moduleOfDirectory = new(StringComparer.OrdinalIgnoreCase);
+    // 이 세션에서 합성 TU를 열어 보고도 배운 헤더가 없었던 횟수(모듈 폴더별)입니다. gate로 보호합니다.
+    private readonly Dictionary<string, int> fruitlessProbes = new(StringComparer.OrdinalIgnoreCase);
+
+    /// <summary>모듈마다 배운 것 없이 합성 TU를 열어 보는 세션당 최대 횟수입니다. 이름 색인이 원인 헤더를 모르면 실패 묶음마다 열어 메모리만 씁니다.</summary>
+    internal const int MaxFruitlessProbes = 2;
 
     // 판단 기록 파일은 이전 세션의 늦은 기록과 새 세션의 준비가 겹칠 수 있어 캐시 폴더마다 잠그고, 읽는 쪽이 쓰다 만 파일을 보지 않게 바꿔치기로 씁니다.
     private static readonly ConcurrentDictionary<string, object> DecisionLocks = new(StringComparer.OrdinalIgnoreCase);
 
-    private UnrealIndexPlan(string directory, PathAliases paths, UnrealPchMode mode, IReadOnlyList<Unit> units, IEnumerable<CompileCommand> commands,
-        Dictionary<string, string> decisions, Dictionary<string, string> failedWithPch)
+    private UnrealIndexPlan(string directory, PathAliases paths, UnrealPchMode mode, bool supplementsEnabled, IReadOnlyList<Unit> units,
+        IEnumerable<CompileCommand> commands, Dictionary<string, string> decisions, Dictionary<string, string> failedWithPch,
+        Dictionary<string, string> stages, Dictionary<string, List<string>> supplements, Dictionary<string, List<string>> unitSupplements,
+        Dictionary<string, string> exhausted)
     {
         this.directory = directory;
         this.paths = paths;
         Mode = mode;
+        SupplementsEnabled = supplementsEnabled;
         this.units = units;
         this.decisions = decisions;
         this.failedWithPch = failedWithPch;
+        this.stages = stages;
+        this.supplements = supplements;
+        this.unitSupplements = unitSupplements;
+        this.exhausted = exhausted;
         foreach (var unit in units)
         {
             unitOfName[unit.Name] = unit;
@@ -105,6 +141,18 @@ public sealed class UnrealIndexPlan
     }
 
     public UnrealPchMode Mode { get; }
+
+    /// <summary>자동에서 PCH 전에 헤더 보충을 합니다(자체 이름 색인이 있을 때).</summary>
+    public bool SupplementsEnabled { get; }
+
+    /// <summary>보충 헤더를 넣어 색인하는 단위 수입니다.</summary>
+    public int SupplementUnitCount
+    {
+        get
+        {
+            lock (gate) return units.Count(UsesSupplement);
+        }
+    }
 
     /// <summary>구성원이 둘 이상인 unity 묶음 수입니다.</summary>
     public int GroupedUnitCount { get; }
@@ -127,7 +175,8 @@ public sealed class UnrealIndexPlan
     internal string UnitsDirectory => Path.Combine(directory, UnitsFolder);
 
     /// <param name="directory">VisualBoost 캐시 폴더입니다. 합성 TU와 판단 기록을 그 아래에 둡니다.</param>
-    public static UnrealIndexPlan Create(string directory, UnrealCompileCommandResult result, PathAliases paths, UnrealPchMode mode)
+    /// <param name="supplements">자동에서 PCH 전에 헤더 보충을 할지입니다. 보충 헤더를 고를 자체 이름 색인이 있을 때만 켭니다.</param>
+    public static UnrealIndexPlan Create(string directory, UnrealCompileCommandResult result, PathAliases paths, UnrealPchMode mode, bool supplements = false)
     {
         var units = new List<Unit>();
         var names = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -148,11 +197,24 @@ public sealed class UnrealIndexPlan
 
         var decisions = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         var failedWithPch = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
-        if (mode == UnrealPchMode.Auto) ReadDecisions(directory, decisions, failedWithPch);
+        var stages = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var learned = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var unitHeaders = new Dictionary<string, List<string>>(StringComparer.OrdinalIgnoreCase);
+        var exhausted = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        var enabled = supplements && mode == UnrealPchMode.Auto;
+        if (mode == UnrealPchMode.Auto) ReadDecisions(directory, decisions, failedWithPch, stages, learned, unitHeaders, exhausted);
         foreach (var unit in units)
         {
             unit.NeedsPch = mode == UnrealPchMode.Always ||
                             mode == UnrealPchMode.Auto && decisions.TryGetValue(unit.Key, out var stamp) && stamp == unit.Stamp;
+            if (mode == UnrealPchMode.Auto && !unit.NeedsPch && unit.Switchable && StageOf(stages, unit) is int stage)
+            {
+                // 보충 단계 판단이 있는데 이번 세션에 보충할 수 없으면(이름 색인 없음) PCH로 색인합니다. PCH 없는 원래 합성 TU는 실패했던 것과
+                // 내용이 같아 clangd가 다시 색인하지 않으므로 그대로 두면 계속 실패한 결과로 남습니다.
+                if (enabled) unit.Stage = stage;
+                else unit.NeedsPch = true;
+            }
+
             // PCH를 넣고도 분석 오류가 났던 단위(편집 중 문법 오류, 아직 생성하지 않은 헤더 등)는 PCH가 원인이 아니었을 수 있습니다.
             // 그 뒤 구성원 파일이 바뀌었으면 PCH 없이 다시 판단합니다. 바뀌었으므로 clangd가 PCH 없는 합성 TU를 다시 색인해 실패 여부를
             // 다시 알립니다. 그대로면 다시 색인되지 않아 판단을 바꿀 근거가 없으므로 PCH를 유지합니다.
@@ -166,7 +228,36 @@ public sealed class UnrealIndexPlan
         var current = new HashSet<string>(units.Where(u => u.NeedsPch).Select(u => u.Key), StringComparer.OrdinalIgnoreCase);
         foreach (var stale in decisions.Keys.Where(k => !current.Contains(k)).ToArray()) decisions.Remove(stale);
         foreach (var stale in failedWithPch.Keys.Where(k => !current.Contains(k)).ToArray()) failedWithPch.Remove(stale);
-        return new UnrealIndexPlan(directory, paths, mode, units, result.Commands, decisions, failedWithPch);
+        // 보충 단계 판단은 구성이 같고 PCH 판단이 없는 단위만 남깁니다. 이번 세션에 보충할 수 없어 PCH로 색인하는 단위도 남겨 다음 세션이 보충으로 시작합니다.
+        var staged = new HashSet<string>(units.Where(u => !decisions.ContainsKey(u.Key) && StageOf(stages, u) is not null).Select(u => u.Key),
+            StringComparer.OrdinalIgnoreCase);
+        foreach (var stale in stages.Keys.Where(k => !staged.Contains(k)).ToArray()) stages.Remove(stale);
+        foreach (var stale in unitHeaders.Keys.Where(k => !staged.Contains(k)).ToArray()) unitHeaders.Remove(stale);
+        foreach (var stale in exhausted.Where(e => !decisions.TryGetValue(e.Key, out var stamp) || stamp != e.Value).Select(e => e.Key).ToArray()) exhausted.Remove(stale);
+        // 지운 헤더(엔진 업데이트, 프로젝트 정리)는 넣으면 치명 오류가 나므로 뺍니다.
+        foreach (var headers in learned.Values) headers.RemoveAll(h => !File.Exists(h));
+        foreach (var headers in unitHeaders.Values) headers.RemoveAll(h => !File.Exists(h));
+        var plan = new UnrealIndexPlan(directory, paths, mode, enabled, units, result.Commands, decisions, failedWithPch, stages, learned, unitHeaders, exhausted);
+        foreach (var unit in units.Where(u => u.Stage > 0))
+        {
+            // 기록이 없으면(전환 전에 끝난 세션이 실패만 기록) 전환할 때처럼 모듈이 배운 헤더를 모두 넣습니다.
+            unit.SupplementHeaders = unitHeaders.TryGetValue(unit.Key, out var own) && own.Count > 0
+                ? own.ToArray()
+                : plan.SupplementsOfModule(plan.ModuleOfUnit(unit));
+        }
+
+        return plan;
+    }
+
+    /// <summary>기록한 보충 단계입니다. 구성 지문이 다르거나 기록이 없으면 null입니다.</summary>
+    private static int? StageOf(Dictionary<string, string> stages, Unit unit)
+    {
+        if (!stages.TryGetValue(unit.Key, out var value)) return null;
+        var colon = value.LastIndexOf(':');
+        return colon > 0 && value.Substring(0, colon) == unit.Stamp &&
+               int.TryParse(value.Substring(colon + 1), NumberStyles.None, CultureInfo.InvariantCulture, out var stage) && stage >= 1 && stage <= MaxSupplementStage
+            ? stage
+            : null;
     }
 
     /// <summary>
@@ -186,7 +277,10 @@ public sealed class UnrealIndexPlan
             {
                 if (ReferenceEquals(unit, except)) continue;
                 tags.Add(IndexQueuePriority.TagOf(WrapperPath(unit)));
-                if (Mode == UnrealPchMode.Auto && unit.Switchable && !UsesPch(unit)) tags.Add(unit.Name + ".pch");
+                if (Mode != UnrealPchMode.Auto || !unit.Switchable || UsesPch(unit)) continue;
+                // 실패하면 바뀔 다음 단계의 표시입니다(보충 단계, 그다음 PCH).
+                if (SupplementsEnabled && unit.Stage < MaxSupplementStage) tags.Add(IndexQueuePriority.TagOf(unit.Name + StageSuffix(unit.Stage + 1)));
+                tags.Add(unit.Name + ".pch");
             }
 
             return tags;
@@ -223,7 +317,8 @@ public sealed class UnrealIndexPlan
         var stripped = UnrealCompileCommands.RemovePrecompiledHeaders(head);
         var hasPch = stripped.Count != head.Length;
         var withPch = pch ?? (Mode == UnrealPchMode.Always || Mode == UnrealPchMode.Auto && !header && SingleUnitUsesPch(source));
-        var arguments = new List<string>(withPch || !hasPch ? head : stripped);
+        var supplied = hasPch && !withPch && SupplementsEnabled ? SupplementsOfModule(ModuleOf(path)) : Array.Empty<string>();
+        var arguments = new List<string>(withPch || !hasPch ? head : IncludeSupplements.WithForcedIncludes(stripped, supplied.Select(paths.ToReal)));
         // PCH 없이 열면 조건식의 정의되지 않은 매크로를 경고로 받아, PCH가 정의하던 매크로에 기대는 문서도 PCH로 다시 분석하게 합니다
         // (분석 오류가 없어 그 구역이 조용히 비활성이 되기 때문, ConditionMacros 참고).
         if (hasPch && !withPch) arguments.Add("-Wundef");
@@ -236,7 +331,147 @@ public sealed class UnrealIndexPlan
         }
 
         arguments.Add(file);
-        return new UnrealDocumentCommand(new CompileCommand(command.Directory, file, arguments), hasPch && !withPch);
+        return new UnrealDocumentCommand(new CompileCommand(command.Directory, file, arguments), hasPch && !withPch, supplied);
+    }
+
+    /// <summary>
+    /// 문서·합성 TU가 속한 모듈에 보충 헤더를 배웁니다. 새로 배운 헤더를 돌려주며, 있으면 판단 기록에 바로 남깁니다. 모듈을 모르거나 상한
+    /// (<see cref="IncludeSupplements.MaxHeadersPerModule"/>)에 닿으면 배우지 않습니다. 파일을 쓰므로 작업 스레드에서 부릅니다.
+    /// </summary>
+    /// <param name="file">문서 경로이거나 이 계획의 합성 TU 경로입니다.</param>
+    public IReadOnlyList<string> Learn(string file, IEnumerable<string> headers)
+    {
+        if (!SupplementsEnabled) return Array.Empty<string>();
+        lock (gate)
+        {
+            var module = UnitOfWrapper(file) is { } unit ? ModuleOfUnit(unit) : ModuleOf(file);
+            if (module is null) return Array.Empty<string>();
+            if (!supplements.TryGetValue(module, out var list)) supplements[module] = list = new List<string>();
+            var added = new List<string>();
+            foreach (var header in headers)
+            {
+                if (list.Count >= IncludeSupplements.MaxHeadersPerModule) break;
+                var full = FullPath(header);
+                if (list.Contains(full, StringComparer.OrdinalIgnoreCase)) continue;
+                list.Add(full);
+                added.Add(full);
+            }
+
+            if (added.Count > 0) WriteDecisions();
+            else if (UnitOfWrapper(file) is not null) fruitlessProbes[module] = (fruitlessProbes.TryGetValue(module, out var count) ? count : 0) + 1;
+            return added;
+        }
+    }
+
+    /// <summary>문서·합성 TU의 명령에 있는 include 폴더입니다(보충 헤더 후보를 고를 때). 명령을 모르면 빈 목록입니다.</summary>
+    public IReadOnlyList<string> IncludeDirectoriesOf(string file)
+    {
+        if (CommandOfWrapper(file) is { } command) return IncludeSupplements.IncludeDirectories(command);
+        return DocumentCommand(file, pch: false) is { } choice ? IncludeSupplements.IncludeDirectories(choice.Command) : Array.Empty<string>();
+    }
+
+    /// <summary>이 계획의 합성 TU를 지금 색인하는 명령입니다(실패 원인을 컴파일러로 볼 때). 합성 TU가 아니면 null입니다.</summary>
+    public CompileCommand? CommandOfWrapper(string wrapper)
+    {
+        lock (gate) return UnitOfWrapper(wrapper) is { } unit ? DatabaseCommand(unit) : null;
+    }
+
+    /// <summary>
+    /// clangd가 분석 오류를 알린 합성 TU 중 실패 원인(모르는 이름)을 검사해 볼 것입니다. 보충 단계가 아닌 단위는 모듈마다 하나를, 그 모듈이 아직
+    /// 배운 헤더가 없을 때만 고릅니다(배운 헤더가 있으면 먼저 그것으로 다시 색인). 보충 단계에서 실패한 단위는 더 배울 수 있으면 모두 고릅니다.
+    /// </summary>
+    public IReadOnlyList<string> ProbeTargets(IEnumerable<string> translationUnits)
+    {
+        if (!SupplementsEnabled) return Array.Empty<string>();
+        lock (gate)
+        {
+            var targets = new List<string>();
+            var modules = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var path in translationUnits)
+            {
+                if (UnitOfWrapper(path) is not { Switchable: true, NeedsPch: false } unit) continue;
+                var module = ModuleOfUnit(unit);
+                if (module is null) continue;
+                var known = SupplementsOfModule(module).Count;
+                if (fruitlessProbes.TryGetValue(module, out var fruitless) && fruitless >= MaxFruitlessProbes) continue;
+                if (unit.Stage == 0 ? known == 0 && modules.Add(module) : unit.Stage < MaxSupplementStage && known < IncludeSupplements.MaxHeadersPerModule)
+                {
+                    targets.Add(WrapperPath(unit));
+                }
+            }
+
+            return targets;
+        }
+    }
+
+    /// <summary>
+    /// clangd가 분석 오류를 알린 단위를 다음 단계로 바꿉니다(<see cref="UnrealPchMode.Auto"/>만). 모듈이 배운 보충 헤더 중 그 단위에 아직 넣지 않은
+    /// 것이 있으면 보충 단계(<see cref="MaxSupplementStage"/>까지)로, 없으면 PCH로 바꿉니다. 보충을 하지 않으면 <see cref="MarkNeedsPch"/>와
+    /// 같습니다. 바꾼 단위의 새 합성 TU 명령을 돌려줍니다.
+    /// </summary>
+    public IReadOnlyList<CompileCommand> SwitchFailed(IEnumerable<string> translationUnits)
+    {
+        if (!SupplementsEnabled) return MarkNeedsPch(translationUnits);
+        lock (gate)
+        {
+            var toPch = new List<Unit>();
+            var toSupplement = new List<Unit>();
+            foreach (var path in translationUnits)
+            {
+                if (UnitOfWrapper(path) is not { Switchable: true, NeedsPch: false } unit || toPch.Contains(unit) || toSupplement.Contains(unit)) continue;
+                var headers = SupplementsOfModule(ModuleOfUnit(unit));
+                var more = headers.Any(h => !unit.SupplementHeaders.Contains(h, StringComparer.OrdinalIgnoreCase));
+                if (unit.Stage < MaxSupplementStage && more) toSupplement.Add(unit);
+                else toPch.Add(unit);
+            }
+
+            var switched = new List<CompileCommand>();
+            foreach (var unit in toSupplement)
+            {
+                var previous = WrapperPath(unit);
+                var (stage, headers) = (unit.Stage, unit.SupplementHeaders);
+                unit.Stage++;
+                unit.SupplementHeaders = SupplementsOfModule(ModuleOfUnit(unit));
+                try
+                {
+                    WriteWrapper(unit);
+                }
+                catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                {
+                    // 새 합성 TU를 쓰지 못하면 이번에는 바꾸지 않습니다. 기록한 판단으로 다음 세션이 이 단계로 시작합니다.
+                    (unit.Stage, unit.SupplementHeaders) = (stage, headers);
+                    continue;
+                }
+
+                TryDelete(previous);
+                stages[unit.Key] = unit.Stamp + ":" + unit.Stage.ToString(CultureInfo.InvariantCulture);
+                unitSupplements[unit.Key] = unit.SupplementHeaders.ToList();
+                switched.Add(DatabaseCommand(unit));
+            }
+
+            switched.AddRange(PchLocked(toPch));
+            foreach (var unit in toPch.Where(u => u.Stage > 0 && u.NeedsPch)) exhausted[unit.Key] = unit.Stamp;
+            if (switched.Count == 0) return switched;
+            TryWriteDatabase();
+            WriteDecisions();
+            return switched;
+        }
+    }
+
+    /// <summary>그 모듈이 배운 보충 헤더입니다(배운 순서).</summary>
+    private IReadOnlyList<string> SupplementsOfModule(string? module)
+    {
+        lock (gate) return module is not null && supplements.TryGetValue(module, out var list) ? list.ToArray() : Array.Empty<string>();
+    }
+
+    private string? ModuleOfUnit(Unit unit) => unit.Members.Count == 0 ? null : ModuleOf(unit.Members[0]);
+
+    /// <summary>파일이 속한 모듈 폴더(<c>*.Build.cs</c>가 있는 폴더)입니다. 모르면 null입니다.</summary>
+    private string? ModuleOf(string file)
+    {
+        var folder = Path.GetDirectoryName(Path.GetFullPath(file));
+        if (folder is null) return null;
+        return moduleOfDirectory.GetOrAdd(folder, _ => UnrealCompileCommands.OwningModule(file) is (string module, _) ? FullPath(module) : null);
     }
 
     /// <summary>합성 TU를 모두 쓰고 쓰지 않는 합성 TU를 지운 뒤 compile_commands.json을 씁니다. database 내용이 바뀌었으면 참입니다.</summary>
@@ -271,6 +506,15 @@ public sealed class UnrealIndexPlan
             if (UsesPch(unit))
             {
                 failedWithPch[unit.Key] = Fingerprint(unit.Members);
+            }
+            else if (SupplementsEnabled && unit.Stage < MaxSupplementStage)
+            {
+                // 다음 세션은 다음 보충 단계로 시작합니다(새 경로라 다시 색인). 이번 세션의 전환에서 배울 헤더가 없으면 PCH로 다시 기록합니다.
+                var next = unit.Stamp + ":" + (unit.Stage + 1).ToString(CultureInfo.InvariantCulture);
+                if (stages.TryGetValue(unit.Key, out var recorded) && recorded == next) return;
+                stages[unit.Key] = next;
+                // 다음 단계에 넣을 헤더는 전환할 때 정해집니다. 그 전에 끝나면 다음 세션이 모듈 헤더를 모두 넣습니다.
+                unitSupplements.Remove(unit.Key);
             }
             else if (!decisions.TryGetValue(unit.Key, out var stamp) || stamp != unit.Stamp)
             {
@@ -307,6 +551,16 @@ public sealed class UnrealIndexPlan
 
     private IReadOnlyList<CompileCommand> SwitchLocked(IReadOnlyList<Unit> switching)
     {
+        var switched = PchLocked(switching);
+        if (switched.Count == 0) return switched;
+        TryWriteDatabase();
+        WriteDecisions();
+        return switched;
+    }
+
+    /// <summary>단위를 PCH 합성 TU로 바꿉니다. database와 판단 기록은 호출자가 씁니다. <see cref="gate"/> 안에서 부릅니다.</summary>
+    private List<CompileCommand> PchLocked(IReadOnlyList<Unit> switching)
+    {
         var switched = new List<CompileCommand>(switching.Count);
         foreach (var unit in switching)
         {
@@ -325,10 +579,16 @@ public sealed class UnrealIndexPlan
 
             TryDelete(previous);
             decisions[unit.Key] = unit.Stamp;
+            stages.Remove(unit.Key);
+            unitSupplements.Remove(unit.Key);
             switched.Add(DatabaseCommand(unit));
         }
 
-        if (switched.Count == 0) return switched;
+        return switched;
+    }
+
+    private void TryWriteDatabase()
+    {
         try
         {
             // 다음 시작과 clangd가 database를 다시 읽을 때도 같은 명령을 보게 합니다.
@@ -338,9 +598,6 @@ public sealed class UnrealIndexPlan
         {
             // 이번 세션은 덮어쓰기 명령으로 색인하고, 다음 시작 때 판단 기록으로 database를 다시 씁니다.
         }
-
-        WriteDecisions();
-        return switched;
     }
 
     private bool WriteDatabaseLocked() => CompileContextBuilder.WriteDatabase(directory, paths.ToReal(units.Select(DatabaseCommand).ToArray()));
@@ -351,25 +608,48 @@ public sealed class UnrealIndexPlan
         return new CompileCommand(unit.Directory, path, (UsesPch(unit) ? unit.WithPch : unit.WithoutPch).Concat(new[] { path }).ToArray());
     }
 
-    private string WrapperPath(Unit unit) => Path.Combine(UnitsDirectory, unit.Name + (UsesPch(unit) ? PchSuffix : ".cpp")).Replace('\\', '/');
+    private string WrapperPath(Unit unit) =>
+        Path.Combine(UnitsDirectory, unit.Name + (UsesPch(unit) ? PchSuffix : StageSuffix(UsesSupplement(unit) ? unit.Stage : 0))).Replace('\\', '/');
+
+    private static string StageSuffix(int stage) => stage switch
+    {
+        1 => SupplementSuffix,
+        2 => SecondSupplementSuffix,
+        _ => ".cpp"
+    };
 
     private static bool UsesPch(Unit unit) => unit.NeedsPch && unit.Switchable;
 
-    /// <summary>합성 TU 경로에 해당하는 단위입니다. 지금 쓰는 경로(PCH 여부에 맞는 확장자)가 아니면 null입니다. <see cref="gate"/> 안에서 부릅니다.</summary>
+    private static bool UsesSupplement(Unit unit) => !UsesPch(unit) && unit.Switchable && unit.Stage > 0;
+
+    /// <summary>공유 PCH나 보충 헤더를 넣어 다시 색인하는 합성 TU 경로입니다. 이런 TU를 색인했으면 다시 읽기 재시작이 필요합니다.</summary>
+    public static bool IsSwitchedWrapper(string path) =>
+        path.EndsWith(PchSuffix, StringComparison.OrdinalIgnoreCase) || path.EndsWith(SupplementSuffix, StringComparison.OrdinalIgnoreCase) ||
+        path.EndsWith(SecondSupplementSuffix, StringComparison.OrdinalIgnoreCase);
+
+    /// <summary>합성 TU 경로에 해당하는 단위입니다. 지금 쓰는 경로(단계에 맞는 확장자)가 아니면 null입니다. <see cref="gate"/> 안에서 부릅니다.</summary>
     private Unit? UnitOfWrapper(string path)
     {
         var name = Path.GetFileName(path);
-        var pch = name.EndsWith(PchSuffix, StringComparison.OrdinalIgnoreCase);
-        var stem = pch ? name.Substring(0, name.Length - PchSuffix.Length) : Path.GetFileNameWithoutExtension(name);
-        return unitOfName.TryGetValue(stem, out var unit) && UsesPch(unit) == pch &&
-               string.Equals(FullPath(path), FullPath(WrapperPath(unit)), StringComparison.OrdinalIgnoreCase)
+        var suffix = new[] { PchSuffix, SupplementSuffix, SecondSupplementSuffix }.FirstOrDefault(s => name.EndsWith(s, StringComparison.OrdinalIgnoreCase));
+        var stem = suffix is not null ? name.Substring(0, name.Length - suffix.Length) : Path.GetFileNameWithoutExtension(name);
+        return unitOfName.TryGetValue(stem, out var unit) && string.Equals(FullPath(path), FullPath(WrapperPath(unit)), StringComparison.OrdinalIgnoreCase)
             ? unit
             : null;
     }
 
+    /// <summary>
+    /// 파일 하나짜리 단위가 PCH로 색인해, 그 문서도 처음부터 PCH로 열지 봅니다. 헤더 보충을 하면 보충까지 해 보고도 실패한 단위만 그렇습니다.
+    /// 이전 판(보충 없음)이 남긴 PCH 판단이나 배운 헤더 없이 PCH로 바꾼 단위의 문서는 보충 헤더로 먼저 열어, 공유 PCH(문서 하나 약 2 GB)
+    /// 대신 필요한 헤더만 넣게 합니다.
+    /// </summary>
     private bool SingleUnitUsesPch(string member)
     {
-        lock (gate) return unitOfMember.TryGetValue(member, out var unit) && unit.Members.Count == 1 && UsesPch(unit);
+        lock (gate)
+        {
+            return unitOfMember.TryGetValue(member, out var unit) && unit.Members.Count == 1 && UsesPch(unit) &&
+                   (!SupplementsEnabled || exhausted.TryGetValue(unit.Key, out var stamp) && stamp == unit.Stamp);
+        }
     }
 
     /// <summary>구성원 파일의 크기·수정 시각을 묶은 값입니다. 내용 해시보다 싸고, 판단을 다시 할지 정하는 데만 씁니다.</summary>
@@ -396,6 +676,13 @@ public sealed class UnrealIndexPlan
             // clangd는 내용이 같으면 오류가 있던 TU를 다시 색인하지 않으므로, 넣지 않음으로 색인한 결과가 자동으로 바꾼 뒤에도 남아 실패를
             // 다시 알리지 않습니다. 내용을 달리해 방식을 바꿀 때 다시 색인하게 합니다.
             text.Append("// 공유 PCH 넣지 않음\n");
+        }
+
+        if (UsesSupplement(unit))
+        {
+            // 공유 PCH 대신 모듈이 배운 헤더를 구성원보다 먼저 넣습니다. 명령의 강제 include(모듈 정의 헤더) 뒤라 API 매크로가 정의되어 있습니다.
+            text.Append("// 보충 헤더(").Append(unit.Stage.ToString(CultureInfo.InvariantCulture)).Append("단계)\n");
+            foreach (var header in unit.SupplementHeaders) text.Append("#include \"").Append(paths.ToReal(header)).Append("\"\n");
         }
 
         foreach (var member in unit.Members)
@@ -486,7 +773,12 @@ public sealed class UnrealIndexPlan
         static JsonValue Map(Dictionary<string, string> map) =>
             JsonValue.Object(map.OrderBy(d => d.Key, StringComparer.OrdinalIgnoreCase).Select(d => new KeyValuePair<string, JsonValue>(d.Key, d.Value)));
 
-        var json = JsonValue.Object(("units", Map(decisions)), ("failedWithPch", Map(failedWithPch))).ToJson();
+        static JsonValue Lists(Dictionary<string, List<string>> map) =>
+            JsonValue.Object(map.Where(s => s.Value.Count > 0).OrderBy(s => s.Key, StringComparer.OrdinalIgnoreCase)
+                .Select(s => new KeyValuePair<string, JsonValue>(s.Key, JsonValue.Array(s.Value.Select(h => (JsonValue)h)))));
+
+        var json = JsonValue.Object(("units", Map(decisions)), ("failedWithPch", Map(failedWithPch)), ("stages", Map(stages)),
+            ("supplements", Lists(supplements)), ("unitSupplements", Lists(unitSupplements)), ("exhausted", Map(exhausted))).ToJson();
         var path = Path.Combine(directory, DecisionsFileName);
         lock (DecisionLock(directory))
         {
@@ -504,7 +796,9 @@ public sealed class UnrealIndexPlan
         }
     }
 
-    private static void ReadDecisions(string directory, Dictionary<string, string> decisions, Dictionary<string, string> failedWithPch)
+    private static void ReadDecisions(string directory, Dictionary<string, string> decisions, Dictionary<string, string> failedWithPch,
+        Dictionary<string, string> stages, Dictionary<string, List<string>> supplements, Dictionary<string, List<string>> unitSupplements,
+        Dictionary<string, string> exhausted)
     {
         lock (DecisionLock(directory))
         {
@@ -522,12 +816,38 @@ public sealed class UnrealIndexPlan
                 {
                     if (pair.Value.AsString() is string print) failedWithPch[pair.Key] = print;
                 }
+
+                foreach (var pair in root["exhausted"].Properties)
+                {
+                    if (pair.Value.AsString() is string stamp) exhausted[pair.Key] = stamp;
+                }
+
+                foreach (var pair in root["stages"].Properties)
+                {
+                    if (pair.Value.AsString() is string stage) stages[pair.Key] = stage;
+                }
+
+                foreach (var pair in root["supplements"].Properties)
+                {
+                    var headers = pair.Value.Items.Select(i => i.AsString()).OfType<string>().Take(IncludeSupplements.MaxHeadersPerModule).ToList();
+                    if (headers.Count > 0) supplements[pair.Key] = headers;
+                }
+
+                foreach (var pair in root["unitSupplements"].Properties)
+                {
+                    var headers = pair.Value.Items.Select(i => i.AsString()).OfType<string>().Take(IncludeSupplements.MaxHeadersPerModule).ToList();
+                    if (headers.Count > 0) unitSupplements[pair.Key] = headers;
+                }
             }
             catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is FormatException)
             {
                 // 읽지 못한 기록은 버리고 PCH 없이 다시 판단합니다.
                 decisions.Clear();
                 failedWithPch.Clear();
+                stages.Clear();
+                exhausted.Clear();
+                supplements.Clear();
+                unitSupplements.Clear();
             }
         }
     }
@@ -584,5 +904,11 @@ public sealed class UnrealIndexPlan
 
         /// <summary>PCH를 넣어 색인하기로 했습니다. <see cref="gate"/>로 보호합니다.</summary>
         public bool NeedsPch { get; set; }
+
+        /// <summary>헤더 보충 단계입니다(0이면 보충 없음). <see cref="gate"/>로 보호합니다.</summary>
+        public int Stage { get; set; }
+
+        /// <summary>보충 단계의 합성 TU에 넣은 헤더입니다. <see cref="gate"/>로 보호합니다.</summary>
+        public IReadOnlyList<string> SupplementHeaders { get; set; } = Array.Empty<string>();
     }
 }

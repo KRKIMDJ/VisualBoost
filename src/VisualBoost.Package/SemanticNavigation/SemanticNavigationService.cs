@@ -268,9 +268,10 @@ internal sealed class SemanticNavigationService : IDisposable
             {
                 var compiler = Path.Combine(Path.GetDirectoryName(clangdPath ?? string.Empty) ?? string.Empty, "clang-cl.exe");
                 var sources = await CollectSourcesAsync(CancellationToken.None).ConfigureAwait(false);
-                // 실행 중인 clangd의 문맥과 같은 공유 PCH 방식으로 비교해야 명령이 실제로 바뀌었는지 알 수 있습니다. 색인 파일은 실행 중이므로 건드리지 않습니다.
+                // 실행 중인 clangd의 문맥과 같은 공유 PCH 방식(헤더 보충 포함)으로 비교해야 명령이 실제로 바뀌었는지 알 수 있고, 보충 단계의 합성 TU를
+                // PCH로 다시 쓰지 않습니다. 색인 파일은 실행 중이므로 건드리지 않습니다.
                 var context = CompileContextBuilder.Prepare(solution, cacheRoot, current.Context.EngineRoot, File.Exists(compiler) ? compiler : "clang-cl.exe",
-                    CancellationToken.None, sources, pchMode, resetIndex: false);
+                    CancellationToken.None, sources, pchMode, resetIndex: false, supplements: current.Context.Plan?.SupplementsEnabled ?? false);
                 bool restart;
                 lock (gate) restart = context.Changed && observed == generation && ReferenceEquals(navigator, current);
                 if (restart) Restart();
@@ -346,7 +347,8 @@ internal sealed class SemanticNavigationService : IDisposable
                 if (current.Context.Plan is { SwitchableUnitCount: > 0 } plan)
                 {
                     var mode = plan.Mode switch { UnrealPchMode.Always => "항상", UnrealPchMode.Never => "넣지 않음", _ => "자동" };
-                    lines.Add($"공유 PCH: {mode} · 포함한 색인 단위 {plan.PchUnitCount:N0}/{plan.SwitchableUnitCount:N0}개");
+                    lines.Add($"공유 PCH: {mode} · 포함한 색인 단위 {plan.PchUnitCount:N0}/{plan.SwitchableUnitCount:N0}개" +
+                              (plan.SupplementsEnabled ? $" · 필요한 헤더만 넣은 색인 단위 {plan.SupplementUnitCount:N0}개" : string.Empty));
                 }
 
                 if (current.IndexLogUnreadable) lines.Add("주의: " + IndexLogUnreadableMessage);
