@@ -1990,7 +1990,8 @@ internal static class SemanticNavigationTests
             var otherCpp = Path.Combine(engine, "Private", "Other.cpp");
             var worldHeader = Path.Combine(engine, "Public", "Engine", "World.h");
             texts[worldCpp] = "#include \"Engine/World.h\"\nvoid UWorld::Tick(float Delta)\n{\n}\nvoid UWorld::Load(int A)\n{\n}\nvoid UWorld::Load(int A, int B)\n{\n}\n" +
-                              "void Helper()\n{\n}\n";
+                              "void Helper()\n{\n}\nFStringView UWorld::Find(FStringView InPath)\n{\n}\nFString UWorld::Find(const FString& InPath /* 경로, 쉼표 */)\n{\n}\n" +
+                              "void UWorld::Get() const\n{\n}\nvoid UWorld::Get()\n{\n}\n";
             texts[otherCpp] = "static void Helper()\n{\n}\nvoid Stray()\n{\n}\n";
             var definitions = new[]
             {
@@ -2001,6 +2002,10 @@ internal static class SemanticNavigationTests
                 new SourceSymbolLocation("Load", worldCpp, 5, 14, SourceSymbolKind.Function, "UWorld", "(int A)"),
                 new SourceSymbolLocation("Load", worldCpp, 8, 14, SourceSymbolKind.Function, "UWorld", "(int A, int B)"),
                 new SourceSymbolLocation("Helper", worldCpp, 11, 6, SourceSymbolKind.Function, string.Empty, "()"),
+                new SourceSymbolLocation("Find", worldCpp, 14, 21, SourceSymbolKind.Function, "UWorld", "(FStringView InPath)"),
+                new SourceSymbolLocation("Find", worldCpp, 17, 17, SourceSymbolKind.Function, "UWorld", "(const FString& InPath /* 경로, 쉼표 */)"),
+                new SourceSymbolLocation("Get", worldCpp, 20, 14, SourceSymbolKind.Function, "UWorld", "() const"),
+                new SourceSymbolLocation("Get", worldCpp, 23, 14, SourceSymbolKind.Function, "UWorld", "()"),
                 new SourceSymbolLocation("Stray", otherCpp, 4, 6, SourceSymbolKind.Function, string.Empty, "()"),
             };
             Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta);", Read) is { Line: 2 } &&
@@ -2010,6 +2015,15 @@ internal static class SemanticNavigationTests
                   DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, null, Read) is null &&
                   DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(", Read) is null,
                 "오버로드는 매개변수 수로 좁히고, 모르면 쓰지 않음");
+            Check(DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(const FString&Path = TEXT(\"/Game,x\"));", Read) is { Line: 17 } &&
+                  DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(FStringView);", Read) is { Line: 14 } &&
+                  DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(TStringView<TCHAR> InPath);", Read) is null &&
+                  DefinitionCandidates.UniqueDefinition("Get", "UWorld::", worldHeader, definitions, "Get() const override;", Read) is { Line: 20 } &&
+                  DefinitionCandidates.UniqueDefinition("Get", "UWorld::", worldHeader, definitions, "Get();", Read) is { Line: 23 },
+                "수가 같은 오버로드는 이름 뺀 매개변수 형식과 const 멤버로 좁히고, 형식을 다르게 적었으면 쓰지 않음");
+            var shape = DefinitionCandidates.Shape("Get(int32 Index, const TArray<FName, TInlineAllocator<2>>& Names = {}, unsigned int, UE::FName) const override;");
+            Check(shape is { Const: true } && string.Join("|", shape.Value.Types) == "int32|const TArray<FName,TInlineAllocator<2>>&|unsigned int|UE::FName",
+                "매개변수 형식 정리(이름·기본값 제거, 기본 형식 키워드·한정 이름 유지): " + (shape is null ? "-" : string.Join("|", shape.Value.Types)));
             Check(DefinitionCandidates.UniqueDefinition("Helper", string.Empty, worldHeader, definitions, "Helper();", Read) is { Line: 11 } &&
                   DefinitionCandidates.UniqueDefinition("Stray", string.Empty, worldHeader, definitions, "Stray();", Read) is null,
                 "소속 없는 함수는 선언 헤더를 include하는 파일의 정의만 씀");
@@ -2176,23 +2190,24 @@ internal static class SemanticNavigationTests
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             Check(navigator.HasExited, "정상 종료");
 
-            // 다음 clangd(새 세션, 메모리 정리 재시작)는 기억한 엔진 cpp의 저장된 색인을 읽어 요청 시점 분석 없이 정의를 찾습니다.
+            // 다음 clangd(새 세션, 메모리 정리 재시작)는 시작할 때 기억한 파일을 읽지 않고, 그 정의가 필요할 때 기억한 엔진 cpp의 저장된 색인만
+            // 읽어 요청 시점 분석 없이 정의를 찾습니다.
             using var restarted = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
             {
                 ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1
             }, CancellationToken.None).Result;
-            // 기억한 파일의 명령은 시작 직후 작업 스레드에서 보내므로, 그 색인 읽기가 끝날 여유를 둔 뒤 첫 요청부터 확인합니다.
             Check(SpinUntil(() => restarted.Progress.Completed, 60000), "다시 시작한 색인 완료");
-            Thread.Sleep(2000);
-            Check(SpinUntil(() => restarted.Progress.Completed, 60000), "기억한 파일 색인 읽기 완료");
             using var restartTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
-            var again = default(NavigationResult);
-            Check(SpinUntil(() =>
-            {
-                again = restarted.DefinitionAsync(query, null, restartTimeout.Token).Result;
-                return again.Locations.Any(l => l.Path == engineSource);
-            }, 30000) && !again!.ResolvedOnDemand && !restarted.IsOpen(engineSource),
-                "다시 시작해도 기억한 엔진 정의를 색인에서 찾음: " + string.Join(",", again?.Locations ?? Array.Empty<NavigationLocation>()));
+            var restartReports = new List<string>();
+            var again = restarted.DefinitionAsync(query, new SyncProgress(restartReports.Add), restartTimeout.Token).Result;
+            Check(again.Locations.Any(l => l.Path == engineSource) && !again.ResolvedOnDemand && !restarted.IsOpen(engineSource) &&
+                  restartReports.Any(r => r.Contains("Mod.cpp")),
+                "다시 시작한 뒤 기억한 엔진 정의는 필요할 때 저장된 색인을 읽어 찾음: " + string.Join(",", again.Locations) + " / " +
+                string.Join(",", restartReports));
+            var restartedReferences = restarted.ReferencesAsync(query, restartTimeout.Token).Result;
+            Check(!restartedReferences.ResolvedOnDemand && restartedReferences.Locations.Any(l => l.Path == engineSource) &&
+                  restartedReferences.Locations.Any(l => l.Path == other), "읽은 색인으로 참조에 엔진 정의 포함: " +
+                  string.Join(",", restartedReferences.Locations.Select(l => Path.GetFileName(l.Path))));
             restarted.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally

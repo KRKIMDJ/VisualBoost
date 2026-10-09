@@ -144,6 +144,13 @@ public static class DefinitionCandidates
         if (matches.Count > 1 && declaration is not null && ParameterCount(declaration) is { } wanted)
         {
             matches = matches.Where(s => ParameterCount(s.Signature) == wanted).ToList();
+            // 매개변수 수가 같은 오버로드(FString·FStringView 판 등)는 이름을 뺀 매개변수 형식과 const 멤버 여부로 더 좁힙니다. 선언과 정의를 다르게
+            // 적은 형식(형식 별칭, 이름 없는 매개변수)은 맞지 않아 빠지므로 틀린 곳으로 가지 않고 clangd 확정으로 넘어갑니다.
+            if (matches.Count > 1 && Shape(declaration) is { } shape)
+            {
+                matches = matches.Where(s => Shape(s.Signature) is { } other && other.Const == shape.Const &&
+                                             other.Types.SequenceEqual(shape.Types, StringComparer.Ordinal)).ToList();
+            }
         }
 
         if (matches.Count != 1) return null;
@@ -180,13 +187,35 @@ public static class DefinitionCandidates
     /// 글에서 처음 나오는 괄호 목록의 매개변수 수입니다. 비었거나 <c>void</c>면 0입니다. 괄호가 닫히지 않으면 null입니다. 템플릿 인수(&lt;…&gt;)와
     /// 안쪽 괄호의 쉼표는 세지 않습니다.
     /// </summary>
-    public static int? ParameterCount(string text)
+    public static int? ParameterCount(string text) => ParameterList(text)?.Parameters.Count;
+
+    /// <summary>
+    /// 글에서 처음 나오는 괄호 목록의 매개변수 형식(기본값과 끝의 매개변수 이름을 빼고 공백을 정리한 것)과, 닫는 괄호 뒤가 <c>const</c>인지입니다.
+    /// 괄호가 닫히지 않으면 null입니다.
+    /// </summary>
+    public static (IReadOnlyList<string> Types, bool Const)? Shape(string text) =>
+        ParameterList(text) is { } list ? (list.Parameters.Select(TypeOf).ToArray(), ConstSuffix.IsMatch(list.After)) : null;
+
+    private static readonly Regex StringOrComment = new(@"""(?:\\.|[^""\\\n])*""|'(?:\\.|[^'\\\n])*'|/\*.*?\*/|//[^\n]*",
+        RegexOptions.Singleline | RegexOptions.CultureInvariant);
+    private static readonly Regex Token = new(@"[A-Za-z_]\w*|::|\S", RegexOptions.CultureInvariant);
+    private static readonly Regex ConstSuffix = new(@"^\s*const\b", RegexOptions.CultureInvariant);
+    private static readonly HashSet<string> TypeKeywords = new(StringComparer.Ordinal)
     {
+        "const", "volatile", "signed", "unsigned", "short", "long", "int", "char", "wchar_t", "char8_t", "char16_t", "char32_t", "bool", "float",
+        "double", "void", "auto"
+    };
+
+    /// <summary>매개변수(원문, 앞뒤 공백 제거)들과 닫는 괄호 뒤의 글입니다. 문자열·문자 상수는 비우고 주석은 공백으로 바꾼 뒤 나눕니다.</summary>
+    private static (IReadOnlyList<string> Parameters, string After)? ParameterList(string text)
+    {
+        text = StringOrComment.Replace(text, m => m.Value[0] is '"' or '\'' ? m.Value.Substring(0, 1) + m.Value.Substring(0, 1) : " ");
         var open = text.IndexOf('(');
         if (open < 0) return null;
         var depth = 0;
         var angle = 0;
-        var commas = 0;
+        var start = open + 1;
+        var parameters = new List<string>();
         for (var i = open; i < text.Length; i++)
         {
             var c = text[i];
@@ -197,8 +226,9 @@ public static class DefinitionCandidates
             else if (c is ')' or ']' or '}')
             {
                 if (--depth > 0) continue;
-                var inside = text.Substring(open + 1, i - open - 1).Trim();
-                return inside.Length == 0 || inside == "void" ? 0 : commas + 1;
+                parameters.Add(text.Substring(start, i - start).Trim());
+                if (parameters.Count == 1 && (parameters[0].Length == 0 || parameters[0] == "void")) parameters.Clear();
+                return (parameters, text.Substring(i + 1));
             }
             else if (depth == 1 && c == '<')
             {
@@ -210,11 +240,49 @@ public static class DefinitionCandidates
             }
             else if (depth == 1 && angle == 0 && c == ',')
             {
-                commas++;
+                parameters.Add(text.Substring(start, i - start).Trim());
+                start = i + 1;
             }
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// 매개변수의 형식입니다. 기본값(맨 바깥 <c>=</c> 뒤)과 끝의 매개변수 이름을 빼고, 이름 사이 공백만 남깁니다. 끝 이름은 앞에 다른 낱말이 있고
+    /// 기본 형식 키워드가 아니며 <c>::</c> 뒤가 아닐 때만 이름으로 봅니다(<c>unsigned int</c>, <c>UE::FName</c>).
+    /// </summary>
+    private static string TypeOf(string parameter)
+    {
+        var depth = 0;
+        for (var i = 0; i < parameter.Length; i++)
+        {
+            var c = parameter[i];
+            if (c is '(' or '[' or '{' or '<') depth++;
+            else if (c is ')' or ']' or '}' or '>') depth--;
+            else if (c == '=' && depth == 0)
+            {
+                parameter = parameter.Substring(0, i);
+                break;
+            }
+        }
+
+        var tokens = Token.Matches(parameter).Cast<Match>().Select(m => m.Value).ToList();
+        var last = tokens.Count - 1;
+        if (tokens.Count >= 2 && IsWordChar(tokens[last][0]) && !char.IsDigit(tokens[last][0]) && !TypeKeywords.Contains(tokens[last]) && tokens[last - 1] != "::")
+        {
+            tokens.RemoveAt(last);
+        }
+
+        var type = new System.Text.StringBuilder();
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            var previous = i > 0 ? tokens[i - 1] : string.Empty;
+            if (previous.Length > 0 && IsWordChar(previous[previous.Length - 1]) && IsWordChar(tokens[i][0])) type.Append(' ');
+            type.Append(tokens[i]);
+        }
+
+        return type.ToString();
     }
 
     private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';

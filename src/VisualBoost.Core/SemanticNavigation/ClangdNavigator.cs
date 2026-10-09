@@ -191,6 +191,8 @@ public sealed class ClangdNavigator : IDisposable
     private readonly HashSet<string> attemptedCandidates = new(StringComparer.OrdinalIgnoreCase);
     // 근사 명령으로 연 소스의 기억입니다(Unreal만). 다음 clangd가 그 색인 파일을 읽게 합니다.
     private readonly DefinitionSourceStore? definitionSources;
+    // 이전 clangd가 근사 명령으로 색인해 색인 파일이 남았을 수 있는 소스입니다(definitionSources 기록). 처음 쓸 때 한 번 읽고 바꾸지 않습니다.
+    private readonly Lazy<HashSet<string>>? rememberedSources;
     // 이 clangd에서 색인 대기열 앞으로 올린 표시, 자신을 올리고 아직 색인을 기다리는 연 문서, 그 문서들이 색인된 뒤 올릴 관련 TU 표시입니다.
     // clangd가 올린 표시를 기억하므로 한 번씩만 보냅니다. raisedTags 잠금으로 함께 보호합니다.
     private readonly HashSet<string> raisedTags = new(StringComparer.Ordinal);
@@ -241,7 +243,10 @@ public sealed class ClangdNavigator : IDisposable
         this.session = session;
         shards = new ClangdIndexShards(Path.Combine(context.Directory, ".cache", "clangd", "index"));
         definitionSources = context.Kind == CompileContextKind.Unreal ? new DefinitionSourceStore(context.Directory) : null;
-        documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
+        rememberedSources = definitionSources is { } store
+            ? new Lazy<HashSet<string>>(() => new HashSet<string>(store.Load(), StringComparer.OrdinalIgnoreCase))
+            : null;
+        documents =new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () =>
         {
             if (Progress.Completed && Interlocked.Exchange(ref logFormatChecking, 1) == 0) _ = Task.Run(CheckLogFormatAsync);
@@ -416,7 +421,6 @@ public sealed class ClangdNavigator : IDisposable
             throw;
         }
 
-        if (navigator.definitionSources is not null) Observe(Task.Run(navigator.RestoreDefinitionSources));
         return navigator;
     }
 
@@ -451,8 +455,8 @@ public sealed class ClangdNavigator : IDisposable
                     }
                     else if (await ResolveDefinitionFileAsync(query, symbol, locations[0].Path, progress, cancellationToken).ConfigureAwait(false) is { } confirmed)
                     {
-                        locations = confirmed;
-                        resolved = true;
+                        locations = confirmed.Locations;
+                        resolved = confirmed.Analyzed;
                     }
                 }
             }
@@ -493,7 +497,7 @@ public sealed class ClangdNavigator : IDisposable
         // 확정 뒤 요청 문서에 정의를 다시 물으므로, 후보 파일을 여는 동안 요청 문서가 열린 문서 상한으로 닫히지 않게 붙잡아 둡니다
         // (2026-10-09 정확도 시험: 닫힌 문서에 요청해 참조 탐색 전체가 실패).
         documents.Acquire(query.Document);
-        IReadOnlyList<NavigationLocation>? found;
+        (IReadOnlyList<NavigationLocation> Locations, bool Analyzed)? found;
         try
         {
             found = await ResolveDefinitionFileAsync(query, symbol, definitions[0].Path, progress, cancellationToken).ConfigureAwait(false);
@@ -509,8 +513,8 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         var (again, _) = await ReferencesCoreAsync(query, progress, cancellationToken).ConfigureAwait(false);
-        return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles, again.Limited, again.UncheckedDefinitionFiles,
-            found.Any(l => IsEngine(l.Path)));
+        return new NavigationResult(again.Locations, again.Symbol, again.Progress, found.Value.Analyzed, again.SymbolKind, again.Roles, again.Limited,
+            again.UncheckedDefinitionFiles, found.Value.Locations.Any(l => IsEngine(l.Path)));
     }
 
     private async Task<(NavigationResult Result, IReadOnlyList<NavigationLocation>? Definitions)> ReferencesCoreAsync(NavigationQuery query,
@@ -1338,44 +1342,33 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
+    /// <summary>저장된 색인을 읽힌 뒤 정의가 색인에 나타나는지 다시 묻는 간격과 상한입니다(<see cref="DefinitionFromStoredIndexAsync"/>).</summary>
+    private static readonly TimeSpan StoredIndexPollInterval = TimeSpan.FromMilliseconds(200);
+    private static readonly TimeSpan StoredIndexTimeout = TimeSpan.FromSeconds(5);
+
     /// <summary>
-    /// 이전 clangd가 근사 명령으로 색인한 소스(<see cref="DefinitionSourceStore"/>)에 같은 명령을 다시 줘 저장된 색인을 읽게 합니다. clangd는
-    /// 명령을 받은 파일의 색인 파일을 읽고, 내용이 바뀌었을 때만 다시 색인합니다. 시작 뒤 작업 스레드에서 부릅니다.
+    /// 이전 clangd가 근사 명령으로 색인한 소스(<see cref="DefinitionSourceStore"/>)에 같은 명령을 다시 줘 저장된 색인을 읽게 하고, 요청 위치의
+    /// 정의가 소스 파일로 나올 때까지 기다립니다. clangd는 명령을 받은 파일의 색인 파일을 읽고 내용이 바뀌었을 때만 다시 색인하므로 문서로 열어
+    /// 분석(대형 엔진 TU 2~17초)하지 않습니다. 상한 안에 나오지 않으면 null입니다.
     /// </summary>
     /// <remarks>
-    /// 원본보다 새 색인 파일이 있는 파일만 보냅니다. 색인 형식 변경으로 색인을 지웠거나 엔진을 업데이트한 뒤에 모두 보내면 기억한 엔진 cpp(최대
-    /// 256개)가 프로젝트 첫 색인과 같은 대기열에 섞여 색인 완료가 크게 늦어집니다(2026-10-09 검토 59). 빠진 파일은 그 정의를 찾을 때 요청 시점에
-    /// 다시 분석하고 기억합니다.
+    /// 예전에는 시작할 때 기억한 파일 모두에 명령을 다시 줬는데, clangd가 파일마다 그 TU의 색인 파일 묶음을 따로 읽어 실제 Unreal 프로젝트에서 기억한
+    /// 23~30개에 12~32초 동안 색인 진행이 표시되고 1 GB 넘게 더 썼습니다(2026-10-09 측정). 정의 이동은 이름 인덱스로 바로 찾으므로
+    /// (<see cref="IndexedDefinition"/>) 그 정의 파일이 실제로 필요할 때만 읽습니다.
     /// </remarks>
-    private void RestoreDefinitionSources()
+    private async Task<IReadOnlyList<NavigationLocation>?> DefinitionFromStoredIndexAsync(NavigationQuery query, CompileCommand command,
+        CancellationToken cancellationToken)
     {
-        var commands = new List<CompileCommand>();
-        foreach (var file in definitionSources!.Load())
+        session.UpdateCompileCommands(new[] { command });
+        var waited = Stopwatch.StartNew();
+        while (waited.Elapsed < StoredIndexTimeout)
         {
-            if (lifetime.IsCancellationRequested) return;
-            if (!shards.HasCurrentShard(Context.Paths.ToReal(file))) continue;
-            try
-            {
-                if (ApproximateCommand(file) is { } command) commands.Add(command);
-            }
-            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
-            {
-                // 재정의 헤더를 쓰지 못한 파일은 이번 시작에서 건너뛰고, 그 정의를 찾을 때 요청 시점에 다시 엽니다.
-            }
+            await Task.Delay(StoredIndexPollInterval, cancellationToken).ConfigureAwait(false);
+            var found = await session.DefinitionAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
+            if (found.Any(l => !DefinitionCandidates.IsHeader(l.Path))) return found;
         }
 
-        if (commands.Count == 0 || HasExited) return;
-        try
-        {
-            session.UpdateCompileCommands(commands);
-        }
-        catch (LspConnectionClosedException)
-        {
-            // 종료는 Changed로 알려집니다.
-        }
-        catch (ObjectDisposedException)
-        {
-        }
+        return null;
     }
 
     /// <summary>
@@ -2043,10 +2036,11 @@ public sealed class ClangdNavigator : IDisposable
 
     /// <summary>
     /// 정의가 있을 만한 cpp(이름 인덱스의 같은 소속 함수 → 헤더와 같은 이름 cpp, 최대 <see cref="ClangdNavigatorOptions.MaxDefinitionCandidates"/>개)를
-    /// 차례로 clangd에 열어 정의를 확정합니다. 결과는 clangd가 다시 돌려준 위치만 쓰고 이름으로 추측한 위치는 쓰지 않습니다.
+    /// 차례로 clangd에 열어 정의를 확정합니다. 결과는 clangd가 다시 돌려준 위치만 씁니다. 이전 clangd가 색인한 후보는 열지 않고 저장된 색인을
+    /// 먼저 읽힙니다(<see cref="DefinitionFromStoredIndexAsync"/>). <c>Analyzed</c>는 후보를 문서로 열어 분석했는지입니다.
     /// </summary>
-    private async Task<IReadOnlyList<NavigationLocation>?> ResolveDefinitionFileAsync(NavigationQuery query, SemanticSymbol symbol, string header,
-        IProgress<string>? progress, CancellationToken cancellationToken)
+    private async Task<(IReadOnlyList<NavigationLocation> Locations, bool Analyzed)?> ResolveDefinitionFileAsync(NavigationQuery query, SemanticSymbol symbol,
+        string header, IProgress<string>? progress, CancellationToken cancellationToken)
     {
         var symbols = options.FindSymbols?.Invoke(symbol.Name) ?? Array.Empty<SourceSymbolLocation>();
         // 이름 인덱스는 Solution을 연 직후 비어 있을 수 있으므로 소속 모듈 폴더의 같은 이름 cpp를 함께 봅니다.
@@ -2081,7 +2075,20 @@ public sealed class ClangdNavigator : IDisposable
             }
 
             progress?.Report($"{(engine ? "엔진 정의" : "정의 파일")} 확인 중({i + 1}/{candidates.Length}): {Path.GetFileName(candidate)}");
-            if (command is not null) session.UpdateCompileCommands(new[] { command });
+            var sent = false;
+            if (command is not null && rememberedSources?.Value.Contains(candidate) == true && shards.HasCurrentShard(Context.Paths.ToReal(candidate)))
+            {
+                if (await DefinitionFromStoredIndexAsync(query, command, cancellationToken).ConfigureAwait(false) is { } stored)
+                {
+                    definitionSources?.Record(candidate);
+                    return (stored, false);
+                }
+
+                // 색인 파일이 다른 폴더의 같은 이름 파일 것이었거나 읽기가 늦었습니다. 이미 준 명령으로 문서를 열어 확정합니다.
+                sent = true;
+            }
+
+            if (command is not null && !sent) session.UpdateCompileCommands(new[] { command });
             var version = documents.Acquire(new DocumentText(candidate, text));
             try
             {
@@ -2098,7 +2105,7 @@ public sealed class ClangdNavigator : IDisposable
             if (again.Count > 0 && again.Any(l => !DefinitionCandidates.IsHeader(l.Path)))
             {
                 if (command is not null) definitionSources?.Record(candidate);
-                return again;
+                return (again, true);
             }
         }
 

@@ -12,14 +12,14 @@ namespace VisualBoost.Core.SemanticNavigation;
 /// <remarks>
 /// clangd는 시작할 때 database의 TU와 그 include만 저장된 색인에서 읽습니다. 덮어쓰기 명령으로 색인한 파일은 색인 파일이 남아도 다음
 /// clangd(새 세션, 메모리 정리 재시작)가 읽지 않아, 엔진 함수 정의를 찾을 때마다 그 cpp를 다시 분석했습니다(파일 하나 약 10초). 기억한
-/// 파일은 clangd를 시작할 때 근사 명령을 다시 줘서 저장된 색인을 읽게 합니다. clangd는 내용이 같으면 다시 색인하지 않습니다.
+/// 파일은 그 정의 파일이 다시 필요할 때 근사 명령을 다시 줘서 저장된 색인을 읽게 합니다. clangd는 내용이 같으면 다시 색인하지 않습니다.
 /// 최근에 쓴 순서로 <see cref="Capacity"/>개까지 둡니다.
 /// </remarks>
 public sealed class DefinitionSourceStore
 {
     public const string FileName = "definition-sources.json";
 
-    /// <summary>기억할 파일 수 상한입니다. 시작할 때마다 이만큼의 명령을 보내고 색인 파일을 읽습니다.</summary>
+    /// <summary>기억할 파일 수 상한입니다. 기록 파일 크기와 처음 읽는 시간을 묶어 둡니다.</summary>
     public const int Capacity = 256;
 
     // 같은 캐시 폴더를 여러 탐색기(재시작 전후)가 함께 쓸 수 있어 폴더마다 잠급니다.
