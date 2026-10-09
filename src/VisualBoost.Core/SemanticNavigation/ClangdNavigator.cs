@@ -83,6 +83,12 @@ public sealed class ClangdNavigatorOptions
     /// (<see cref="IndexedUnitScanner"/>), 끄면 색인 파일만으로 판단합니다(테스트·측정에서 색인 파일 신호만 확인할 때).
     /// </summary>
     public bool IndexLogSignals { get; set; } = true;
+
+    /// <summary>
+    /// 아직 분석하지 않은 문서의 정의 이동을 색인 파일 참조 기록으로 먼저 찾습니다(<see cref="IndexedDefinitions"/>). 정하지 못하면 지금처럼
+    /// clangd로 문서를 분석해 찾습니다. 끄면 늘 clangd를 기다립니다(문서 분석 경로를 확인하는 테스트·측정).
+    /// </summary>
+    public bool DefinitionFromIndexFiles { get; set; } = true;
 }
 
 /// <summary>요청 위치와 그때의 편집기 내용입니다. 좌표는 0기반 줄과 UTF-16 문자 위치입니다.</summary>
@@ -237,6 +243,7 @@ public sealed class ClangdNavigator : IDisposable
     private bool symbolsWaitExpired;
     private int pchUnitIndexed;
     private int indexedUnits;
+    private int indexFileDefinitions;
     // TU 색인 완료를 색인 파일이나 로그 줄로 하나라도 알았는지(색인 시작 문서 포함), 신호 확인을 시작했는지, 두 신호를 모두 읽지 못한다고
     // 판단했는지입니다.
     private int indexedSignalSeen;
@@ -370,6 +377,9 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     public int IndexedUnits => Volatile.Read(ref indexedUnits);
 
+    /// <summary>문서 분석 없이 색인 파일 참조 기록으로 답한 정의 이동 수입니다(<see cref="ClangdNavigatorOptions.DefinitionFromIndexFiles"/>).</summary>
+    public int IndexFileDefinitions => Volatile.Read(ref indexFileDefinitions);
+
     /// <summary>이 clangd가 공유 PCH 합성 TU를 색인했습니다. 다시 읽기 재시작이 되풀이되는지 판단할 때 씁니다.</summary>
     public bool PchUnitsIndexed => Volatile.Read(ref pchUnitIndexed) != 0;
 
@@ -463,6 +473,12 @@ public sealed class ClangdNavigator : IDisposable
     public async Task<NavigationResult> DefinitionAsync(NavigationQuery query, IProgress<string>? progress, CancellationToken cancellationToken)
     {
         using var tracked = TrackRequest();
+        if (DefinitionFromIndexFiles(query) is { } fromIndex)
+        {
+            Interlocked.Increment(ref indexFileDefinitions);
+            return new NavigationResult(fromIndex, null, Progress, false);
+        }
+
         SyncOpenDocuments(query);
         var opened = documents.Acquire(query.Document);
         try
@@ -2181,21 +2197,85 @@ public sealed class ClangdNavigator : IDisposable
     /// clangd가 오버로드를 정하지 못한 위치(후보 여럿)와 이름 인덱스가 아직 분석 중일 때(정의 하나가 실제로 유일하지 않을 수 있음)는 쓰지
     /// 않습니다. 정의 이동에만 쓰고, 참조 탐색은 정의 파일의 참조까지 색인에 넣어야 하므로 지금처럼 clangd로 확정합니다.
     /// </remarks>
-    private IReadOnlyList<NavigationLocation>? IndexedDefinition(SemanticSymbol symbol, NavigationLocation declaration)
+    private IReadOnlyList<NavigationLocation>? IndexedDefinition(SemanticSymbol symbol, NavigationLocation declaration) =>
+        symbol.OverloadIds.Count > 1 ? null : IndexedDefinition(symbol.Name, symbol.ContainerName, declaration);
+
+    private IReadOnlyList<NavigationLocation>? IndexedDefinition(string name, string container, NavigationLocation declaration)
     {
-        if (options.FindSymbols is not { } find || symbol.Name.Length == 0 || symbol.OverloadIds.Count > 1 ||
-            options.SymbolsReady is { } ready && !ready())
+        if (options.FindSymbols is not { } find || name.Length == 0 || options.SymbolsReady is { } ready && !ready())
         {
             return null;
         }
 
         var text = SourceLinePreview.ReadText(declaration.Path);
-        var found = DefinitionCandidates.UniqueDefinition(symbol.Name, symbol.ContainerName, declaration.Path, find(symbol.Name),
+        var found = DefinitionCandidates.UniqueDefinition(name, container, declaration.Path, find(name),
             text is null ? null : TextFrom(text, declaration.Line, declaration.Character), SourceLinePreview.ReadText);
         if (found is null || IsEngine(found.Path) && Context.Kind != CompileContextKind.Unreal) return null;
         var line = found.Line - 1;
         var column = found.Column - 1;
-        return new[] { new NavigationLocation(found.Path, line, column, line, column + symbol.Name.Length) };
+        return new[] { new NavigationLocation(found.Path, line, column, line, column + name.Length) };
+    }
+
+    /// <summary>색인 파일에서 정의 기록을 찾아볼 파일 수 상한입니다. 흔한 이름에서 색인 파일을 너무 많이 읽지 않게 합니다.</summary>
+    private const int MaxIndexFileCandidates = 48;
+
+    /// <summary>
+    /// 아직 분석하지 않은 문서의 정의를 색인 파일 참조 기록으로 찾습니다(<see cref="IndexedDefinitions"/>). 정하지 못하면 null을 돌려 clangd로
+    /// 문서를 분석해 찾게 합니다.
+    /// </summary>
+    /// <remarks>
+    /// 이미 분석한 문서는 clangd가 바로 답하고 저장하지 않은 편집도 반영하므로 쓰지 않습니다. 디스크와 내용이 다른 문서(저장하지 않은 편집),
+    /// 색인 뒤 바뀐 파일(색인 파일이 원본보다 오래됨), 분석 오류가 있던 색인(참조가 덜 기록되었거나 오류 복구로 다른 심볼에 묶였을 수 있음)도
+    /// 쓰지 않습니다. 정의 기록이 없고 헤더의 함수 선언 하나만 있으면(엔진 cpp처럼 색인하지 않는 정의) clangd 경로와 같이 이름 인덱스의 유일한
+    /// 정의를 찾고(<see cref="IndexedDefinition(string, string, NavigationLocation)"/>), 그것도 없으면 clangd로 넘깁니다.
+    /// </remarks>
+    private IReadOnlyList<NavigationLocation>? DefinitionFromIndexFiles(NavigationQuery query)
+    {
+        if (!options.DefinitionFromIndexFiles) return null;
+        if (documents.AcquireIfOpen(query.Path, out var version, touch: false) is not null)
+        {
+            var analyzed = session.HasDiagnostics(query.Path, version);
+            documents.Release(query.Path, touch: false);
+            if (analyzed) return null;
+        }
+
+        return IndexFileDefinition(query);
+    }
+
+    /// <summary>
+    /// 색인 파일 참조 기록만으로 정의를 찾습니다(<see cref="DefinitionFromIndexFiles(NavigationQuery)"/>의 조회 부분). 문서를 이미 분석했는지와
+    /// 옵션은 보지 않으므로 같은 위치의 clangd 결과와 대조하는 시험·측정에 씁니다. 정하지 못하면 null입니다.
+    /// </summary>
+    public IReadOnlyList<NavigationLocation>? IndexFileDefinition(NavigationQuery query)
+    {
+        var text = query.Document.Text;
+        if (!string.Equals(SourceLinePreview.ReadText(query.Path), text, StringComparison.Ordinal)) return null;
+        var name = IndexedDefinitions.IdentifierAt(SourceLinePreview.LineAt(text, query.Line), query.Character);
+        if (name is null || shards.CurrentFile(Context.Paths.ToReal(query.Path)) is not { HadErrors: false } own) return null;
+        var id = IndexedDefinitions.SymbolAt(own.References, query.Line, query.Character, name);
+        if (id is null) return null;
+
+        var named = options.FindSymbols?.Invoke(name) ?? Array.Empty<SourceSymbolLocation>();
+        // include 관계는 색인 파일의 파일 목록에서 읽습니다(문서와 직접 include한 헤더의 색인 파일만, 두 단계까지).
+        var direct = own.Includes.Select(Context.Paths.ToGiven).ToArray();
+        var near = direct.SelectMany(h => shards.CurrentFile(Context.Paths.ToReal(h))?.Includes ?? Array.Empty<string>()).Select(Context.Paths.ToGiven).ToArray();
+        var files = IndexedDefinitions.CandidateFiles(query.Path, named, IndexedDefinitions.QualifierAt(SourceLinePreview.LineAt(text, query.Line), query.Character),
+            direct, near, IsEngine, MaxIndexFileCandidates);
+        var (definition, declared) = IndexedDefinitions.Resolve(id, files.Select(file =>
+            string.Equals(file, query.Path, StringComparison.OrdinalIgnoreCase)
+                ? own.References
+                : shards.CurrentFile(Context.Paths.ToReal(file))?.References ?? Array.Empty<IndexedReference>()));
+        if (definition is { } found) return new[] { LocationOf(found) };
+        if (declared is null) return null;
+
+        var declaration = LocationOf(declared.Value);
+        if (!MayNeedDefinitionFile(new[] { declaration })) return null;
+        var container = named.FirstOrDefault(s => s.Line - 1 == declaration.Line &&
+                                                   string.Equals(s.Path, declaration.Path, StringComparison.OrdinalIgnoreCase))?.Scope;
+        return container is null ? null : IndexedDefinition(name, container, declaration);
+
+        NavigationLocation LocationOf(IndexedReference reference) => new(Context.Paths.ToGiven(reference.Path), reference.Line, reference.Character,
+            reference.EndLine, reference.EndCharacter);
     }
 
     /// <summary>줄·열부터의 글입니다(선언의 매개변수 목록을 읽을 만큼, 최대 40줄).</summary>

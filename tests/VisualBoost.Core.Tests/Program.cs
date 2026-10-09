@@ -46,6 +46,8 @@ internal static class Program
         Run("Ninja 빌드 파일 명령·폴더 작업 영역", SemanticNavigationTests.RunNinjaCommands);
         Run("편집기 밖 소스 변경 감시", SemanticNavigationTests.RunSourceChangeMonitor);
         Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진·프로젝트 정의·저장·외부 변경 반영)", SemanticNavigationTests.RunNavigatorIntegration);
+        Run("색인 파일 참조로 정의 정하기(커서 심볼·정의 기록·분석 오류 표시)", SemanticNavigationTests.RunIndexedDefinitions);
+        Run("색인 파일 정의 통합(문서 분석 없이 프로젝트·엔진 정의)", SemanticNavigationTests.RunIndexFileDefinitionIntegration);
         Run("가상 함수 참조 통합(찾은 함수만)", SemanticNavigationTests.RunVirtualReferencesIntegration);
         Run("Unreal 정의 헤더 매크로 판정", SemanticNavigationTests.RunGeneratedDefinitionMacros);
         Run("참조 보조 판정(USR 타입 종류·다른 클래스 가상 선언)", SemanticNavigationTests.RunReferenceFallbackRules);
@@ -805,6 +807,9 @@ internal static class Program
 
     private static void Run(string name, Action test)
     {
+        // 개발 중 일부만 돌릴 때 이름에 이 글이 들어간 시험만 실행합니다. 완료 전 확인은 필터 없이 전체를 돌립니다.
+        var filter = Environment.GetEnvironmentVariable("VISUALBOOST_TEST_FILTER");
+        if (!string.IsNullOrEmpty(filter) && name.IndexOf(filter, StringComparison.Ordinal) < 0) return;
         try
         {
             test();

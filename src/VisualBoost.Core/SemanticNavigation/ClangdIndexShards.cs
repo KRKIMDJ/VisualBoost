@@ -56,6 +56,26 @@ public readonly struct IndexedTranslationUnit
     public bool HadErrors { get; }
 }
 
+/// <summary>색인 파일에서 읽은 파일 하나의 참조와 분석 오류 표시입니다(<see cref="ClangdIndexShards.CurrentFile"/>).</summary>
+public sealed class IndexedFile
+{
+    public IndexedFile(IReadOnlyList<IndexedReference> references, bool? hadErrors, IReadOnlyList<string>? includes = null)
+    {
+        References = references;
+        HadErrors = hadErrors;
+        Includes = includes ?? Array.Empty<string>();
+    }
+
+    /// <summary>그 파일 안에 있는 참조입니다.</summary>
+    public IReadOnlyList<IndexedReference> References { get; }
+
+    /// <summary>그 파일을 색인할 때 컴파일할 수 없는 오류가 있었는지입니다. 파일 목록에서 그 파일을 찾지 못했으면 null입니다.</summary>
+    public bool? HadErrors { get; }
+
+    /// <summary>그 파일이 직접 include한 파일의 실제 경로입니다(색인 파일 파일 목록 기록, 없으면 빈 목록).</summary>
+    public IReadOnlyList<string> Includes { get; }
+}
+
 /// <summary>
 /// clangd background index가 파일마다 쓰는 색인 파일(<c>.cache/clangd/index/이름.해시.idx</c>)에서 참조만 읽습니다. 스레드 안전합니다.
 /// </summary>
@@ -73,7 +93,7 @@ public sealed class ClangdIndexShards
     private const int MaxCachedShards = 256;
     private readonly object gate = new();
     private readonly string directory;
-    private readonly Dictionary<string, (DateTime Written, IReadOnlyList<IndexedReference>? References)> cache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, ShardContent> cache = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, List<string>>? shardsByName;
     private DateTime listedUtc;
 
@@ -96,7 +116,7 @@ public sealed class ClangdIndexShards
         {
             var written = SafeWriteTime(shard);
             if (written < sourceWritten) continue;
-            var references = Read(shard, written);
+            var references = Read(shard, written)?.References;
             if (references is null) continue;
             foreach (var reference in references)
             {
@@ -107,6 +127,41 @@ public sealed class ClangdIndexShards
         }
 
         return found;
+    }
+
+    /// <summary>
+    /// 그 파일의 색인 파일에 있는 참조(없으면 빈 목록)와, 그 파일을 색인할 때 분석 오류가 있었는지입니다. 원본보다 늦게 쓴 색인 파일을
+    /// 형식대로 읽지 못했으면 null이고, 파일 목록에서 그 파일의 분석 오류 표시를 찾지 못했으면 <c>HadErrors</c>가 null입니다.
+    /// </summary>
+    /// <param name="path">clangd가 쓰는 실제 경로입니다.</param>
+    public IndexedFile? CurrentFile(string path)
+    {
+        var sourceWritten = SafeWriteTime(path);
+        if (sourceWritten == DateTime.MinValue) return null;
+        var full = Normalize(path);
+        List<IndexedReference>? found = null;
+        bool? hadErrors = null;
+        var includes = new List<string>();
+        foreach (var shard in ShardsNamed(Path.GetFileName(path)))
+        {
+            var written = SafeWriteTime(shard);
+            if (written < sourceWritten) continue;
+            if (Read(shard, written) is not { References: { } references } content) continue;
+            found ??= new List<IndexedReference>();
+            foreach (var reference in references)
+            {
+                if (string.Equals(Normalize(reference.Path), full, StringComparison.OrdinalIgnoreCase)) found.Add(reference);
+            }
+
+            foreach (var node in content.Nodes ?? Array.Empty<SourceNode>())
+            {
+                if (!string.Equals(Normalize(node.Path), full, StringComparison.OrdinalIgnoreCase)) continue;
+                hadErrors = (hadErrors ?? false) || (node.Flags & HadErrorsFlag) != 0;
+                includes.AddRange(node.Includes);
+            }
+        }
+
+        return found is null ? null : new IndexedFile(found, hadErrors, includes);
     }
 
     /// <summary>
@@ -158,22 +213,44 @@ public sealed class ClangdIndexShards
         return map;
     }
 
-    private IReadOnlyList<IndexedReference>? Read(string shard, DateTime written)
+    private ShardContent? Read(string shard, DateTime written)
     {
         lock (gate)
         {
-            if (cache.TryGetValue(shard, out var cached) && cached.Written == written) return cached.References;
+            if (cache.TryGetValue(shard, out var cached) && cached.Written == written) return cached;
         }
 
-        IReadOnlyList<IndexedReference>? references;
+        ShardContent content;
         try
         {
-            references = Parse(ReadShared(shard));
+            var data = ReadShared(shard);
+            IReadOnlyList<IndexedReference>? references;
+            try
+            {
+                references = Parse(data);
+            }
+            catch (InvalidDataException)
+            {
+                // 깨진 내용은 clangd가 다시 쓸 때(수정 시각이 바뀜)까지 같은 결과이므로 담아 둡니다.
+                references = null;
+            }
+
+            IReadOnlyList<SourceNode>? nodes;
+            try
+            {
+                nodes = SourceNodes(data);
+            }
+            catch (InvalidDataException)
+            {
+                nodes = null;
+            }
+
+            content = new ShardContent(written, references, nodes);
         }
         catch (InvalidDataException)
         {
-            // 깨진 내용은 clangd가 다시 쓸 때(수정 시각이 바뀜)까지 같은 결과이므로 담아 둡니다.
-            references = null;
+            // 너무 크거나 읽는 중에 줄어든 파일입니다.
+            content = new ShardContent(written, null, null);
         }
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
         {
@@ -184,10 +261,10 @@ public sealed class ClangdIndexShards
         lock (gate)
         {
             if (cache.Count >= MaxCachedShards) cache.Clear();
-            cache[shard] = (written, references);
+            cache[shard] = content;
         }
 
-        return references;
+        return content;
     }
 
     /// <summary>clangd가 같은 파일을 다시 쓰거나 지우는 중에도 열 수 있게 공유 모드를 넓혀 읽습니다.</summary>
@@ -268,6 +345,25 @@ public sealed class ClangdIndexShards
     /// <param name="sourceFileName">색인 파일 이름 앞부분(<c>이름.해시.idx</c>의 이름)입니다.</param>
     public static IndexedTranslationUnit? TranslationUnitOf(byte[] data, string sourceFileName)
     {
+        IndexedTranslationUnit? found = null;
+        foreach (var node in SourceNodes(data))
+        {
+            if ((node.Flags & IsTranslationUnitFlag) == 0) continue;
+            if (string.Equals(Path.GetFileName(node.Path), sourceFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                found = new IndexedTranslationUnit(node.Path, (node.Flags & HadErrorsFlag) != 0);
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// 색인 파일의 파일 목록(<c>srcs</c>) 전체입니다. 형식 버전 번호는 보지 않고 구조대로 끝까지 읽으며(<see cref="TranslationUnitOf"/> 참고),
+    /// 맞지 않으면 <see cref="InvalidDataException"/>입니다.
+    /// </summary>
+    private static IReadOnlyList<SourceNode> SourceNodes(byte[] data)
+    {
         var chunks = Chunks(data);
         if (!chunks.TryGetValue("stri", out var stri)) throw new InvalidDataException("문자열 표가 없습니다.");
         if (!chunks.TryGetValue("srcs", out var srcs)) throw new InvalidDataException("파일 목록이 없습니다.");
@@ -280,23 +376,24 @@ public sealed class ClangdIndexShards
             return uri;
         }
 
-        IndexedTranslationUnit? found = null;
+        var nodes = new List<SourceNode>();
         var reader = new Reader(data, srcs.Offset, srcs.Offset + srcs.Length);
         while (!reader.AtEnd)
         {
             var flags = reader.Byte();
             var uri = Uri(reader.Var());
             reader.Skip(8);
-            var includes = reader.Var();
-            for (var i = 0; i < includes; i++) Uri(reader.Var());
-            if ((flags & IsTranslationUnitFlag) == 0 || DocumentUri.ToPath(uri) is not { } path) continue;
-            if (string.Equals(Path.GetFileName(path), sourceFileName, StringComparison.OrdinalIgnoreCase))
+            var count = reader.Var();
+            var includes = new List<string>();
+            for (var i = 0; i < count; i++)
             {
-                found = new IndexedTranslationUnit(path, (flags & HadErrorsFlag) != 0);
+                if (DocumentUri.ToPath(Uri(reader.Var())) is { } include) includes.Add(include);
             }
+
+            if (DocumentUri.ToPath(uri) is { } path) nodes.Add(new SourceNode(path, flags, includes));
         }
 
-        return found;
+        return nodes;
     }
 
     /// <summary>
@@ -398,6 +495,39 @@ public sealed class ClangdIndexShards
         {
             return DateTime.MinValue;
         }
+    }
+
+    private readonly struct SourceNode
+    {
+        public SourceNode(string path, byte flags, IReadOnlyList<string> includes)
+        {
+            Path = path;
+            Flags = flags;
+            Includes = includes;
+        }
+
+        public string Path { get; }
+
+        public byte Flags { get; }
+
+        public IReadOnlyList<string> Includes { get; }
+    }
+
+    /// <summary>색인 파일 하나에서 읽은 참조(형식 버전이 다르면 null)와 파일 목록(구조가 맞지 않으면 null)입니다.</summary>
+    private sealed class ShardContent
+    {
+        public ShardContent(DateTime written, IReadOnlyList<IndexedReference>? references, IReadOnlyList<SourceNode>? nodes)
+        {
+            Written = written;
+            References = references;
+            Nodes = nodes;
+        }
+
+        public DateTime Written { get; }
+
+        public IReadOnlyList<IndexedReference>? References { get; }
+
+        public IReadOnlyList<SourceNode>? Nodes { get; }
     }
 
     private sealed class Reader

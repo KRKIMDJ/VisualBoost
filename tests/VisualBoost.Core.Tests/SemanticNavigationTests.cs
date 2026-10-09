@@ -453,6 +453,188 @@ internal static class SemanticNavigationTests
         }
     }
 
+    /// <summary>색인 파일 참조로 정의를 정하는 규칙(커서 심볼·정의 기록·후보 파일)과 파일별 분석 오류 표시를 확인합니다.</summary>
+    public static void RunIndexedDefinitions()
+    {
+        var line = "    return ScaleMath::Combine(Seed, 12);";
+        var combine = line.IndexOf("Combine", StringComparison.Ordinal);
+        Check(IndexedDefinitions.IdentifierAt(line, combine) == "Combine" && IndexedDefinitions.IdentifierAt(line, combine + 7) == "Combine" &&
+              IndexedDefinitions.IdentifierAt(line, combine + 3) == "Combine" && IndexedDefinitions.IdentifierAt(line, line.IndexOf("::", StringComparison.Ordinal)) == "ScaleMath" &&
+              IndexedDefinitions.IdentifierAt(line, line.IndexOf("12", StringComparison.Ordinal)) is null && IndexedDefinitions.IdentifierAt(line, 1) is null &&
+              IndexedDefinitions.IdentifierAt(line, line.Length + 1) is null, "커서의 식별자(바로 뒤 포함, 숫자·공백 제외)");
+
+        IndexedReference Ref(string id, byte kind, int at, int length = 7, string path = "Use.cpp", int row = 3) =>
+            new(id, kind, path, row, at, row, at + length);
+        // 종류 비트: 선언 1, 정의 2, 참조 4, 소스에 쓰인 이름 8.
+        var call = Ref("A", 12, combine);
+        Check(IndexedDefinitions.SymbolAt(new[] { call, Ref("B", 4, combine) }, 3, combine + 2, "Combine") == "A",
+            "커서의 소스에 쓰인 참조 심볼(매크로 펼침 자리의 쓰이지 않은 참조 제외)");
+        Check(IndexedDefinitions.SymbolAt(new[] { call, Ref("C", 12, combine) }, 3, combine, "Combine") is null &&
+              IndexedDefinitions.SymbolAt(new[] { Ref("A", 11, combine) }, 3, combine, "Combine") is null &&
+              IndexedDefinitions.SymbolAt(new[] { Ref("A", 12, combine, 5) }, 3, combine, "Combine") is null &&
+              IndexedDefinitions.SymbolAt(new[] { call }, 4, combine, "Combine") is null,
+            "심볼이 겹치거나 정의 자리·이름 길이가 다르거나 다른 줄이면 정하지 않음");
+
+        var (definitions, declarations) = IndexedDefinitions.Occurrences("A", new[]
+        {
+            new[] { call, Ref("A", 11, 4, path: "Impl.cpp", row: 10), Ref("Z", 11, 4, path: "Impl.cpp", row: 20) },
+            new[] { Ref("A", 9, 8, path: "Math.h", row: 5) },
+            new[] { Ref("A", 9, 8, path: "Math.h", row: 5) }
+        });
+        Check(definitions.Count == 1 && definitions[0].Path == "Impl.cpp" && definitions[0].Line == 10 && declarations.Count == 1 && declarations[0].Path == "Math.h",
+            "후보 파일의 정의·선언 기록(같은 위치는 하나)");
+        Check(IndexedDefinitions.Resolve("A", new[] { new[] { Ref("A", 11, 4, path: "Impl.cpp") } }) is { Definition: { Path: "Impl.cpp" }, Declaration: null } &&
+              IndexedDefinitions.Resolve("A", new[] { new[] { Ref("A", 9, 4, path: "Math.h") } }) is { Definition: null, Declaration: { Path: "Math.h" } } &&
+              IndexedDefinitions.Resolve("A", new[] { new[] { Ref("A", 3, 4, path: "Game.h") } }) is { Definition: null, Declaration: null } &&
+              IndexedDefinitions.Resolve("A", new[] { new[] { Ref("A", 11, 4, path: "A.cpp"), Ref("A", 11, 4, path: "B.cpp") } }) is { Definition: null, Declaration: null } &&
+              IndexedDefinitions.Resolve("A", new[] { new[] { Ref("A", 9, 4, path: "A.h"), Ref("A", 9, 4, path: "B.h") } }) is { Definition: null, Declaration: null },
+            "정의 하나 또는 선언 하나만 고름(매크로가 만든 정의·여러 정의·여러 선언은 정하지 않음)");
+        Check(IndexedDefinitions.QualifierAt(line, combine + 2) == "ScaleMath" && IndexedDefinitions.QualifierAt("    Super::BeginPlay();", 12) is null &&
+              IndexedDefinitions.QualifierAt("    Foo->Bar();", 10) is null && IndexedDefinitions.QualifierAt("a = ns :: Get();", 12) == "ns", "커서 이름 앞의 한정자");
+        SourceSymbolLocation At(string path, string scope = "") => new("Combine", path, 1, 1, SourceSymbolKind.Function, scope);
+        bool Engine(string f) => f.StartsWith("Engine", StringComparison.Ordinal);
+        var candidates = IndexedDefinitions.CandidateFiles("Use.cpp",
+            new[] { At("Engine/A.h"), At("Game/B.cpp"), At("use.cpp"), At("Game/B.cpp"), At("Game/Math.cpp", "ScaleMath"), At("Engine/Near.h"), At("Game/Direct.h") },
+            "ScaleMath", new[] { "Game/Direct.h", "Game/Other.h" }, new[] { "Engine/Near.h" }, Engine, 6);
+        Check(candidates.SequenceEqual(new[] { "Use.cpp", "Game/Direct.h", "Engine/Near.h", "Game/Math.cpp", "Game/Other.h", "Game/B.cpp" }),
+            "후보 파일: 문서 → include한 이름 위치(직접·2단계) → 한정자 소속 → 나머지 직접 include → 엔진이 아닌 파일, 중복 제외, 상한: " + string.Join(",", candidates));
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.IndexedDefinitions." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var source = Path.Combine(root, "src", "Use.cpp");
+            Write(source, "int x;\n");
+            var index = Path.Combine(root, "index");
+            Directory.CreateDirectory(index);
+            var uri = DocumentUri.FromPath(source);
+            var references = new[] { (0x0102030405060708UL, (byte)12, 2, 4, 9) };
+            void Shard(byte[] data)
+            {
+                var file = Path.Combine(index, "Use.cpp.0123456789ABCDEF.idx");
+                File.WriteAllBytes(file, data);
+                File.SetLastWriteTimeUtc(file, DateTime.UtcNow.AddSeconds(5));
+            }
+
+            Shard(WithSources(IndexShard(ClangdIndexShards.FormatVersion, uri, false, references), 0));
+            Check(new ClangdIndexShards(index).CurrentFile(source) is { HadErrors: false, References.Count: 1 }, "색인 파일의 참조와 분석 오류 없음 표시");
+            Shard(WithSources(IndexShard(ClangdIndexShards.FormatVersion, uri, false, references), 2));
+            Check(new ClangdIndexShards(index).CurrentFile(source) is { HadErrors: true }, "분석 오류 표시");
+            Shard(IndexShard(ClangdIndexShards.FormatVersion, uri, false, references));
+            Check(new ClangdIndexShards(index).CurrentFile(source) is { HadErrors: null, References.Count: 1 }, "파일 목록이 없으면 분석 오류 표시를 모름");
+            Shard(WithSources(IndexShard(ClangdIndexShards.FormatVersion + 1, uri, false, references), 0));
+            Check(new ClangdIndexShards(index).CurrentFile(source) is null, "참조 형식 버전이 다르면 읽지 않음");
+            Shard(WithSources(IndexShard(ClangdIndexShards.FormatVersion, uri, false, references), 0));
+            File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddMinutes(5));
+            Check(new ClangdIndexShards(index).CurrentFile(source) is null, "원본이 색인 파일보다 새로우면 읽지 않음");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
+    /// <summary>시험 실패 때 그 파일의 색인 파일 상태(참조 수·분석 오류 표시)를 보입니다.</summary>
+    private static string IndexShardSummary(string index, string path)
+    {
+        var file = new ClangdIndexShards(index).CurrentFile(path);
+        var shards = Directory.Exists(index) ? Directory.GetFiles(index, Path.GetFileName(path) + ".*.idx") : Array.Empty<string>();
+        return $"색인 파일 {shards.Length}개 · 참조 {file?.References.Count.ToString() ?? "없음"} · 오류 {file?.HadErrors?.ToString() ?? "모름"} · " +
+               string.Join("|", file?.References.Select(r => $"{r.Line}:{r.Character}-{r.EndCharacter}/{r.Kind}") ?? Array.Empty<string>());
+    }
+
+    /// <summary>참조 표만 담은 색인 파일 뒤에 그 파일(문자열 0번) 노드 하나의 파일 목록(<c>srcs</c>)을 붙입니다.</summary>
+    private static byte[] WithSources(byte[] shard, byte flags)
+    {
+        var srcs = new byte[] { flags, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0 };
+        var data = shard.Concat(Encoding.ASCII.GetBytes("srcs")).Concat(BitConverter.GetBytes((uint)srcs.Length)).Concat(srcs).Concat(new byte[] { 0 }).ToArray();
+        BitConverter.GetBytes((uint)(data.Length - 8)).CopyTo(data, 4);
+        return data;
+    }
+
+    /// <summary>
+    /// 색인을 마친 뒤 아직 분석하지 않은 문서의 정의 이동이 문서를 열지 않고 색인 파일로 답하는지 실제 clangd로 확인합니다: 색인된 프로젝트
+    /// 정의, 엔진 헤더의 인라인 정의, 색인하지 않는 엔진 cpp 정의(선언 기록 → 이름 인덱스), 저장하지 않은 편집·분석한 문서는 clangd.
+    /// </summary>
+    public static void RunIndexFileDefinitionIntegration()
+    {
+        var clangd = FindClangd();
+        if (clangd is null)
+        {
+            Console.WriteLine("SKIP: 색인 파일 정의 통합 시험은 VISUALBOOST_TEST_CLANGD 또는 VS의 C++ Clang 도구가 필요합니다.");
+            return;
+        }
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.IndexFileDefinition." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var engineRoot = Path.Combine(root, "Engine Root");
+            var module = Path.Combine(engineRoot, "Engine", "Source", "Runtime", "Mod");
+            Write(Path.Combine(module, "Mod.Build.cs"), "");
+            var header = Path.Combine(module, "Public", "Mod.h");
+            Write(header, "#pragma once\nstruct MOD_API FMod\n{\n    static int Compute(int Value);\n    static int Twice(int Value) { return Value * 2; }\n};\n");
+            var engineSource = Path.Combine(module, "Private", "Mod.cpp");
+            Write(engineSource, "#include \"Mod.h\"\nint FMod::Compute(int Value)\n{\n    return Value * 2;\n}\n");
+
+            var project = Path.Combine(root, "Game");
+            Write(Path.Combine(project, "Game.uproject"), "{}");
+            var gameSource = Path.Combine(project, "Source", "Game");
+            Write(Path.Combine(gameSource, "Game.Build.cs"), "");
+            var helperHeader = Path.Combine(gameSource, "Helper.h");
+            Write(helperHeader, "#pragma once\nint Helper(int Value);\n");
+            var helper = Path.Combine(gameSource, "Helper.cpp");
+            // 이름 인덱스(CppSourceAnalyzer)가 한 줄 정의를 놓치는 결함과 무관하게 여러 줄로 씁니다.
+            Write(helper, "#include \"Helper.h\"\nint Helper(int Value)\n{\n    return Value + 1;\n}\n");
+            var use = Path.Combine(gameSource, "Use.cpp");
+            var useText = "#include \"Mod.h\"\n#include \"Helper.h\"\nint Use() { return Helper(1) + FMod::Twice(2) + FMod::Compute(3); }\n";
+            Write(use, useText);
+            var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
+            foreach (var file in new[] { use, helper })
+            {
+                Write(Path.Combine(build, Path.GetFileName(file) + ".obj.rsp"),
+                    $"\"{file.Replace('\\', '/')}\"\n/I \"{Path.Combine(module, "Public").Replace('\\', '/')}\"\n/DMOD_API=\n/TP\n/std:c++17\n/c\n");
+            }
+
+            // 제품 이름 인덱스처럼 헤더·cpp의 선언·정의를 담습니다.
+            var symbols = new[] { header, engineSource, helperHeader, helper, use }
+                .SelectMany(f => VisualBoost.Core.Analysis.CppSourceAnalyzer.Analyze(f, File.ReadAllText(f)).Symbols).ToLookup(s => s.Name, StringComparer.Ordinal);
+            var options = new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1,
+                FindSymbols = name => symbols[name].ToArray()
+            };
+            using var navigator = ClangdNavigator.StartAsync(options, CancellationToken.None).Result;
+            Check(SpinUntil(() => navigator.Progress.Completed, 60000), "프로젝트 색인 완료");
+
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var callLine = useText.Split('\n')[2];
+            NavigationResult Definition(string name, string? text = null, long revision = 1) =>
+                navigator.DefinitionAsync(new NavigationQuery(new DocumentText(use, text ?? useText, revision), 2, callLine.IndexOf(name + "(", StringComparison.Ordinal)),
+                    null, timeout.Token).Result;
+            var project1 = Definition("Helper");
+            Check(project1.Locations.Single() is { Line: 1 } helperAt && helperAt.Path == helper && navigator.IndexFileDefinitions == 1 && !navigator.IsOpen(use),
+                "색인된 프로젝트 정의를 문서를 열지 않고 찾음: " + string.Join(",", project1.Locations) + $" · 색인 파일 답 {navigator.IndexFileDefinitions} · " +
+                IndexShardSummary(Path.Combine(navigator.Context.Directory, ".cache", "clangd", "index"), use));
+            var inline = Definition("Twice");
+            Check(inline.Locations.Single() is { Line: 4 } twiceAt && twiceAt.Path == header && navigator.IndexFileDefinitions == 2 && !navigator.IsOpen(use),
+                "엔진 헤더의 인라인 정의: " + string.Join(",", inline.Locations));
+            var engine = Definition("Compute");
+            Check(engine.Locations.Single() is { Line: 1 } computeAt && computeAt.Path == engineSource && navigator.IndexFileDefinitions == 3 && !navigator.IsOpen(use) &&
+                  !navigator.IsOpen(engineSource), "색인하지 않는 엔진 cpp 정의는 선언 기록 → 이름 인덱스: " + string.Join(",", engine.Locations));
+
+            // 저장하지 않은 편집이 있으면 색인 위치를 믿지 않고 clangd로 분석합니다. 분석한 뒤에는 clangd가 바로 답합니다.
+            var edited = Definition("Helper", useText + "\n", 2);
+            Check(edited.Locations.Single().Path == helper && navigator.IndexFileDefinitions == 3 && navigator.IsOpen(use), "저장하지 않은 편집은 clangd로");
+            var analyzed = Definition("Helper");
+            Check(analyzed.Locations.Single().Path == helper && navigator.IndexFileDefinitions == 3, "분석한 문서는 clangd로");
+            Check(File.ReadAllText(use) == useText, "원본 파일 보존");
+            navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+    }
+
     /// <summary>clangd 색인 파일을 파일 목록(<c>srcs</c>)만 담아 만듭니다. 노드마다 플래그, 파일 URI, 직접 include URI입니다(digest는 0).</summary>
     private static byte[] SourcesShard(uint version, params (byte Flags, string Uri, string[] Includes)[] nodes)
     {
