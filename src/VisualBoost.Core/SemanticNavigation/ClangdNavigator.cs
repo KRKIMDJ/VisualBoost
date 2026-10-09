@@ -260,7 +260,7 @@ public sealed class ClangdNavigator : IDisposable
             Observe(Task.Run(() => preload.Value));
         }
 
-        documents =new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
+        documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () =>
         {
             if (Progress.Completed && Interlocked.Exchange(ref logFormatChecking, 1) == 0) _ = Task.Run(CheckLogFormatAsync);
