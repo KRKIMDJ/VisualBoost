@@ -1276,6 +1276,10 @@ internal static class SemanticNavigationTests
                   u5Sup.Command.Arguments.SkipWhile(a => a != "-include").Skip(2).First() == shared &&
                   !supPlan.DocumentCommand(Source("U5.cpp"), pch: true)!.Command.Arguments.Contains(shared),
                 "PCH 없는 문서 명령에 모듈 보충 헤더를 강제 include: " + string.Join(" ", u5Sup.Command.Arguments));
+            var u5Extra = supPlan.DocumentCommand(Source("U5.cpp"), extra: new[] { calc, shared })!;
+            Check(u5Extra.Supplements.SequenceEqual(new[] { shared, calc }) && u5Extra.Command.Arguments.Count(a => a == calc) == 1 &&
+                  supPlan.DocumentCommand(Source("U5.cpp"))!.Supplements.Count == 1,
+                "문서에서 고른 헤더는 모듈 헤더 뒤, 그 문서 명령에만: " + string.Join(",", u5Extra.Supplements));
             var toSup = supPlan.SwitchFailed(new[] { supUnit1 });
             var supWrapper1 = Path.Combine(sup.Directory, "units", "Module.Game.1.sup.cpp").Replace('\\', '/');
             var supText = File.Exists(supWrapper1) ? File.ReadAllText(supWrapper1) : string.Empty;
@@ -1308,15 +1312,29 @@ internal static class SemanticNavigationTests
                   again.SupplementUnitCount == 0 && again.PchUnitCount == 1, "보충 상한 뒤에는 PCH");
             var afterPch = CompileContextBuilder.Prepare(solution, supCache, engine, "clang-cl.exe", supplements: true).Plan!;
             Check(afterPch.PchUnitCount == 1 && afterPch.SupplementUnitCount == 0, "PCH로 바꾼 단위는 보충 기록을 지움");
-            // 배운 헤더가 없는 모듈의 실패는 PCH로 바로 바꾸고, 실패 기록은 다음 보충 단계로 남깁니다.
+            // 배운 헤더가 없는 모듈의 실패는 PCH로 바로 바꿉니다. 전환 전에 끝나 실패만 기록됐어도 다음 세션은 넣을 헤더가 없으므로 PCH로
+            // 시작합니다(같은 내용을 새 경로로 다시 색인하지 않음, 피드백 검토 67).
             var recordSup = CompileContextBuilder.Prepare(solution, Path.Combine(root, "cache-sup-record"), engine, "clang-cl.exe", supplements: true);
             var recordUnit2 = Path.Combine(recordSup.Directory, "units", "Module.Game.2.cpp").Replace('\\', '/');
             recordSup.Plan!.RecordFailure(recordUnit2);
-            Check(CompileContextBuilder.Prepare(solution, Path.Combine(root, "cache-sup-record"), engine, "clang-cl.exe", supplements: true).Plan!.SupplementUnitCount == 1,
-                "실패 기록으로 다음 세션은 보충 단계");
+            var recordNext = CompileContextBuilder.Prepare(solution, Path.Combine(root, "cache-sup-record"), engine, "clang-cl.exe", supplements: true).Plan!;
+            Check(recordNext.SupplementUnitCount == 0 && recordNext.PchUnitCount == 1, "넣을 헤더 없이 실패만 기록된 단위는 다음 세션에 PCH");
             Check(recordSup.Plan.SwitchFailed(new[] { recordUnit2 }).Single().File.EndsWith(".pch.cpp", StringComparison.Ordinal) &&
                   CompileContextBuilder.Prepare(solution, Path.Combine(root, "cache-sup-record"), engine, "clang-cl.exe", supplements: true).Plan!.PchUnitCount == 1,
                 "배운 헤더가 없으면 PCH로 바꾸고 기록도 PCH");
+            // 모듈이 배운 헤더가 있으면 실패 기록으로 다음 세션은 보충 단계로 시작하고, 그 단계가 또 실패해도 더 넣을 헤더가 없으면 PCH로 갑니다.
+            var learnedCache = Path.Combine(root, "cache-sup-learned");
+            var learnedSup = CompileContextBuilder.Prepare(solution, learnedCache, engine, "clang-cl.exe", supplements: true);
+            var learnedUnit2 = Path.Combine(learnedSup.Directory, "units", "Module.Game.2.cpp").Replace('\\', '/');
+            learnedSup.Plan!.Learn(learnedUnit2, new[] { shared });
+            learnedSup.Plan.RecordFailure(learnedUnit2);
+            var learnedNext = CompileContextBuilder.Prepare(solution, learnedCache, engine, "clang-cl.exe", supplements: true).Plan!;
+            var learnedWrapper = Path.Combine(learnedSup.Directory, "units", "Module.Game.2.sup.cpp").Replace('\\', '/');
+            Check(learnedNext.SupplementUnitCount == 1 && File.Exists(learnedWrapper) && File.ReadAllText(learnedWrapper).Contains(shared),
+                "배운 헤더가 있으면 실패 기록으로 다음 세션은 보충 단계");
+            learnedNext.RecordFailure(learnedWrapper);
+            var learnedLast = CompileContextBuilder.Prepare(solution, learnedCache, engine, "clang-cl.exe", supplements: true).Plan!;
+            Check(learnedLast.SupplementUnitCount == 0 && learnedLast.PchUnitCount == 1, "다음 단계에 더 넣을 헤더가 없으면 PCH");
 
             // 파일 하나짜리 PCH 단위의 문서: 보충을 해 보고도 실패한 단위만 처음부터 PCH로, 이전 판의 PCH 판단이나 배운 헤더 없이 바꾼 단위는 보충으로 먼저 엽니다.
             var soloContext = CompileContextBuilder.Prepare(solution, supCache, engine, "clang-cl.exe", supplements: true);
@@ -1554,11 +1572,15 @@ internal static class SemanticNavigationTests
                     ("range", Range(1, 47, 49))),
                 // 번진 오류는 보지 않습니다.
                 JsonValue.Object(("code", "ovl_no_viable_member_function_in_call"), ("severity", 1), ("message", "No matching member function for call to 'Run'"),
-                    ("range", Range(1, 49, 52))));
+                    ("range", Range(1, 49, 52))),
+                // 내용이 진단과 어긋나 위치가 긴 이름의 일부면 이름으로 보지 않습니다.
+                JsonValue.Object(("code", "undeclared_var_use"), ("severity", 1), ("message", "use of undeclared identifier 'Missin'"),
+                    ("range", Range(1, 12, 18))));
             var sites = IncludeSupplements.Sites(diagnostics.Items, doc, DocumentUri.ToPath);
             var texts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase) { [doc] = docText, [header] = headerText };
             var names = IncludeSupplements.Names(sites, p => texts.TryGetValue(p, out var t) ? t : null);
-            Check(names.SequenceEqual(new[] { "EMissing", "EPhysicalSurface", "UBroken" }), "모르는 이름(문서 위치 우선, include한 헤더는 관련 정보, 불완전 타입은 메시지): " + string.Join(",", names));
+            Check(names.SequenceEqual(new[] { "EMissing", "EPhysicalSurface", "UBroken" }),
+                "모르는 이름(문서 위치 우선, include한 헤더는 관련 정보, 불완전 타입은 메시지, 낱말 일부 제외): " + string.Join(",", names));
             Check(IncludeSupplements.TypeNameIn("variable has incomplete type 'TArray<int>'") == "TArray" && IncludeSupplements.TypeNameIn("no quote") is null,
                 "불완전 타입 이름에서 템플릿 인수 제외");
             var output = string.Join("\n",
@@ -1575,10 +1597,17 @@ internal static class SemanticNavigationTests
                 "C:/Game/B.cpp(14,5): warning: 'WITH_WARN' is not defined, evaluates to 0 [-Wundef]",
                 "C:/Game/B.cpp:15:3: error: no template named 'TMissing'",
                 "C:/Game/B.cpp(16,1): error: VisualBoost: condition macro undefined without shared PCH",
-                "605 warnings and 12 errors generated.");
+                "C:/Game/B.cpp(17,3): error: no template named 'TInner' in 'UClass'",
+                "C:/Game/B.cpp(18,3): error: no template named 'TSpaced' in namespace 'UE'",
+                "C:/Game/B.cpp(19,3): error: implicit instantiation of undefined template 'TSubclassOf<UFoo>'",
+                "C:/Game/B.cpp(20,3): error: incomplete definition of type 'FDefined'",
+                "605 warnings and 16 errors generated.");
             var compilerNames = IncludeSupplements.NamesInCompilerOutput(output);
-            Check(compilerNames.SequenceEqual(new[] { "ULocalPlayer", "UStaticMesh", "FTimerHandle", "GMissing", "FSized", "Launch", "WITH_FLAG", "TMissing" }),
-                "컴파일러 출력의 모르는 이름(번진 오류·클래스 멤버·경고 제외): " + string.Join(",", compilerNames));
+            Check(compilerNames.SequenceEqual(new[]
+                {
+                    "ULocalPlayer", "UStaticMesh", "FTimerHandle", "GMissing", "FSized", "Launch", "WITH_FLAG", "TMissing", "TSpaced", "TSubclassOf", "FDefined"
+                }),
+                "컴파일러 출력의 모르는 이름(번진 오류·클래스 멤버·경고 제외, 앞선언 템플릿): " + string.Join(",", compilerNames));
 
             var engine = Path.Combine(root, "Engine", "Source");
             var physics = Path.Combine(engine, "Runtime", "PhysicsCore", "Public", "Chaos", "ChaosEngineInterface.h");

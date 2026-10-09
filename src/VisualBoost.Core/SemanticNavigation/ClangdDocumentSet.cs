@@ -127,6 +127,12 @@ public sealed class ClangdDocumentSet
     /// <summary>이미 열린 문서만 임대하고 clangd에 보낸 내용을 돌려줍니다. 열려 있지 않으면 임대하지 않고 null입니다.</summary>
     public string? AcquireIfOpen(string path) => AcquireIfOpen(path, out _, touch: true);
 
+    /// <summary>열린 문서에 clangd로 마지막에 보낸 내용입니다. 임대하지 않으며 사용 순서도 바꾸지 않습니다. 열려 있지 않으면 null입니다.</summary>
+    public string? SentText(string path)
+    {
+        lock (gate) return entries.TryGetValue(path, out var entry) ? entry.Text : null;
+    }
+
     /// <summary>
     /// 이미 열린 문서만 임대하고 clangd에 보낸 내용과 버전을 돌려줍니다. 열려 있지 않으면 임대하지 않고 null입니다.
     /// </summary>

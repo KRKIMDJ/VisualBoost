@@ -66,11 +66,12 @@ public static class IncludeSupplements
     };
 
     // 타입이 전방 선언만 되어 불완전하다는 진단입니다. 위치는 식이라 메시지의 타입 이름을 씁니다.
+    // 앞선언만 된 클래스 템플릿을 값으로 쓴 오류(implicit instantiation of undefined template)도 같은 방식으로 템플릿 이름을 씁니다.
     private static readonly HashSet<string> IncompleteTypeCodes = new(StringComparer.Ordinal)
     {
         "incomplete_member_access", "typecheck_incomplete_tag", "incomplete_type", "typecheck_decl_incomplete_type", "incomplete_base_class",
         "incomplete_nested_name_spec", "call_incomplete_argument", "call_incomplete_return", "call_function_incomplete_return",
-        "typecheck_nonviable_condition_incomplete"
+        "typecheck_nonviable_condition_incomplete", "template_instantiate_undefined"
     };
 
     private static readonly Regex Identifier = new(@"^[A-Za-z_][A-Za-z0-9_]*$", RegexOptions.CultureInvariant);
@@ -80,14 +81,16 @@ public static class IncludeSupplements
     private static readonly Regex CompilerError = new(@"^.*?(?:\(\d+,\d+\)|:\d+:\d+)\s*:\s*(?:fatal\s+)?error\s*:\s*(.*?)\s*$",
         RegexOptions.CultureInvariant | RegexOptions.Multiline);
 
-    // 메시지의 이름 자리입니다. NameCodes 진단의 clang 메시지 문구이며 clang 여러 판에서 같습니다. 클래스 멤버가 없다는 오류는 헤더 누락이
-    // 아니므로 네임스페이스 멤버만 받습니다.
+    // 메시지의 이름 자리입니다. NameCodes 진단의 clang 메시지 문구이며 clang 여러 판에서 같습니다. 클래스 멤버(템플릿)가 없다는 오류는
+    // 헤더 누락이 아니므로 네임스페이스 멤버만 받습니다(클래스는 " in 'UClass'", 네임스페이스는 " in namespace 'N'").
     private static readonly Regex CompilerName = new(
-        @"^(?:use of undeclared identifier|unknown type name|no template named) '(?<name>[A-Za-z_]\w*)'|" +
+        @"^(?:use of undeclared identifier|unknown type name) '(?<name>[A-Za-z_]\w*)'|^no template named '(?<name>[A-Za-z_]\w*)'(?! in ')|" +
         @"^no member named '(?<name>[A-Za-z_]\w*)' in namespace '|^'(?<name>[A-Za-z_]\w*)' is not defined, evaluates to 0",
         RegexOptions.CultureInvariant);
 
-    private static readonly Regex CompilerIncompleteType = new(@"incomplete (?:\w+ )?type ('[^']+')", RegexOptions.CultureInvariant);
+    // 불완전 타입 문구(IncompleteTypeCodes): "… incomplete type 'X'", "incomplete definition of type 'X'", "instantiation of undefined template 'X<…>'".
+    private static readonly Regex CompilerIncompleteType = new(
+        @"incomplete (?:\w+ )?type ('[^']+')|incomplete definition of type ('[^']+')|instantiation of undefined template ('[^']+')", RegexOptions.CultureInvariant);
 
     /// <summary>
     /// JSON 진단 배열에서 모르는 이름의 위치를 꺼냅니다. 진단 위치가 이 문서의 낱말이 아니면(include 줄에 붙은 다른 파일의 오류) 첫 관련 정보의
@@ -122,9 +125,9 @@ public static class IncludeSupplements
 
     /// <summary>
     /// 위치에서 이름을 읽습니다. 진단 위치가 이름이 아니면(include 줄) 첫 관련 정보 위치를 씁니다. 문서 위치가 이름이면 관련 정보(추천 이름의
-    /// 선언 위치 등)는 보지 않습니다. 파일은 한 번씩만 읽습니다.
+    /// 선언 위치 등)는 보지 않습니다. 파일은 한 번씩만 읽고, 위치가 낱말 전체일 때만 이름으로 봅니다.
     /// </summary>
-    /// <param name="readText">파일 내용을 읽습니다. 읽지 못하면 null입니다.</param>
+    /// <param name="readText">파일 내용을 읽습니다. 진단을 받은 문서는 clangd에 보낸 내용을 줘야 합니다(저장하지 않은 편집). 읽지 못하면 null입니다.</param>
     public static IReadOnlyList<string> Names(IEnumerable<DiagnosticNameSite> sites, Func<string, string?> readText)
     {
         var texts = new Dictionary<string, string[]?>(StringComparer.OrdinalIgnoreCase);
@@ -140,7 +143,10 @@ public static class IncludeSupplements
 
             if (lines is null || site.Line < 0 || site.Line >= lines.Length) return null;
             var line = lines[site.Line];
-            return site.Start < 0 || site.End <= site.Start || site.End > line.Length ? null : line.Substring(site.Start, site.End - site.Start);
+            if (site.Start < 0 || site.End <= site.Start || site.End > line.Length) return null;
+            // 낱말 전체여야 합니다. 내용이 진단과 어긋나면(진단 뒤 편집) 긴 이름의 일부가 이름처럼 보일 수 있습니다.
+            if (site.Start > 0 && IsWordChar(line[site.Start - 1]) || site.End < line.Length && IsWordChar(line[site.End])) return null;
+            return line.Substring(site.Start, site.End - site.Start);
         }
 
         foreach (var site in sites)
@@ -169,8 +175,9 @@ public static class IncludeSupplements
         {
             var message = line.Groups[1].Value;
             var name = CompilerName.Match(message) is { Success: true } named ? named.Groups["name"].Value
-                : CompilerIncompleteType.Match(message) is { Success: true } incomplete ? TypeNameIn(incomplete.Groups[1].Value)
-                : null;
+                : CompilerIncompleteType.Match(message) is { Success: true } incomplete
+                    ? TypeNameIn(incomplete.Groups.Cast<Group>().Skip(1).First(g => g.Success).Value)
+                    : null;
             if (name is null || names.Contains(name, StringComparer.Ordinal)) continue;
             names.Add(name);
             if (names.Count >= MaxNames) break;
@@ -309,6 +316,8 @@ public static class IncludeSupplements
         if (scope >= 0) type = type.Substring(scope + 2);
         return Identifier.IsMatch(type) ? type : null;
     }
+
+    private static bool IsWordChar(char c) => c == '_' || char.IsLetterOrDigit(c);
 
     private static bool Supplies(SourceSymbolKind kind) => kind is SourceSymbolKind.Class or SourceSymbolKind.Struct or SourceSymbolKind.Union or
         SourceSymbolKind.Enum or SourceSymbolKind.Type or SourceSymbolKind.Function or SourceSymbolKind.Variable or SourceSymbolKind.Macro;

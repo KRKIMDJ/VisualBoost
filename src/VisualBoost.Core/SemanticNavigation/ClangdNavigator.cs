@@ -42,6 +42,12 @@ public sealed class ClangdNavigatorOptions
     /// <summary>엔진 정의 후보를 고를 이름 인덱스 조회. 없으면 헤더와 이름이 같은 cpp만 봅니다.</summary>
     public Func<string, IReadOnlyList<SourceSymbolLocation>>? FindSymbols { get; set; }
 
+    /// <summary>
+    /// 이름 인덱스가 분석을 마쳤는지입니다. 색인 단위의 보충 헤더는 모듈에 기록되므로 마친 뒤에만 고릅니다(덜 찬 색인에서는 후보가 하나여도
+    /// 실제로 유일하지 않을 수 있음). 없으면 늘 마친 것으로 봅니다.
+    /// </summary>
+    public Func<bool>? SymbolsReady { get; set; }
+
     /// <summary>파일 이름(확장자 제외)으로 파일을 찾는 조회입니다.</summary>
     public Func<string, IReadOnlyList<string>>? FindByStem { get; set; }
 
@@ -200,6 +206,9 @@ public sealed class ClangdNavigator : IDisposable
     // 문서에 보낸 명령의 보충 헤더와 이 세션에서 문서마다 보충한 횟수입니다(IncludeSupplements).
     private readonly Dictionary<string, IReadOnlyList<string>> documentSupplements = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, int> documentSupplementRounds = new(StringComparer.OrdinalIgnoreCase);
+    // 문서 분석에서 고른 보충 헤더입니다(이 세션의 그 문서에만 넣음). 편집 중 코드의 include 누락이나 덜 찬 이름 색인으로 잘못 고른 헤더가
+    // 모듈 전체와 다음 세션에 남지 않게 모듈 학습은 디스크 내용을 검사하는 색인 단위에서만 합니다(피드백 검토 65). pchGate로 보호합니다.
+    private readonly Dictionary<string, IReadOnlyList<string>> documentOwnSupplements = new(StringComparer.OrdinalIgnoreCase);
     // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
@@ -1366,7 +1375,9 @@ public sealed class ClangdNavigator : IDisposable
     {
         if (Context.Plan is { } plan && documentCommandsSent.Add(path))
         {
-            if (plan.DocumentCommand(path) is { } choice)
+            IReadOnlyList<string>? own;
+            lock (pchGate) own = documentOwnSupplements.TryGetValue(path, out var found) ? found : null;
+            if (plan.DocumentCommand(path, extra: own) is { } choice)
             {
                 if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
                 {
@@ -1589,7 +1600,17 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     private bool SwitchDocument(UnrealIndexPlan plan, string path)
     {
-        if (TrySupplementDocument(plan, path)) return true;
+        try
+        {
+            if (TrySupplementDocument(plan, path)) return true;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ObjectDisposedException)
+        {
+            // 보충 헤더를 고르지 못해도(후보 헤더 읽기, 솔루션을 닫는 중의 이름 인덱스) PCH로 다시 분석합니다. 그대로 새면 요청이 실패하고
+            // 문서가 오류 난 분석에 남았습니다(피드백 검토 66).
+            if (AuxiliaryFailed is { } handler) handler($"필요한 헤더를 고르지 못해 공유 PCH로 분석합니다({Path.GetFileName(path)}): {exception.Message}");
+        }
+
         if (plan.DocumentCommand(path, pch: true) is { } choice)
         {
             SendSwitched(new[] { choice.Command });
@@ -1600,8 +1621,9 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <remarks>
-    /// 이름 위치는 디스크 내용으로 읽습니다. 저장하지 않은 편집으로 줄이 어긋나면 이름을 찾지 못해 PCH로 돌아갑니다(결과는 같고 비용만 큼).
-    /// 다른 문서가 배운 모듈 보충 헤더가 이 문서 명령에 아직 없으면 이름을 찾지 못해도 그 헤더로 다시 분석합니다.
+    /// 이 문서의 이름 위치는 clangd에 보낸 내용(저장하지 않은 편집 포함)으로, include한 헤더의 위치는 디스크 내용으로 읽습니다. 고른 헤더는
+    /// 이 세션의 이 문서에만 넣고 모듈에는 배우지 않습니다(<see cref="documentOwnSupplements"/>). 색인 단위가 배운 모듈 보충 헤더가 이 문서
+    /// 명령에 아직 없으면 이름을 찾지 못해도 그 헤더로 다시 분석합니다.
     /// </remarks>
     private bool TrySupplementDocument(UnrealIndexPlan plan, string path)
     {
@@ -1613,9 +1635,20 @@ public sealed class ClangdNavigator : IDisposable
             documentSupplementRounds[path] = rounds + 1;
         }
 
-        var names = IncludeSupplements.Names(session.MissingNamesOf(path), SourceLinePreview.ReadText);
-        if (names.Count > 0) plan.Learn(path, IncludeSupplements.Resolve(names, find, plan.IncludeDirectoriesOf(path), SourceLinePreview.ReadText));
-        if (plan.DocumentCommand(path, pch: false) is not { WithoutPch: true } choice) return false;
+        var sentText = documents.SentText(path);
+        var names = IncludeSupplements.Names(session.MissingNamesOf(path),
+            file => sentText is not null && string.Equals(file, path, StringComparison.OrdinalIgnoreCase) ? sentText : SourceLinePreview.ReadText(file));
+        var found = names.Count == 0 ? Array.Empty<string>() : IncludeSupplements.Resolve(names, find, plan.IncludeDirectoriesOf(path), SourceLinePreview.ReadText);
+        IReadOnlyList<string> own;
+        lock (pchGate)
+        {
+            own = documentOwnSupplements.TryGetValue(path, out var known)
+                ? known.Concat(found.Where(h => !known.Contains(h, StringComparer.OrdinalIgnoreCase))).ToArray()
+                : found;
+            documentOwnSupplements[path] = own;
+        }
+
+        if (plan.DocumentCommand(path, pch: false, extra: own) is not { WithoutPch: true } choice) return false;
         lock (pchGate)
         {
             var sent = documentSupplements.TryGetValue(path, out var previous) ? previous : Array.Empty<string>();
@@ -1733,24 +1766,48 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <remarks>
-    /// 헤더 보충을 하면 바꾸기 전에 실패한 합성 TU를 컴파일러로 검사해 모르는 이름을 보고 모듈의 보충 헤더를 배웁니다(<see cref="UnrealIndexPlan.ProbeTargets"/>).
-    /// 검사하는 동안 들어온 실패는 다음 차례에 함께 처리하며, 그동안은 바쁨으로 보여 다시 시작을 미룹니다.
+    /// 배경 작업의 경계입니다. 예외로 끝나면 바쁨 표식을 내리고 알립니다. 표식이 남으면 메모리 정리·다시 읽기·이후 단위 전환이 세션 끝까지
+    /// 멈췄습니다(피드백 검토 66). 남은 실패는 다음 실패 알림이 다시 예약합니다. 종료 중이면 판단은 실패를 받을 때 기록했으므로 다음 세션이
+    /// 이어 갑니다.
     /// </remarks>
     private async Task FlushFailedUnitsAsync()
+    {
+        var finished = false;
+        try
+        {
+            await FlushFailedUnitsCoreAsync().ConfigureAwait(false);
+            finished = true;
+        }
+        catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException ||
+                                          exception is LspConnectionClosedException)
+        {
+            // 종료 중입니다.
+        }
+        catch (Exception exception)
+        {
+            AuxiliaryFailed?.Invoke("분석 오류가 난 색인 단위를 바꾸지 못했습니다: " + exception.Message);
+        }
+        finally
+        {
+            // 정상 종료는 안에서 실패 목록과 함께 내립니다(그 사이 들어온 실패가 새 작업을 예약할 수 있어 여기서 다시 내리지 않음).
+            if (!finished)
+            {
+                lock (pchGate) pchFlushScheduled = false;
+            }
+        }
+    }
+
+    /// <remarks>
+    /// 헤더 보충을 하면 바꾸기 전에 실패한 합성 TU를 컴파일러로 검사해 모르는 이름을 보고 모듈의 보충 헤더를 배웁니다(<see cref="UnrealIndexPlan.ProbeTargets"/>).
+    /// 배운 헤더는 모듈에 기록되므로 이름 인덱스가 분석을 마칠 때까지 기다립니다(<see cref="ClangdNavigatorOptions.SymbolsReady"/>). 검사하는
+    /// 동안 들어온 실패는 다음 차례에 함께 처리하며, 그동안은 바쁨으로 보여 다시 시작을 미룹니다.
+    /// </remarks>
+    private async Task FlushFailedUnitsCoreAsync()
     {
         var plan = Context.Plan!;
         while (true)
         {
-            try
-            {
-                await Task.Delay(options.PchSwitchDelay, lifetime.Token).ConfigureAwait(false);
-            }
-            catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
-            {
-                // 판단은 실패를 받을 때 기록했으므로 다음 세션이 전환된 단위로 시작합니다.
-                return;
-            }
-
+            await Task.Delay(options.PchSwitchDelay, lifetime.Token).ConfigureAwait(false);
             string[] failed;
             lock (pchGate)
             {
@@ -1758,9 +1815,21 @@ public sealed class ClangdNavigator : IDisposable
                 failedUnits.Clear();
             }
 
-            foreach (var target in plan.ProbeTargets(failed))
+            var targets = plan.ProbeTargets(failed);
+            if (targets.Count > 0)
             {
-                plan.Learn(target, await ProbeSupplementsAsync(plan, target).ConfigureAwait(false));
+                while (options.SymbolsReady is { } ready && !ready())
+                {
+                    await Task.Delay(SymbolsPollInterval, lifetime.Token).ConfigureAwait(false);
+                }
+            }
+
+            foreach (var target in targets)
+            {
+                var headers = await ProbeSupplementsAsync(plan, target).ConfigureAwait(false);
+                // 취소로 끝난 검사를 '배울 것 없음'으로 보면 PCH로 바꿔 기록하므로, 종료 중이면 바꾸지 않고 끝냅니다.
+                lifetime.Token.ThrowIfCancellationRequested();
+                plan.Learn(target, headers);
             }
 
             SendSwitched(plan.SwitchFailed(failed));
@@ -1775,29 +1844,24 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
+    /// <summary>이름 인덱스 분석이 끝났는지 다시 보는 간격입니다.</summary>
+    private static readonly TimeSpan SymbolsPollInterval = TimeSpan.FromSeconds(2);
+
     /// <summary>합성 TU 검사를 기다리는 상한입니다. 넘으면 배우지 않고 다음 단계(PCH)로 넘어갑니다. 묶음 단위는 구성원 수만큼 걸립니다.</summary>
     private static readonly TimeSpan ProbeTimeout = TimeSpan.FromMinutes(5);
 
     /// <summary>
     /// 분석 오류가 난 합성 TU를 clang-cl로 검사해 모르는 이름을 보고 보충 헤더를 고릅니다(<see cref="CompilerProbe"/>). background index의
     /// 실패 알림에는 원인이 없어서입니다. 한 번에 하나만 검사하며(호출자가 차례로 부름), 색인 단위 하나만큼(Unreal 약 1 GB·6초) 들고 끝나면
-    /// 돌려줍니다. 실패하면 빈 목록입니다.
+    /// 돌려줍니다. 검사하지 못하면(컴파일러 없음·시간 초과) 빈 목록입니다. 종료 중의 예외는 호출자 경계에서 받습니다.
     /// </summary>
     private async Task<IReadOnlyList<string>> ProbeSupplementsAsync(UnrealIndexPlan plan, string wrapper)
     {
         if (options.FindSymbols is not { } find || plan.CommandOfWrapper(wrapper) is not { } command) return Array.Empty<string>();
-        try
-        {
-            var names = await CompilerProbe.MissingNamesAsync(command, ProbeTimeout, lifetime.Token).ConfigureAwait(false);
-            return names is not { Count: > 0 }
-                ? Array.Empty<string>()
-                : IncludeSupplements.Resolve(names, find, IncludeSupplements.IncludeDirectories(command), SourceLinePreview.ReadText);
-        }
-        catch (ObjectDisposedException)
-        {
-            // 종료 중이면 판단은 다음 세션이 기록대로 이어 갑니다.
-            return Array.Empty<string>();
-        }
+        var names = await CompilerProbe.MissingNamesAsync(command, ProbeTimeout, lifetime.Token).ConfigureAwait(false);
+        return names is not { Count: > 0 }
+            ? Array.Empty<string>()
+            : IncludeSupplements.Resolve(names, find, IncludeSupplements.IncludeDirectories(command), SourceLinePreview.ReadText);
     }
 
     /// <summary>
