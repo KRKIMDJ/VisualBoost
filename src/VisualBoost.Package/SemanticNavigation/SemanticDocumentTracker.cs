@@ -50,7 +50,8 @@ internal static class SemanticDocumentTracker
     private static DispatcherTimer? idleTimer;
     private static DispatcherTimer? warmTimer;
     private static Tracked? pendingWarm;
-    private static Tracked? lastFocused;
+    // 초점을 받은 순서(가장 최근 것이 앞)입니다. clangd를 새로 시작한 뒤 이 순서로 미리 엽니다.
+    private static readonly List<Tracked> Recent = new();
 
     public static void Attach(IWpfTextView view, ITextDocument document)
     {
@@ -101,18 +102,33 @@ internal static class SemanticDocumentTracker
     }
 
     /// <summary>
-    /// 마지막으로 초점을 받은 C++ 문서를 다시 예열합니다. clangd가 새로 시작하면 열린 문서의 분석이 없어 다음 요청이 그 분석부터 기다리므로
-    /// 탐색기 준비 직후 부릅니다. UI thread에서 호출합니다.
+    /// 최근에 초점을 받은 C++ 문서들을 다시 예열합니다(초점 순서, 그다음 초점을 받지 않은 채 열린 문서). clangd가 새로 시작하면 열린 문서의
+    /// 분석이 없어 다음 요청이 그 분석부터 기다리므로 탐색기 준비 직후 부릅니다. 몇 개를 열지는 탐색기가 정원으로 정합니다. UI thread에서
+    /// 호출합니다.
     /// </summary>
-    public static void WarmFocused()
+    public static void WarmRecent()
     {
         ThreadHelper.ThrowIfNotOnUIThread();
-        if (lastFocused is { Views: > 0 } item) ScheduleWarm(item);
+        var service = SemanticNavigationRuntime.Service;
+        if (service is null) return;
+        var items = Recent.Concat(Buffers.Values.Where(i => !Recent.Contains(i))).Where(i => i.Views > 0).Take(MaxRecentWarm).ToArray();
+        if (items.Length == 0) return;
+        // 초점 예열이 대기 중이면 같은 문서를 이 목록이 먼저 엽니다.
+        if (pendingWarm is not null && items.Contains(pendingWarm)) pendingWarm = null;
+        service.WarmRecent(items.Select(item =>
+        {
+            var snapshot = item.Document.TextBuffer.CurrentSnapshot;
+            return new RecentDocument(item.Path, snapshot.GetText, item.Revision(snapshot));
+        }).ToArray());
     }
+
+    // 탐색기 정원보다 넉넉한 상한입니다. 스냅샷만 넘기므로 비용이 거의 없습니다.
+    private const int MaxRecentWarm = 8;
 
     private static void ScheduleWarm(Tracked item)
     {
-        lastFocused = item;
+        Recent.Remove(item);
+        Recent.Insert(0, item);
         pendingWarm = item;
         warmTimer ??= CreateTimer(TimeSpan.FromMilliseconds(800), OnWarm);
         warmTimer.Stop();
@@ -163,7 +179,7 @@ internal static class SemanticDocumentTracker
         Buffers.Remove(item.Document.TextBuffer);
         RemovePath(item.Path);
         if (ReferenceEquals(pendingWarm, item)) pendingWarm = null;
-        if (ReferenceEquals(lastFocused, item)) lastFocused = null;
+        Recent.Remove(item);
         SemanticNavigationRuntime.Service?.Closed(item.Path);
     }
 

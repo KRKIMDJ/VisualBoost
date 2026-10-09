@@ -140,7 +140,7 @@ internal sealed class SemanticNavigationService : IDisposable
     /// <summary>시작·종료·색인 진행이 바뀌었습니다. 임의 스레드에서 호출됩니다.</summary>
     public event Action? StateChanged;
 
-    /// <summary>새 clangd 탐색기가 준비되었습니다. 활성 문서를 다시 예열할 때 씁니다. 임의 스레드에서 호출됩니다.</summary>
+    /// <summary>새 clangd 탐색기가 준비되었습니다. 최근 문서를 다시 예열할 때 씁니다. 임의 스레드에서 호출됩니다.</summary>
     public event Action? NavigatorStarted;
 
     public SemanticNavigationSettings Settings
@@ -317,6 +317,10 @@ internal sealed class SemanticNavigationService : IDisposable
     }
 
     public void Warm(string path, Func<string> text, long revision) => Post(navigator => navigator.Warm(new DocumentText(path, text, revision)));
+
+    /// <summary>최근 문서들(가장 최근 것부터)을 미리 엽니다(<see cref="ClangdNavigator.WarmRecent"/>).</summary>
+    public void WarmRecent(IReadOnlyList<RecentDocument> recent) =>
+        Post(navigator => navigator.WarmRecent(recent.Select(d => new DocumentText(d.Path, d.Text, d.Revision)).ToArray()));
 
     public void Update(string path, Func<string> text, long revision) => Post(navigator => navigator.Update(new DocumentText(path, text, revision)));
 
@@ -912,4 +916,21 @@ internal sealed class SemanticNavigationService : IDisposable
             }
         }
     }
+}
+
+/// <summary>미리 열 편집기 문서입니다. 내용은 탐색기 작업 스레드에서 필요할 때 스냅샷으로 만듭니다.</summary>
+internal sealed class RecentDocument
+{
+    public RecentDocument(string path, Func<string> text, long revision)
+    {
+        Path = path;
+        Text = text;
+        Revision = revision;
+    }
+
+    public string Path { get; }
+
+    public Func<string> Text { get; }
+
+    public long Revision { get; }
 }

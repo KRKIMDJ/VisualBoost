@@ -244,6 +244,8 @@ public sealed class ClangdNavigator : IDisposable
     private int pchUnitIndexed;
     private int indexedUnits;
     private int indexFileDefinitions;
+    // 요청 때 근사 명령을 준 소스입니다(정규화한 주어진 경로·실제 경로). 이 소스의 색인은 색인 단위 수에 넣지 않습니다(IndexedUnits).
+    private readonly HashSet<string> onDemandSources = new(StringComparer.OrdinalIgnoreCase);
     // TU 색인 완료를 색인 파일이나 로그 줄로 하나라도 알았는지(색인 시작 문서 포함), 신호 확인을 시작했는지, 두 신호를 모두 읽지 못한다고
     // 판단했는지입니다.
     private int indexedSignalSeen;
@@ -375,6 +377,10 @@ public sealed class ClangdNavigator : IDisposable
     /// 이 clangd가 background index로 색인한 TU 수입니다(색인 시작 문서 제외). 색인하며 쓴 메모리는 clangd가 운영체제에 돌려주지 않으므로,
     /// 색인한 세션은 끝난 뒤 다시 시작해 돌려받습니다(<see cref="ClangdMemoryPolicy.ShouldReclaimAfterIndex"/>).
     /// </summary>
+    /// <remarks>
+    /// 요청 때 근사 명령을 준 소스(엔진 정의 후보 cpp, 명령이 없는 Unreal 파일)의 색인은 넣지 않습니다. 한 파일씩이라 남는 메모리가 적은데,
+    /// 세면 엔진 정의를 한 번 확인한 세션도 쉴 때 다시 시작해 미리 분석해 둔 문서를 모두 잃었습니다.
+    /// </remarks>
     public int IndexedUnits => Volatile.Read(ref indexedUnits);
 
     /// <summary>문서 분석 없이 색인 파일 참조 기록으로 답한 정의 이동 수입니다(<see cref="ClangdNavigatorOptions.DefinitionFromIndexFiles"/>).</summary>
@@ -864,8 +870,13 @@ public sealed class ClangdNavigator : IDisposable
         {
             if (SourceLinePreview.ReadText(path) is not { } text) return null;
             progress?.Report($"{stage}: {Path.GetFileName(path)}");
-            if (command is not null) session.UpdateCompileCommands(new[] { command });
-            version = documents.Acquire(new DocumentText(path, text));
+            if (command is not null)
+            {
+                MarkOnDemand(path);
+                session.UpdateCompileCommands(new[] { command });
+            }
+
+            version = documents.AcquireTransient(new DocumentText(path, text));
         }
 
         try
@@ -880,8 +891,8 @@ public sealed class ClangdNavigator : IDisposable
         }
         finally
         {
-            documents.Release(path);
-            if (version is not null) documents.TryClose(path);
+            // 일회성으로 연 문서는 풀 때 닫힙니다.
+            documents.Release(path, touch: version is null);
         }
     }
 
@@ -1257,6 +1268,55 @@ public sealed class ClangdNavigator : IDisposable
         };
     }
 
+    /// <summary>동시에 열어 두는 문서 수입니다(<see cref="ClangdNavigatorOptions.DocumentCapacity"/>).</summary>
+    public int DocumentCapacity => documents.Capacity;
+
+    /// <summary>
+    /// 최근 문서들(가장 최근 것부터)을 미리 엽니다. 첫 문서는 <see cref="Warm"/>과 같고, 나머지는 앞 문서의 분석이 끝난 뒤 정원의 빈자리에만
+    /// 하나씩 엽니다(<see cref="DocumentCapacity"/>개까지). clangd를 새로 시작하면(VS 시작, 메모리 정리·색인 다시 읽기 재시작) 열린 문서의
+    /// 분석이 모두 없어져, 초점 문서 말고는 문서마다 첫 요청이 preamble 분석(Unreal 2.5~4.8초, 2026-10-10 측정)을 기다렸습니다.
+    /// </summary>
+    /// <remarks>
+    /// 함께 열면 초점 문서의 분석과 CPU를 나눠 초점 문서가 늦어지므로 차례로 엽니다. 빈자리에만 열고 가장 먼저 닫힐 순서에 두므로 그 사이
+    /// 사용자가 찾은 문서를 밀어내지 않습니다.
+    /// </remarks>
+    public void WarmRecent(IReadOnlyList<DocumentText> recent)
+    {
+        if (recent.Count == 0 || HasExited) return;
+        Warm(recent[0]);
+        if (recent.Count > 1 && documents.Capacity > 1) Observe(Task.Run(() => WarmSparesAsync(recent.Take(documents.Capacity).ToArray())));
+    }
+
+    /// <summary>미리 열 다음 문서가 앞 문서의 분석을 기다리는 상한입니다.</summary>
+    private static readonly TimeSpan SpareWarmWait = TimeSpan.FromSeconds(60);
+
+    private async Task WarmSparesAsync(IReadOnlyList<DocumentText> recent)
+    {
+        var previous = recent[0].Path;
+        foreach (var document in recent.Skip(1))
+        {
+            if (documents.AcquireIfOpen(previous, out var version, touch: false) is not null)
+            {
+                documents.Release(previous, touch: false);
+                await WaitForAnalysisAsync(previous, version, SpareWarmWait, CancellationToken.None).ConfigureAwait(false);
+            }
+
+            if (HasExited || lifetime.IsCancellationRequested) return;
+            try
+            {
+                if (!documents.TryOpenSpare(document)) continue;
+            }
+            catch (LspConnectionClosedException)
+            {
+                // 종료는 Changed로 알려집니다.
+                return;
+            }
+
+            PrioritizeEditorDocument(document);
+            previous = document.Path;
+        }
+    }
+
     /// <summary>편집기에서 활성화한 문서를 미리 열어 첫 요청 전에 분석을 시작합니다.</summary>
     public void Warm(DocumentText document)
     {
@@ -1371,7 +1431,7 @@ public sealed class ClangdNavigator : IDisposable
     private async Task StartBackgroundIndexAsync(CancellationToken cancellationToken)
     {
         var probe = Context.IndexStartPath;
-        var version = documents.Acquire(new DocumentText(probe, string.Empty));
+        var version = documents.AcquireTransient(new DocumentText(probe, string.Empty));
         try
         {
             using var timeout = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken);
@@ -1384,8 +1444,7 @@ public sealed class ClangdNavigator : IDisposable
         }
         finally
         {
-            documents.Release(probe);
-            documents.TryClose(probe);
+            documents.Release(probe, touch: false);
         }
     }
 
@@ -1458,6 +1517,7 @@ public sealed class ClangdNavigator : IDisposable
             }
             else if (TryApproximateCommand(path) is { } command)
             {
+                MarkOnDemand(path);
                 session.UpdateCompileCommands(new[] { command });
                 // 근사 명령을 받은 소스는 clangd가 색인하므로 다음 clangd도 그 색인을 읽게 기억합니다. 열기 콜백은 문서 집합 잠금 안이라 파일
                 // 쓰기는 작업 스레드에서 합니다.
@@ -1859,7 +1919,7 @@ public sealed class ClangdNavigator : IDisposable
 
         if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase) || IsQueueMarker(path)) return;
         OwnIndexed(path);
-        Interlocked.Increment(ref indexedUnits);
+        if (!IsOnDemand(path)) Interlocked.Increment(ref indexedUnits);
         if (autoPch && UnrealIndexPlan.IsSwitchedWrapper(path)) Volatile.Write(ref pchUnitIndexed, 1);
     }
 
@@ -2329,6 +2389,7 @@ public sealed class ClangdNavigator : IDisposable
             }
 
             progress?.Report($"{(engine ? "엔진 정의" : "정의 파일")} 확인 중({i + 1}/{candidates.Length}): {Path.GetFileName(candidate)}");
+            if (command is not null) MarkOnDemand(candidate);
             var sent = false;
             if (command is not null && rememberedSources?.Value.Contains(candidate) == true && shards.HasCurrentShard(Context.Paths.ToReal(candidate)))
             {
@@ -2343,7 +2404,7 @@ public sealed class ClangdNavigator : IDisposable
             }
 
             if (command is not null && !sent) session.UpdateCompileCommands(new[] { command });
-            var version = documents.Acquire(new DocumentText(candidate, text));
+            var version = documents.AcquireTransient(new DocumentText(candidate, text));
             try
             {
                 // 시간 안에 분석이 끝나지 않은 후보는 건너뜁니다. 열어 둔 동안 진행된 색인은 유지됩니다.
@@ -2351,8 +2412,8 @@ public sealed class ClangdNavigator : IDisposable
             }
             finally
             {
-                documents.Release(candidate);
-                documents.TryClose(candidate);
+                // 새로 연 후보는 풀 때 닫히고, 사용자가 이미 열어 둔 파일이면 그대로 둡니다.
+                documents.Release(candidate, touch: false);
             }
 
             var again = await session.DefinitionAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
@@ -2389,7 +2450,7 @@ public sealed class ClangdNavigator : IDisposable
 
             try
             {
-                var version = documents.Acquire(document);
+                var version = documents.AcquireTransient(document);
                 try
                 {
                     // 분석이 오래 걸려도 다음 저장 반영을 막지 않습니다.
@@ -2401,8 +2462,7 @@ public sealed class ClangdNavigator : IDisposable
                 }
                 finally
                 {
-                    documents.Release(path);
-                    documents.TryClose(path);
+                    documents.Release(path, touch: false);
                 }
             }
             catch (LspConnectionClosedException)
@@ -2480,6 +2540,35 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     private static string NormalizedFull(string path) => Path.GetFullPath(path).Replace('\\', '/');
+
+    /// <summary>요청 때 근사 명령을 준 소스로 기억합니다(<see cref="IndexedUnits"/>).</summary>
+    private void MarkOnDemand(string path)
+    {
+        var keys = new[] { SafeNormalized(path), SafeNormalized(Context.Paths.ToReal(path)) };
+        lock (onDemandSources)
+        {
+            foreach (var key in keys) onDemandSources.Add(key);
+        }
+    }
+
+    private bool IsOnDemand(string path)
+    {
+        var key = SafeNormalized(path);
+        lock (onDemandSources) return onDemandSources.Contains(key);
+    }
+
+    /// <summary>clangd가 알린 경로처럼 형식을 믿을 수 없는 경로도 비교할 수 있게 정규화합니다. 정규화하지 못하면 구분자만 맞춥니다.</summary>
+    private static string SafeNormalized(string path)
+    {
+        try
+        {
+            return NormalizedFull(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException || exception is PathTooLongException)
+        {
+            return path.Replace('\\', '/');
+        }
+    }
 
     private static long SafeWriteTicks(string path)
     {

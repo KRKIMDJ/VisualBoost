@@ -39,8 +39,8 @@ public sealed class DocumentText
 /// <remarks>
 /// 대형 TU는 문서마다 preamble·AST를 만들므로 편집기에 열린 문서를 모두 clangd에 열지 않고,
 /// 최근에 조회한 문서만 <see cref="Capacity"/>개까지 유지합니다. 요청이 진행 중인 문서는 임대(lease)로
-/// 표시해 다른 흐름이 닫지 못하게 합니다. 알림 순서가 서버 상태와 어긋나지 않도록 콜백은 잠금 안에서 호출하며,
-/// 콜백은 파이프 쓰기처럼 짧게 끝나야 합니다.
+/// 표시해 다른 흐름이 닫지 못하게 합니다. 사용자가 보지 않는 일회성 문서(<see cref="AcquireTransient"/>)는 정원에 세지 않습니다.
+/// 알림 순서가 서버 상태와 어긋나지 않도록 콜백은 잠금 안에서 호출하며, 콜백은 파이프 쓰기처럼 짧게 끝나야 합니다.
 /// </remarks>
 public sealed class ClangdDocumentSet
 {
@@ -95,11 +95,58 @@ public sealed class ClangdDocumentSet
                 Send(document, entry);
             }
 
-            // 다시 쓰는 문서이므로 임대 중에 받아 둔 닫기 요청은 거둡니다.
+            // 다시 쓰는 문서이므로 임대 중에 받아 둔 닫기 요청은 거두고, 일회성으로 열었더라도 정원에 넣어 유지합니다.
             entry.CloseRequested = false;
+            entry.Transient = false;
             entry.Leases++;
             entry.LastUse = ++clock;
             return entry.Version;
+        }
+    }
+
+    /// <summary>
+    /// 사용자가 보지 않는 일회성 문서(정의 후보 cpp, 저장 반영, 다른 파일 위치 확인, 색인 시작 문서)를 열거나, 이미 열린 문서면 사용 순서를
+    /// 바꾸지 않고 임대합니다. 새로 연 문서는 정원에 세지 않으며 마지막 임대가 끝나면(<see cref="Release"/>) 바로 닫습니다.
+    /// </summary>
+    /// <remarks>
+    /// 예전에는 일회성 문서도 정원에 세어, 풀 때 정원을 넘었다며 미리 분석해 둔 사용자 문서 중 가장 오래된 것을 먼저 닫고 일회성 문서는 그
+    /// 뒤에 따로 닫았습니다. 엔진 정의를 한 번 확인할 때마다 사용자 문서 하나의 분석(Unreal 2.5~4.8초, 2026-10-10 측정)을 잃었습니다.
+    /// </remarks>
+    public int AcquireTransient(DocumentText document)
+    {
+        lock (gate)
+        {
+            if (!entries.TryGetValue(document.Path, out var entry))
+            {
+                var text = document.Text;
+                open(document.Path, text, 1);
+                entry = new Entry(text, 1, document.Revision) { Transient = true };
+                entries[document.Path] = entry;
+            }
+            else
+            {
+                Send(document, entry);
+            }
+
+            entry.Leases++;
+            return entry.Version;
+        }
+    }
+
+    /// <summary>
+    /// 정원에 빈자리가 있을 때만 문서를 임대 없이 열어 둡니다. 이미 열렸거나 빈자리가 없으면 거짓입니다. 연 문서는 가장 먼저 닫힐 순서에 두어,
+    /// 미리 열어 두는 문서가 그 사이 사용자가 찾은 문서를 밀어내지 않게 합니다. 나중에 연 문서일수록 먼저 닫힙니다.
+    /// </summary>
+    public bool TryOpenSpare(DocumentText document)
+    {
+        lock (gate)
+        {
+            if (entries.ContainsKey(document.Path) || entries.Values.Count(e => !e.Transient) >= Capacity) return false;
+            var oldest = entries.Values.Where(e => !e.Transient).Select(e => e.LastUse).DefaultIfEmpty(clock + 1).Min();
+            var text = document.Text;
+            open(document.Path, text, 1);
+            entries[document.Path] = new Entry(text, 1, document.Revision) { LastUse = oldest - 1 };
+            return true;
         }
     }
 
@@ -112,8 +159,8 @@ public sealed class ClangdDocumentSet
             {
                 entry.Leases--;
                 if (touch) entry.LastUse = ++clock;
-                // 임대 중에 편집기에서 닫은 문서는 마지막 임대가 끝날 때 닫습니다(2026-10-09 검토 55).
-                if (entry.Leases == 0 && entry.CloseRequested)
+                // 임대 중에 편집기에서 닫은 문서와 일회성으로 연 문서는 마지막 임대가 끝날 때 닫습니다(2026-10-09 검토 55).
+                if (entry.Leases == 0 && (entry.CloseRequested || entry.Transient))
                 {
                     entries.Remove(path);
                     close(path);
@@ -248,9 +295,9 @@ public sealed class ClangdDocumentSet
 
     private void Evict()
     {
-        while (entries.Count > Capacity)
+        while (entries.Values.Count(e => !e.Transient) > Capacity)
         {
-            var victim = entries.Where(e => e.Value.Leases == 0).OrderBy(e => e.Value.LastUse).Select(e => e.Key).FirstOrDefault();
+            var victim = entries.Where(e => e.Value.Leases == 0 && !e.Value.Transient).OrderBy(e => e.Value.LastUse).Select(e => e.Key).FirstOrDefault();
             if (victim is null)
             {
                 return;
@@ -282,5 +329,8 @@ public sealed class ClangdDocumentSet
 
         /// <summary>임대 중에 편집기에서 닫았습니다. 마지막 임대가 끝나면 닫습니다.</summary>
         public bool CloseRequested { get; set; }
+
+        /// <summary>일회성으로 열었습니다(<see cref="AcquireTransient"/>). 정원에 세지 않고 마지막 임대가 끝나면 닫습니다.</summary>
+        public bool Transient { get; set; }
     }
 }

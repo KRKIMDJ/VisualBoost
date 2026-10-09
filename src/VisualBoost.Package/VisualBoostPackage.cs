@@ -100,7 +100,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         navigation.NavigatorStarted += () => JoinableTaskFactory.RunAsync(async () =>
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
-            SemanticDocumentTracker.WarmFocused();
+            SemanticDocumentTracker.WarmRecent();
         }).FileAndForget("VisualBoost/SemanticNavigation/Warm");
         var currentNavigation = navigation;
         if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar, () => currentNavigation.StatusText);

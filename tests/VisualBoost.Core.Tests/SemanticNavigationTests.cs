@@ -2197,6 +2197,47 @@ internal static class SemanticNavigationTests
         Check(set.Contains("kept"), "닫기 요청 뒤 다시 쓴 문서는 남김");
         set.CloseWhenReleased("next");
         Check(!set.Contains("next"), "임대 없는 문서는 바로 닫음");
+
+        // 일회성 문서(정의 후보 등)는 정원에 세지 않고 풀 때 닫습니다. 예전에는 풀 때 정원을 넘었다며 사용자 문서를 먼저 닫았습니다.
+        var spares = new List<string>();
+        var users = new ClangdDocumentSet(2, (p, _, _) => spares.Add("open " + p), (_, _, _) => { }, p => spares.Add("close " + p));
+        users.Acquire(new DocumentText("u1", "1"));
+        users.Release("u1");
+        users.Acquire(new DocumentText("u2", "2"));
+        users.Release("u2");
+        Check(users.AcquireTransient(new DocumentText("candidate", "c")) == 1 && users.Contains("candidate"), "일회성 문서 열기");
+        users.Acquire(new DocumentText("u3", "3"));
+        users.Release("u3");
+        Check(!users.Contains("u1") && users.Contains("u2") && users.Contains("candidate"), "임대 중인 일회성 문서는 정원에 세지 않음: " + string.Join(",", users.OpenPaths));
+        users.Release("candidate", touch: false);
+        Check(!users.Contains("candidate") && users.Contains("u2") && users.Contains("u3") && spares.Last() == "close candidate",
+            "일회성 문서는 풀 때 닫고 사용자 문서는 남김: " + string.Join(" | ", spares));
+        users.AcquireTransient(new DocumentText("u2", "2"));
+        users.Release("u2", touch: false);
+        Check(users.Contains("u2"), "이미 열린 사용자 문서는 일회성으로 빌려도 닫지 않음");
+        users.Acquire(new DocumentText("u4", "4"));
+        users.Release("u4");
+        Check(!users.Contains("u2") && users.Contains("u3"), "일회성으로 빌린 사용자 문서는 사용 순서를 바꾸지 않음: " + string.Join(",", users.OpenPaths));
+        users.AcquireTransient(new DocumentText("seen", "s"));
+        users.Acquire(new DocumentText("seen", "s"));
+        users.Release("seen", touch: false);
+        users.Release("seen");
+        Check(users.Contains("seen") && users.OpenPaths.Count == 2, "일회성으로 연 뒤 편집기에서 쓴 문서는 정원에 넣어 유지: " + string.Join(",", users.OpenPaths));
+
+        // 미리 열기는 빈자리에만 열고 가장 먼저 닫힐 순서에 둡니다(나중에 연 것일수록 먼저).
+        var warm = new ClangdDocumentSet(3, (_, _, _) => { }, (_, _, _) => { }, _ => { });
+        warm.Acquire(new DocumentText("focused", "f"));
+        warm.Release("focused");
+        Check(warm.TryOpenSpare(new DocumentText("second", "2")) && warm.TryOpenSpare(new DocumentText("third", "3")), "빈자리에 미리 열기");
+        Check(!warm.TryOpenSpare(new DocumentText("fourth", "4")) && !warm.TryOpenSpare(new DocumentText("focused", "f")) && warm.OpenPaths.Count == 3,
+            "정원이 찼거나 이미 열린 문서는 미리 열지 않음");
+        warm.Acquire(new DocumentText("request", "r"));
+        warm.Release("request");
+        Check(!warm.Contains("third") && warm.Contains("second") && warm.Contains("focused"), "미리 연 문서는 나중에 연 것부터 닫음: " + string.Join(",", warm.OpenPaths));
+        warm.Acquire(new DocumentText("another", "a"));
+        warm.Release("another");
+        Check(!warm.Contains("second") && warm.Contains("focused") && warm.Contains("request"), "미리 연 문서는 사용자가 찾은 문서보다 먼저 닫음: " +
+              string.Join(",", warm.OpenPaths));
     }
 
     public static void RunCompileContext()
@@ -2398,8 +2439,12 @@ internal static class SemanticNavigationTests
             var caller = Path.Combine(gameSource, "Caller.cpp");
             var callerText = "#include \"Calc.h\"\nint Caller() { return CalcTotal(2) + CalcOther(3) + CalcMissing(4); }\n";
             Write(caller, callerText);
+            // 정원(3)을 채우는 사용자 문서입니다. 후보 cpp를 확인한 뒤에도 남아야 합니다.
+            var spare = Path.Combine(gameSource, "Spare.cpp");
+            var spareText = "int Spare() { return 0; }\n";
+            Write(spare, spareText);
             var build = Path.Combine(project, "Intermediate", "Build", "Win64", "x64", "UnrealEditor", "Development", "Game");
-            foreach (var file in new[] { use, other, caller })
+            foreach (var file in new[] { use, other, caller, spare })
             {
                 // 프로젝트 쪽 정의는 의존 모듈 API를 dllimport로 둡니다. 엔진 cpp 근사 명령은 이를 다시 비워야 합니다.
                 Write(Path.Combine(build, Path.GetFileName(file) + ".obj.rsp"),
@@ -2421,8 +2466,11 @@ internal static class SemanticNavigationTests
                     _ => Array.Empty<SourceSymbolLocation>()
                 }
             }, CancellationToken.None).Result;
-            Check(navigator.Context.Kind == CompileContextKind.Unreal && navigator.Context.Commands.Count == 3, "응답 파일에서 프로젝트 명령 준비");
-            Check(SpinUntil(() => navigator.Progress.Completed, 60000), "프로젝트 색인 완료");
+            Check(navigator.Context.Kind == CompileContextKind.Unreal && navigator.Context.Commands.Count == 4, "응답 파일에서 프로젝트 명령 준비");
+            Check(SpinUntil(() => navigator.Progress.Completed, 60000) && SpinUntil(() => navigator.IndexedUnits >= 4, 30000), "프로젝트 색인 완료");
+            var unitsBefore = navigator.IndexedUnits;
+            navigator.Warm(new DocumentText(caller, callerText, 1));
+            navigator.Warm(new DocumentText(spare, spareText, 1));
 
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
             var position = useText.Split('\n')[1].IndexOf("Compute", StringComparison.Ordinal);
@@ -2433,13 +2481,18 @@ internal static class SemanticNavigationTests
                   reports.Any(r => r.Contains("Mod.cpp")), "엔진 cpp를 요청 시점에 열어 정의 확정: " + string.Join(",", resolved.Locations));
             Check(new DefinitionSourceStore(navigator.Context.Directory).Load().Any(f => string.Equals(f, engineSource, StringComparison.OrdinalIgnoreCase)),
                 "근사 명령으로 연 엔진 cpp를 캐시 폴더에 기억");
-            Check(!navigator.IsOpen(engineSource) && navigator.IsOpen(use), "후보는 닫고 요청 문서는 유지");
+            Check(!navigator.IsOpen(engineSource) && navigator.IsOpen(use) && navigator.IsOpen(caller) && navigator.IsOpen(spare),
+                "후보는 닫고 정원을 채운 사용자 문서는 유지");
             var cached = default(NavigationResult);
             Check(SpinUntil(() =>
             {
                 cached = navigator.DefinitionAsync(query, null, timeout.Token).Result;
                 return cached.Locations.Any(l => l.Path == engineSource);
             }, 30000) && !cached!.ResolvedOnDemand, "확정한 엔진 정의는 색인에 남아 다시 열지 않음");
+            // 요청 때 근사 명령을 준 엔진 cpp도 clangd가 색인하지만, 색인 뒤 메모리 정리 재시작의 근거(색인 단위 수)에는 넣지 않습니다.
+            Check(SpinUntil(() => Directory.EnumerateFiles(cacheRoot, "Mod.cpp.*.idx", SearchOption.AllDirectories).Any(), 30000) &&
+                  !SpinUntil(() => navigator.IndexedUnits != unitsBefore, 6000), "요청 때 색인한 엔진 cpp는 색인 단위 수에 넣지 않음: " +
+                  unitsBefore + " → " + navigator.IndexedUnits);
 
             var references = navigator.ReferencesAsync(query, timeout.Token).Result;
             Check(references.Symbol is { Name: "Compute", ContainerName: "FMod" } &&
@@ -2516,6 +2569,14 @@ internal static class SemanticNavigationTests
                 ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1
             }, CancellationToken.None).Result;
             Check(SpinUntil(() => restarted.Progress.Completed, 60000), "다시 시작한 색인 완료");
+            // 다시 시작하면 최근 문서를 정원까지 차례로 미리 엽니다.
+            restarted.WarmRecent(new[]
+            {
+                new DocumentText(use, useText, 1), new DocumentText(caller, callerText, 1), new DocumentText(spare, spareText, 1),
+                new DocumentText(otherImpl, File.ReadAllText(otherImpl), 1)
+            });
+            Check(SpinUntil(() => restarted.IsOpen(use) && restarted.IsOpen(caller) && restarted.IsOpen(spare), 60000) && !SpinUntil(() => restarted.IsOpen(otherImpl), 2000),
+                "다시 시작한 뒤 최근 문서를 정원까지 미리 엶");
             using var restartTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
             var restartReports = new List<string>();
             var again = restarted.DefinitionAsync(query, new SyncProgress(restartReports.Add), restartTimeout.Token).Result;
