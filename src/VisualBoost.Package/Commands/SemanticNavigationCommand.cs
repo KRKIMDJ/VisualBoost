@@ -227,7 +227,7 @@ internal sealed class SemanticNavigationCommand
             var target = result.Locations[0];
             NavigationLocationOpener.Open(package, target, activate: true);
             await SetStatusAsync($"{Path.GetFileName(target.Path)}:{target.Line + 1}" +
-                                 (result.ResolvedOnDemand ? " · 색인에 없던 정의 파일을 분석해 찾았습니다" : string.Empty) +
+                                 (result.ResolvedOnDemand ? " · " + OnDemandNote(result, "찾았습니다") : string.Empty) +
                                  (incomplete.Length > 0 ? " · " + incomplete : string.Empty));
             return;
         }
@@ -237,7 +237,7 @@ internal sealed class SemanticNavigationCommand
         if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
         if (kind == Kind.References && result.CurrentFileOnly) notes.Add("네임스페이스는 이 파일의 참조만 찾습니다");
         if (kind == Kind.References && result.UncheckedDefinitionFiles > 0) notes.Add($"다른 모듈 정의 헤더 {result.UncheckedDefinitionFiles:N0}개는 확인하지 않았습니다");
-        if (kind == Kind.References && result.ResolvedOnDemand) notes.Add("색인에 없던 정의 파일을 분석해 더했습니다");
+        if (kind == Kind.References && result.ResolvedOnDemand) notes.Add(OnDemandNote(result, "더했습니다"));
         if (incomplete.Length > 0) notes.Add(incomplete);
         if (broken.Length > 0) notes.Add(broken);
         var dte = await package.GetServiceAsync(typeof(Microsoft.VisualStudio.Shell.Interop.SDTE)) as DTE2;
@@ -314,6 +314,13 @@ internal sealed class SemanticNavigationCommand
         var view = adapters.GetWpfTextView(native);
         return view is { IsClosed: false } ? view : null;
     }
+
+    /// <summary>
+    /// 요청 시점에 정의 파일을 분석한 이유를 알립니다. 색인을 마친 뒤에도 엔진 cpp는 색인 범위 밖이라 처음 찾을 때 분석하므로, 색인이
+    /// 덜 된 것으로 오해하지 않게 엔진과 프로젝트를 나눠 씁니다.
+    /// </summary>
+    private static string OnDemandNote(NavigationResult result, string verb) =>
+        result.ResolvedFromEngine ? $"색인 범위 밖인 엔진 cpp를 분석해 정의를 {verb}" : $"아직 색인되지 않은 정의 파일을 분석해 {verb}";
 
     private static string WordAt(string text, int column)
     {

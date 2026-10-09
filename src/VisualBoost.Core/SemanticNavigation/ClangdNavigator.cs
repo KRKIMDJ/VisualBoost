@@ -58,6 +58,12 @@ public sealed class ClangdNavigatorOptions
 
     /// <summary>색인 실패를 모아 공유 PCH로 바꾸기 전에 기다리는 시간입니다. 실패마다 database를 다시 쓰지 않게 묶습니다.</summary>
     public TimeSpan PchSwitchDelay { get; set; } = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// 색인이 끝나기 전에 연 문서와 관련된 TU(그 문서와 include한 헤더의 같은 이름 cpp)를 색인 대기열 앞으로 올립니다
+    /// (<see cref="IndexQueuePriority"/>). 끄면 clangd의 무작위 순서를 따릅니다.
+    /// </summary>
+    public bool PrioritizeOpenDocuments { get; set; } = true;
 }
 
 /// <summary>요청 위치와 그때의 편집기 내용입니다. 좌표는 0기반 줄과 UTF-16 문자 위치입니다.</summary>
@@ -87,8 +93,9 @@ public sealed class NavigationResult
 {
     public NavigationResult(IReadOnlyList<NavigationLocation> locations, SemanticSymbol? symbol, BackgroundIndexProgress progress, bool resolvedOnDemand,
         SourceSymbolKind? symbolKind = null, IReadOnlyDictionary<NavigationLocation, NavigationRole>? roles = null, bool limited = false,
-        int uncheckedDefinitionFiles = 0)
+        int uncheckedDefinitionFiles = 0, bool resolvedFromEngine = false)
     {
+        ResolvedFromEngine = resolvedOnDemand && resolvedFromEngine;
         Limited = limited;
         UncheckedDefinitionFiles = uncheckedDefinitionFiles;
         Locations = locations;
@@ -111,8 +118,11 @@ public sealed class NavigationResult
     /// <summary>요청 시점의 색인 진행. 완료 전이면 결과가 불완전할 수 있습니다.</summary>
     public BackgroundIndexProgress Progress { get; }
 
-    /// <summary>색인하지 않은 엔진 cpp를 요청 시점에 열어 정의를 확정했습니다.</summary>
+    /// <summary>색인에 없던 정의 파일(엔진 cpp, 아직 색인하지 않았거나 명령이 없던 프로젝트 cpp)을 요청 시점에 열어 정의를 확정했습니다.</summary>
     public bool ResolvedOnDemand { get; }
+
+    /// <summary>요청 시점에 연 정의 파일이 엔진 cpp입니다(색인 범위 밖). 아니면 아직 색인하지 않았거나 명령이 없던 프로젝트 파일입니다.</summary>
+    public bool ResolvedFromEngine { get; }
 
     /// <summary>결과 목록에서 이름을 색칠할 심볼 종류입니다. 목록을 보이지 않는 결과(정의 하나)나 판정하지 못하면 null입니다.</summary>
     public SourceSymbolKind? SymbolKind { get; }
@@ -128,7 +138,7 @@ public sealed class NavigationResult
 
     /// <summary>위치 목록만 바꾸고 나머지 정보는 그대로 둔 결과입니다(정렬·거르기 뒤).</summary>
     public NavigationResult WithLocations(IReadOnlyList<NavigationLocation> locations) =>
-        new(locations, Symbol, Progress, ResolvedOnDemand, SymbolKind, Roles, Limited, UncheckedDefinitionFiles);
+        new(locations, Symbol, Progress, ResolvedOnDemand, SymbolKind, Roles, Limited, UncheckedDefinitionFiles, ResolvedFromEngine);
 
     /// <summary>
     /// 참조를 요청 파일에서만 찾은 결과입니다. clangd는 네임스페이스 참조를 색인하지 않아(clangd 22.1 확인) 다른 파일의 사용은 돌려주지 않습니다.
@@ -166,6 +176,15 @@ public sealed class ClangdNavigator : IDisposable
     private readonly Queue<string> touchOrder = new();
     private readonly Dictionary<string, DocumentText> touchTexts = new(StringComparer.OrdinalIgnoreCase);
     private readonly HashSet<string> attemptedCandidates = new(StringComparer.OrdinalIgnoreCase);
+    // 근사 명령으로 연 소스의 기억입니다(Unreal만). 다음 clangd가 그 색인 파일을 읽게 합니다.
+    private readonly DefinitionSourceStore? definitionSources;
+    // 이 clangd에서 색인 대기열 앞으로 올린 표시, 자신을 올리고 아직 색인을 기다리는 연 문서, 그 문서들이 색인된 뒤 올릴 관련 TU 표시입니다.
+    // clangd가 올린 표시를 기억하므로 한 번씩만 보냅니다. raisedTags 잠금으로 함께 보호합니다.
+    private readonly HashSet<string> raisedTags = new(StringComparer.Ordinal);
+    private readonly HashSet<string> awaitingOwnIndex = new(StringComparer.OrdinalIgnoreCase);
+    private readonly List<string> pendingRelatedTags = new();
+    // Unreal 외 문맥의 이름별 TU 표시입니다. 처음 쓸 때 만들며 같은 내용이라 잠그지 않습니다.
+    private volatile ILookup<string, string>? commandTags;
     private readonly ClangdIndexShards shards;
     // Context.Commands의 파일별 명령입니다. 여러 요청이 동시에 처음 만들어도 같은 내용이라 잠그지 않습니다.
     private volatile Dictionary<string, CompileCommand>? commandsByFile;
@@ -198,6 +217,7 @@ public sealed class ClangdNavigator : IDisposable
         Context = context;
         this.session = session;
         shards = new ClangdIndexShards(Path.Combine(context.Directory, ".cache", "clangd", "index"));
+        definitionSources = context.Kind == CompileContextKind.Unreal ? new DefinitionSourceStore(context.Directory) : null;
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () =>
         {
@@ -214,7 +234,8 @@ public sealed class ClangdNavigator : IDisposable
         session.TranslationUnitIndexed += path =>
         {
             Volatile.Write(ref indexedLineSeen, 1);
-            if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase)) return;
+            if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase) || IsQueueMarker(path)) return;
+            OwnIndexed(path);
             Interlocked.Increment(ref indexedUnits);
             if (autoPch && path.EndsWith(UnrealIndexPlan.PchSuffix, StringComparison.OrdinalIgnoreCase)) Volatile.Write(ref pchUnitIndexed, 1);
         };
@@ -371,6 +392,7 @@ public sealed class ClangdNavigator : IDisposable
             throw;
         }
 
+        if (navigator.definitionSources is not null) Observe(Task.Run(navigator.RestoreDefinitionSources));
         return navigator;
     }
 
@@ -413,7 +435,7 @@ public sealed class ClangdNavigator : IDisposable
                 kind = await SymbolKindAsync(symbol, locations, cancellationToken).ConfigureAwait(false);
             }
 
-            return new NavigationResult(locations, symbol, Progress, resolved, kind);
+            return new NavigationResult(locations, symbol, Progress, resolved, kind, resolvedFromEngine: resolved && locations.Any(l => IsEngine(l.Path)));
         }
         finally
         {
@@ -457,7 +479,8 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         var (again, _) = await ReferencesCoreAsync(query, progress, cancellationToken).ConfigureAwait(false);
-        return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles, again.Limited, again.UncheckedDefinitionFiles);
+        return new NavigationResult(again.Locations, again.Symbol, again.Progress, true, again.SymbolKind, again.Roles, again.Limited, again.UncheckedDefinitionFiles,
+            found.Any(l => IsEngine(l.Path)));
     }
 
     private async Task<(NavigationResult Result, IReadOnlyList<NavigationLocation>? Definitions)> ReferencesCoreAsync(NavigationQuery query,
@@ -1284,6 +1307,40 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <summary>
+    /// 이전 clangd가 근사 명령으로 색인한 소스(<see cref="DefinitionSourceStore"/>)에 같은 명령을 다시 줘 저장된 색인을 읽게 합니다. clangd는
+    /// 명령을 받은 파일의 색인 파일을 읽고, 내용이 바뀌었을 때만 다시 색인합니다. 시작 뒤 작업 스레드에서 부릅니다.
+    /// </summary>
+    private void RestoreDefinitionSources()
+    {
+        var commands = new List<CompileCommand>();
+        foreach (var file in definitionSources!.Load())
+        {
+            if (lifetime.IsCancellationRequested) return;
+            try
+            {
+                if (ApproximateCommand(file) is { } command) commands.Add(command);
+            }
+            catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+            {
+                // 재정의 헤더를 쓰지 못한 파일은 이번 시작에서 건너뛰고, 그 정의를 찾을 때 요청 시점에 다시 엽니다.
+            }
+        }
+
+        if (commands.Count == 0 || HasExited) return;
+        try
+        {
+            session.UpdateCompileCommands(commands);
+        }
+        catch (LspConnectionClosedException)
+        {
+            // 종료는 Changed로 알려집니다.
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+    }
+
+    /// <summary>
     /// 문서를 clangd에 엽니다. Unreal 프로젝트는 database에 원래 파일 대신 색인 단위 합성 TU만 있어 clangd가 다른 파일의 명령을 추정해
     /// 분석에 실패하므로(테스트 전용 UE 샘플: 정의·참조 0개), 처음 열 때 자기 명령(헤더는 소속 모듈의 명령)을 덮어쓰기로 줍니다.
     /// 색인 단위가 이미 그 파일을 담고 있어 background index는 최신 여부만 확인하고 다시 분석하지 않았습니다(같은 샘플 0.7초, 2026-10-09 측정).
@@ -1307,10 +1364,133 @@ public sealed class ClangdNavigator : IDisposable
             else if (TryApproximateCommand(path) is { } command)
             {
                 session.UpdateCompileCommands(new[] { command });
+                // 근사 명령을 받은 소스는 clangd가 색인하므로 다음 clangd도 그 색인을 읽게 기억합니다. 열기 콜백은 문서 집합 잠금 안이라 파일
+                // 쓰기는 작업 스레드에서 합니다.
+                if (definitionSources is { } store && DefinitionCandidates.IsSource(path)) Observe(Task.Run(() => store.Record(path)));
             }
         }
 
         session.OpenDocument(path, text, version);
+        if (options.PrioritizeOpenDocuments && !Progress.Completed && !IsQueueMarker(path)) RaiseIndexPriority(path, text);
+    }
+
+    /// <summary>색인 대기열 앞당기기에 여는 빈 헤더의 폴더입니다(<see cref="IndexQueuePriority"/>).</summary>
+    private string QueueMarkerDirectory => Path.Combine(Context.Directory, "queue");
+
+    private bool IsQueueMarker(string path)
+    {
+        var directory = Path.GetDirectoryName(Path.GetFullPath(path));
+        return directory is not null && string.Equals(directory.TrimEnd('\\', '/'), Path.GetFullPath(QueueMarkerDirectory).TrimEnd('\\', '/'),
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>
+    /// 색인이 끝나기 전에 연 문서와 관련된 TU를 clangd 색인 대기열 앞으로 올립니다. 표시와 같은 이름의 빈 헤더를 잠시 열면 clangd가 그 이름의
+    /// TU를 올립니다(<see cref="IndexQueuePriority"/>). 문서 집합 잠금 안(열기 콜백)에서 불리므로 표시만 정하고 파일 쓰기와 알림은 작업 스레드에서
+    /// 합니다.
+    /// </summary>
+    /// <remarks>
+    /// clangd의 앞당김은 한 단계뿐이라 함께 올린 작업 사이의 순서는 정해지지 않습니다. 관련 TU까지 한꺼번에 올리면 연 문서 자신(include한 헤더
+    /// 전체가 함께 색인됨)이 그 뒤로 밀려, 실제 Unreal 프로젝트(TU 82개, 작업 2개)에서 문서 3개를 열자 색인까지 9·30·41초였습니다(2026-10-09,
+    /// 앞당기지 않으면 11·35·137초). 문서마다 자신이 색인된 뒤 그 관련 TU를 올리면 먼저 끝난 문서의 관련 TU가 다른 연 문서와 다시 겹쳤습니다
+    /// (9·64·83초). 그래서 연 문서 자신을 먼저 올리고, include한 헤더의 같은 이름 cpp TU는 자신을 올린 연 문서가 모두 색인되면 올립니다
+    /// (같은 측정 5·8·7초, 공유 PCH가 필요한 문서 3개는 25·41·43초이며 앞당기지 않으면 12·69·210초). 이미 최신이라 다시 색인하지 않는 문서는
+    /// 완료 알림이 없으므로 문서마다 <see cref="RelatedTagDelay"/>까지만 기다립니다.
+    /// </remarks>
+    /// <remarks>
+    /// 빈 헤더에는 컴파일러만 있는 명령을 덮어쓰기로 줍니다. 명령이 없으면 clangd가 가까운 TU의 명령(공유 PCH 포함)을 빌려 빈 헤더에도 큰 헤더
+    /// 분석을 합니다(색인 시작 문서와 같은 이유). 덮어쓰기로 받은 빈 헤더도 clangd가 색인하지만 내용이 없어 바로 끝나며, 색인 단위 수에는
+    /// 넣지 않습니다.
+    /// </remarks>
+    private void RaiseIndexPriority(string path, string text)
+    {
+        Func<string, IEnumerable<string>> related = Context.Plan is { } plan
+            ? stem => plan.QueueTags(stem, path)
+            : stem => (commandTags ??= IndexQueuePriority.CommandTags(Context.Commands))[stem];
+        var all = IndexQueuePriority.TagsFor(path, text, related);
+        var key = Path.GetFullPath(path);
+        string[] own;
+        string[] released;
+        lock (raisedTags)
+        {
+            own = all.Take(1).Where(raisedTags.Add).ToArray();
+            if (own.Length > 0) awaitingOwnIndex.Add(key);
+            pendingRelatedTags.AddRange(all.Skip(1).Where(t => !raisedTags.Contains(t) && !pendingRelatedTags.Contains(t)));
+            released = awaitingOwnIndex.Count == 0 ? TakeRelatedTagsLocked() : Array.Empty<string>();
+        }
+
+        var tags = own.Concat(released).ToArray();
+        if (tags.Length > 0) Observe(Task.Run(() => SendQueueMarkers(tags)));
+        if (own.Length > 0) Observe(Task.Delay(RelatedTagDelay, lifetime.Token).ContinueWith(_ => OwnIndexed(key), TaskScheduler.Default));
+    }
+
+    /// <summary>연 문서 자신의 색인을 기다리는 최대 시간입니다. 지나면 그 문서는 색인된 것으로 보고 관련 TU를 올릴지 정합니다.</summary>
+    private static readonly TimeSpan RelatedTagDelay = TimeSpan.FromSeconds(30);
+
+    /// <summary>
+    /// 자신을 올린 연 문서가 색인되었거나 기다릴 시간이 지났습니다. 기다리는 연 문서가 더 없으면 모아 둔 관련 TU를 올립니다. TU 색인 완료마다
+    /// 불리므로 기다리는 문서가 없으면 바로 돌아갑니다.
+    /// </summary>
+    private void OwnIndexed(string path)
+    {
+        string[] tags;
+        lock (raisedTags)
+        {
+            if (awaitingOwnIndex.Count == 0 || !awaitingOwnIndex.Remove(Path.GetFullPath(path)) || awaitingOwnIndex.Count > 0) return;
+            tags = TakeRelatedTagsLocked();
+        }
+
+        if (tags.Length > 0 && !lifetime.IsCancellationRequested) Observe(Task.Run(() => SendQueueMarkers(tags)));
+    }
+
+    private string[] TakeRelatedTagsLocked()
+    {
+        var tags = pendingRelatedTags.Where(raisedTags.Add).ToArray();
+        pendingRelatedTags.Clear();
+        return tags;
+    }
+
+    private void SendQueueMarkers(IReadOnlyList<string> tags)
+    {
+        if (HasExited || Context.Commands.Count == 0) return;
+        var markers = new List<string>(tags.Count);
+        try
+        {
+            Directory.CreateDirectory(QueueMarkerDirectory);
+            foreach (var tag in tags)
+            {
+                var marker = Path.Combine(QueueMarkerDirectory, tag + ".h");
+                if (!File.Exists(marker)) File.WriteAllText(marker, string.Empty);
+                markers.Add(marker);
+            }
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException)
+        {
+            // 순서만 바꾸는 보조 기능이라 쓰지 못한 표시는 건너뜁니다. 같은 clangd에서는 다시 시도하지 않습니다.
+            if (AuxiliaryFailed is { } handler) handler("색인 대기열 앞당기기 파일을 쓰지 못했습니다: " + exception.Message);
+        }
+
+        if (markers.Count == 0) return;
+        var sample = Context.Commands[0].Arguments;
+        var head = new List<string> { sample[0] };
+        if (sample.Count > 1 && sample[1].StartsWith("--driver-mode=", StringComparison.Ordinal)) head.Add(sample[1]);
+        var directory = Context.Directory.Replace('\\', '/');
+        try
+        {
+            session.UpdateCompileCommands(markers.Select(m => new CompileCommand(directory, m, head.Concat(new[] { m }).ToArray())).ToArray());
+            foreach (var marker in markers)
+            {
+                session.OpenDocument(marker, string.Empty, 1);
+                session.CloseDocument(marker);
+            }
+        }
+        catch (LspConnectionClosedException)
+        {
+            // 종료는 Changed로 알려집니다.
+        }
+        catch (ObjectDisposedException)
+        {
+        }
     }
 
     /// <summary>
@@ -1657,6 +1837,7 @@ public sealed class ClangdNavigator : IDisposable
             var again = await session.DefinitionAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
             if (again.Count > 0 && again.Any(l => !DefinitionCandidates.IsHeader(l.Path)))
             {
+                if (command is not null) definitionSources?.Record(candidate);
                 return again;
             }
         }

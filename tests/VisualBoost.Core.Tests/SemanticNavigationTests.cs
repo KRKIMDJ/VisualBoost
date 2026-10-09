@@ -923,6 +923,17 @@ internal static class SemanticNavigationTests
                   otherDocument.Arguments.Contains("/DADAPTIVE=1") && plan.DocumentCommand(Path.Combine(root, "Loose.h")) is null,
                 "헤더는 소속 모듈 명령: " + string.Join(" ", headerDocument.Arguments));
 
+            // 색인 대기열 앞당기기: 이름이 같은 구성원 cpp를 색인하는 단위의 표시이며, 연 문서를 담은 단위는 뺍니다(연 문서는 자기 명령으로 따로 색인).
+            var soloTag = IndexQueuePriority.TagOf(soloUnit.File);
+            Check(plan.QueueTags("u2").SequenceEqual(new[] { "Module.Game.1" }) && plan.QueueTags("U1", Source("U2.cpp")).Count == 0 &&
+                  plan.QueueTags("Solo").SequenceEqual(new[] { soloTag }) && soloTag.StartsWith("Solo-", StringComparison.Ordinal) &&
+                  plan.QueueTags("Missing").Count == 0, "단위 대기열 표시");
+            var u1Tags = IndexQueuePriority.TagsFor(Source("U1.cpp"), "#include \"U1.generated.h\"\n#include \"U2.h\"\n  # include <Public/Solo.h>\n",
+                stem => plan.QueueTags(stem, Source("U1.cpp")));
+            var headerTags = IndexQueuePriority.TagsFor(Path.Combine(source, "Public", "Solo.h"), string.Empty, stem => plan.QueueTags(stem));
+            Check(u1Tags.SequenceEqual(new[] { "U1", soloTag }) && headerTags.SequenceEqual(new[] { "Solo", soloTag }),
+                "연 문서 자신과 include한 헤더의 같은 이름 cpp 단위(같은 묶음 제외, 헤더는 자기 이름 cpp): " + string.Join(",", u1Tags) + " | " + string.Join(",", headerTags));
+
             // 같은 구성이면 합성 TU를 다시 쓰지 않고(clangd가 묶음을 새로 색인하지 않게), 쓰지 않는 묶음 파일은 지웁니다.
             var stamp = DateTime.UtcNow.AddMinutes(-5);
             File.SetLastWriteTimeUtc(unitFile, stamp);
@@ -943,6 +954,56 @@ internal static class SemanticNavigationTests
         {
             TryDelete(root);
         }
+    }
+
+    /// <summary>색인 대기열 앞당기기 표시, 요청 시점에 연 정의 파일 기억, 요청 시점 분석의 엔진 구분을 확인합니다.</summary>
+    public static void RunIndexQueueAndDefinitionSources()
+    {
+        var stems = IndexQueuePriority.IncludedStems("#include \"A/B.h\"\n#include <C.hpp>\n#include \"Foo.generated.h\"\n// #include \"Comment.h\"\n#include \"b.h\"\n" +
+                                                     "#include \"Dir\\Win.h\"\n#define X 1\n");
+        Check(stems.SequenceEqual(new[] { "B", "C", "Win" }), "include한 파일 이름(생성 헤더·주석 제외, 대소문자 무시 중복 제거): " + string.Join(",", stems));
+        var commands = new[]
+        {
+            new CompileCommand("C:/p", "C:/p/src/Widget.cpp", new[] { "cl", "C:/p/src/Widget.cpp" }),
+            new CompileCommand("C:/p", "C:/p/other/widget.cpp", new[] { "cl", "C:/p/other/widget.cpp" }),
+            new CompileCommand("C:/p", "C:/p/src/Main.cpp", new[] { "cl", "C:/p/src/Main.cpp" })
+        };
+        var lookup = IndexQueuePriority.CommandTags(commands);
+        var mainTags = IndexQueuePriority.TagsFor("C:/p/src/Main.cpp", "#include \"WIDGET.h\"\n#include \"Missing.h\"\n", stem => lookup[stem]);
+        Check(mainTags.SequenceEqual(new[] { "Main", "Widget", "widget" }), "database 표기 그대로(대소문자 다른 두 TU 모두): " + string.Join(",", mainTags));
+        var many = string.Concat(Enumerable.Range(0, 40).Select(i => $"#include \"H{i}.h\"\n"));
+        Check(IndexQueuePriority.TagsFor("C:/p/a.cpp", many, stem => new[] { stem + "-u" }).Count == IndexQueuePriority.MaxTagsPerDocument, "문서당 표시 상한");
+
+        var root = Path.Combine(Path.GetTempPath(), "VisualBoost.DefinitionSources." + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var files = Enumerable.Range(0, DefinitionSourceStore.Capacity + 2).Select(i => Path.Combine(root, "src", $"F{i}.cpp")).ToArray();
+            foreach (var file in files.Take(3)) Write(file, "int x;");
+            var store = new DefinitionSourceStore(Path.Combine(root, "cache"));
+            Check(store.Load().Count == 0, "기록이 없으면 빈 목록");
+            Check(store.Record(files[0]) && store.Record(files[1]) && store.Record(files[0].ToUpperInvariant()) && store.Record(files[2]), "기억");
+            var loaded = new DefinitionSourceStore(Path.Combine(root, "cache")).Load();
+            Check(loaded.Count == 3 && string.Equals(loaded[0], files[2], StringComparison.OrdinalIgnoreCase) &&
+                  string.Equals(loaded[1], files[0], StringComparison.OrdinalIgnoreCase) && string.Equals(loaded[2], files[1], StringComparison.OrdinalIgnoreCase),
+                "최근 순, 같은 파일은 대소문자 무시 하나로: " + string.Join(",", loaded.Select(Path.GetFileName)));
+            File.Delete(files[1]);
+            Check(store.Load().Count == 2, "지금 없는 파일은 읽을 때 뺌");
+            foreach (var file in files) store.Record(file);
+            Check(store.Load().Count == 1 && File.ReadAllText(Path.Combine(root, "cache", DefinitionSourceStore.FileName)).Split(new[] { ".cpp" }, StringSplitOptions.None).Length - 1 ==
+                  DefinitionSourceStore.Capacity, "상한까지만 기억(오래된 것부터 버림)");
+            File.WriteAllText(Path.Combine(root, "cache", DefinitionSourceStore.FileName), "{ broken");
+            Check(store.Load().Count == 0 && store.Record(files[0]) && store.Load().Count == 1, "깨진 기록은 버리고 새로 기억");
+        }
+        finally
+        {
+            TryDelete(root);
+        }
+
+        var location = new NavigationLocation("C:/e/Engine/a.cpp", 1, 0, 1, 1);
+        Check(new NavigationResult(new[] { location }, null, default, true, resolvedFromEngine: true).ResolvedFromEngine &&
+              !new NavigationResult(new[] { location }, null, default, false, resolvedFromEngine: true).ResolvedFromEngine &&
+              new NavigationResult(new[] { location }, null, default, true, resolvedFromEngine: true).WithLocations(Array.Empty<NavigationLocation>()).ResolvedFromEngine,
+            "엔진 구분은 요청 시점 분석일 때만, 위치를 바꿔도 유지");
     }
 
     /// <summary>실제 clangd로 unity 묶음 색인의 구성원 참조와, 구성원을 열 때 자기 명령으로 분석하는지 확인합니다.</summary>
@@ -1075,6 +1136,8 @@ internal static class SemanticNavigationTests
             var wrapper = units[0].File;
             Check(wrapper.EndsWith("/units/Module.Game.1.cpp", StringComparison.Ordinal) && plan.MarkNeedsPch(new[] { Source("Solo.cpp") }).Count == 0,
                 "합성 TU가 아닌 경로는 무시");
+            // 아직 PCH 없이 색인할 단위는 실패하면 .pch.cpp로 바뀌므로 그 대기열 표시도 함께 올립니다.
+            Check(plan.QueueTags("U1").SequenceEqual(new[] { "Module.Game.1", "Module.Game.1.pch" }), "PCH로 바뀔 단위의 대기열 표시: " + string.Join(",", plan.QueueTags("U1")));
             // PCH 없는 합성 TU는 구성원 조건식의 매크로가 정의되지 않으면 분석 오류를 내고, PCH 없이 여는 문서는 그 경고를 받습니다.
             Check(File.ReadAllText(wrapper).Contains("#if !defined(WITH_GAME_FLAG)\n#error ") && !File.ReadAllText(Database(auto)[1].File).Contains("#error") &&
                   u1.Command.Arguments.Contains("-Wundef") && !plan.DocumentCommand(Source("U1.cpp"), pch: true)!.Command.Arguments.Contains("-Wundef"),
@@ -1088,6 +1151,8 @@ internal static class SemanticNavigationTests
                   !File.ReadAllText(pchWrapper).Contains("#error"),
                 "실패한 단위만 새 경로의 PCH 합성 TU로(조건식 확인 없음): " + string.Join(",", rewritten.Select(c => Path.GetFileName(c.File))));
             // 문서는 단위 판단과 상관없이 PCH 없이 시작합니다(혼자 실패하면 진단을 보고 다시 분석).
+            Check(plan.QueueTags("U1").SequenceEqual(new[] { IndexQueuePriority.TagOf(pchWrapper) }) && IndexQueuePriority.TagOf(pchWrapper) == "Module.Game.1.pch",
+                "PCH 단위는 .pch.cpp 표시만");
             Check(plan.UnitUsesPch(Source("U2.cpp")) && plan.DocumentCommand(Source("U1.cpp"))!.WithoutPch && !plan.UnitUsesPch(Source("U4.cpp")) &&
                   plan.MarkNeedsPch(new[] { pchWrapper }).Count == 0 && plan.PchUnitCount == 1, "전환한 단위만 PCH, 문서는 PCH 없이 시작, 다시 알려도 그대로");
 
@@ -1532,8 +1597,10 @@ internal static class SemanticNavigationTests
             var query = new NavigationQuery(new DocumentText(use, useText, 1), 1, position);
             var reports = new List<string>();
             var resolved = navigator.DefinitionAsync(query, new SyncProgress(reports.Add), timeout.Token).Result;
-            Check(resolved.ResolvedOnDemand && resolved.Locations.Single().Path == engineSource && resolved.Locations[0].Line == 1 &&
+            Check(resolved.ResolvedOnDemand && resolved.ResolvedFromEngine && resolved.Locations.Single().Path == engineSource && resolved.Locations[0].Line == 1 &&
                   reports.Any(r => r.Contains("Mod.cpp")), "엔진 cpp를 요청 시점에 열어 정의 확정: " + string.Join(",", resolved.Locations));
+            Check(new DefinitionSourceStore(navigator.Context.Directory).Load().Any(f => string.Equals(f, engineSource, StringComparison.OrdinalIgnoreCase)),
+                "근사 명령으로 연 엔진 cpp를 캐시 폴더에 기억");
             Check(!navigator.IsOpen(engineSource) && navigator.IsOpen(use), "후보는 닫고 요청 문서는 유지");
             var cached = default(NavigationResult);
             Check(SpinUntil(() =>
@@ -1582,7 +1649,7 @@ internal static class SemanticNavigationTests
             var callerLine = callerText.Split('\n')[1];
             var total = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1, callerLine.IndexOf("CalcTotal", StringComparison.Ordinal)),
                 null, timeout.Token).Result;
-            Check(total.ResolvedOnDemand && total.Locations.Single().Path == calcImpl, "색인에 없는 프로젝트 정의 파일을 요청 시점에 확정: " +
+            Check(total.ResolvedOnDemand && !total.ResolvedFromEngine && total.Locations.Single().Path == calcImpl, "색인에 없는 프로젝트 정의 파일을 요청 시점에 확정: " +
                   string.Join(",", total.Locations));
             var otherReferences = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1,
                 callerLine.IndexOf("CalcOther", StringComparison.Ordinal)), timeout.Token).Result;
@@ -1607,6 +1674,25 @@ internal static class SemanticNavigationTests
                 "분석 오류 요약(첫 오류 줄·메시지): " + useErrors?.FirstLine + " " + useErrors?.FirstMessage);
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             Check(navigator.HasExited, "정상 종료");
+
+            // 다음 clangd(새 세션, 메모리 정리 재시작)는 기억한 엔진 cpp의 저장된 색인을 읽어 요청 시점 분석 없이 정의를 찾습니다.
+            using var restarted = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
+            {
+                ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1
+            }, CancellationToken.None).Result;
+            // 기억한 파일의 명령은 시작 직후 작업 스레드에서 보내므로, 그 색인 읽기가 끝날 여유를 둔 뒤 첫 요청부터 확인합니다.
+            Check(SpinUntil(() => restarted.Progress.Completed, 60000), "다시 시작한 색인 완료");
+            Thread.Sleep(2000);
+            Check(SpinUntil(() => restarted.Progress.Completed, 60000), "기억한 파일 색인 읽기 완료");
+            using var restartTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            var again = default(NavigationResult);
+            Check(SpinUntil(() =>
+            {
+                again = restarted.DefinitionAsync(query, null, restartTimeout.Token).Result;
+                return again.Locations.Any(l => l.Path == engineSource);
+            }, 30000) && !again!.ResolvedOnDemand && !restarted.IsOpen(engineSource),
+                "다시 시작해도 기억한 엔진 정의를 색인에서 찾음: " + string.Join(",", again?.Locations ?? Array.Empty<NavigationLocation>()));
+            restarted.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
         finally
         {

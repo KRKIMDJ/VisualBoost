@@ -68,6 +68,8 @@ public sealed class UnrealIndexPlan
     private readonly Dictionary<string, Unit> unitOfMember = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, CompileCommand> commandOfFile = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, Unit> unitOfName = new(StringComparer.OrdinalIgnoreCase);
+    // 구성원 파일 이름(확장자 제외)별 단위입니다. 색인 대기열 앞당기기에 씁니다(IndexQueuePriority).
+    private readonly Dictionary<string, List<Unit>> unitsOfStem = new(StringComparer.OrdinalIgnoreCase);
     // PCH가 필요하다고 판단한 단위(단위 키 → 구성 지문)와 PCH를 넣고도 분석 오류가 난 단위(단위 키 → 그때의 구성원 파일 상태)입니다.
     private readonly Dictionary<string, string> decisions;
     private readonly Dictionary<string, string> failedWithPch;
@@ -87,7 +89,13 @@ public sealed class UnrealIndexPlan
         foreach (var unit in units)
         {
             unitOfName[unit.Name] = unit;
-            foreach (var member in unit.Members) unitOfMember[FullPath(member)] = unit;
+            foreach (var member in unit.Members)
+            {
+                unitOfMember[FullPath(member)] = unit;
+                var stem = Path.GetFileNameWithoutExtension(member);
+                if (!unitsOfStem.TryGetValue(stem, out var list)) unitsOfStem[stem] = list = new List<Unit>();
+                if (!list.Contains(unit)) list.Add(unit);
+            }
         }
 
         foreach (var command in commands) commandOfFile[FullPath(command.File)] = command;
@@ -159,6 +167,30 @@ public sealed class UnrealIndexPlan
         foreach (var stale in decisions.Keys.Where(k => !current.Contains(k)).ToArray()) decisions.Remove(stale);
         foreach (var stale in failedWithPch.Keys.Where(k => !current.Contains(k)).ToArray()) failedWithPch.Remove(stale);
         return new UnrealIndexPlan(directory, paths, mode, units, result.Commands, decisions, failedWithPch);
+    }
+
+    /// <summary>
+    /// 그 이름(확장자 제외)의 구성원 cpp를 색인하는 단위의 clangd 대기열 표시(합성 TU 파일 이름에서 확장자를 뺀 것)입니다
+    /// (<see cref="IndexQueuePriority"/>). <paramref name="exceptMember"/>를 담은 단위는 뺍니다. 연 문서는 자기 명령으로 따로 색인되므로 그
+    /// 단위까지 올리면 같은 분석을 앞에서 두 번 합니다. 자동 PCH에서 아직 PCH 없이 색인할 단위는 실패하면 <c>.pch.cpp</c>로 바뀌어 표시가
+    /// 달라지므로 그 표시도 함께 돌려줍니다(clangd는 올린 표시를 나중에 들어온 작업에도 적용함).
+    /// </summary>
+    public IReadOnlyList<string> QueueTags(string stem, string? exceptMember = null)
+    {
+        lock (gate)
+        {
+            if (!unitsOfStem.TryGetValue(stem, out var list)) return Array.Empty<string>();
+            var except = exceptMember is null ? null : unitOfMember.TryGetValue(FullPath(exceptMember), out var own) ? own : null;
+            var tags = new List<string>();
+            foreach (var unit in list)
+            {
+                if (ReferenceEquals(unit, except)) continue;
+                tags.Add(IndexQueuePriority.TagOf(WrapperPath(unit)));
+                if (Mode == UnrealPchMode.Auto && unit.Switchable && !UsesPch(unit)) tags.Add(unit.Name + ".pch");
+            }
+
+            return tags;
+        }
     }
 
     /// <summary>합성 TU로 색인하는 파일인지 봅니다.</summary>

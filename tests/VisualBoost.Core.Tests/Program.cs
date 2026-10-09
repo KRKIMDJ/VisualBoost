@@ -33,6 +33,7 @@ internal static class Program
         Run("Unreal unity 묶음 합성 TU", SemanticNavigationTests.RunUnityUnits);
         Run("unity 묶음 색인 통합(구성원 참조·구성원 자기 명령)", SemanticNavigationTests.RunUnityIntegration);
         Run("Unreal 공유 PCH 방식·전환·판단 기록", SemanticNavigationTests.RunUnrealPchPlan);
+        Run("색인 대기열 앞당기기·요청 시점 정의 파일 기억", SemanticNavigationTests.RunIndexQueueAndDefinitionSources);
         Run("자동 공유 PCH 통합(실패 묶음 재색인·문서 재분석)", SemanticNavigationTests.RunPchAutoIntegration);
         Run("clangd 세션 통합", SemanticNavigationTests.RunClangdIntegration);
         Run("clangd 문서 집합 임대·리비전·용량", SemanticNavigationTests.RunDocumentSet);
