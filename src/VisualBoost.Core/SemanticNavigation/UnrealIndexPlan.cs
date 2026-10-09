@@ -434,6 +434,28 @@ public sealed class UnrealIndexPlan
     }
 
     /// <summary>
+    /// 실패 묶음을 지금 바꿀 단위와 검사(<see cref="ProbeTargets"/>) 뒤에 바꿀 단위로 나눕니다. 검사 대상과 같은 모듈의 단위는 검사 뒤로 남깁니다
+    /// (배우기 전에 바꾸면 더 넣을 헤더가 없어 PCH로 감). 다른 모듈과 이 계획이 모르는 경로는 이름 인덱스 분석을 기다리지 않고 바로 바꿉니다.
+    /// </summary>
+    public (IReadOnlyList<string> Now, IReadOnlyList<string> AfterProbe) SplitByProbe(IEnumerable<string> translationUnits, IEnumerable<string> targets)
+    {
+        lock (gate)
+        {
+            var modules = new HashSet<string>(targets.Select(t => UnitOfWrapper(t) is { } unit ? ModuleOfUnit(unit) : null).OfType<string>(),
+                StringComparer.OrdinalIgnoreCase);
+            var now = new List<string>();
+            var afterProbe = new List<string>();
+            foreach (var path in translationUnits)
+            {
+                var module = UnitOfWrapper(path) is { } unit ? ModuleOfUnit(unit) : null;
+                (module is not null && modules.Contains(module) ? afterProbe : now).Add(path);
+            }
+
+            return (now, afterProbe);
+        }
+    }
+
+    /// <summary>
     /// clangd가 분석 오류를 알린 단위를 다음 단계로 바꿉니다(<see cref="UnrealPchMode.Auto"/>만). 모듈이 배운 보충 헤더 중 그 단위에 아직 넣지 않은
     /// 것이 있으면 보충 단계(<see cref="MaxSupplementStage"/>까지)로, 없으면 PCH로 바꿉니다. 보충을 하지 않으면 <see cref="MarkNeedsPch"/>와
     /// 같습니다. 바꾼 단위의 새 합성 TU 명령을 돌려줍니다.
@@ -559,6 +581,8 @@ public sealed class UnrealIndexPlan
             else if (!decisions.TryGetValue(unit.Key, out var stamp) || stamp != unit.Stamp)
             {
                 decisions[unit.Key] = unit.Stamp;
+                // 보충 단계에서 실패해 PCH로 기록하면, 전환 전에 끝나도 파일 하나짜리 단위의 문서는 다음 세션에 처음부터 PCH로 엽니다(피드백 검토 70).
+                if (unit.Stage > 0) exhausted[unit.Key] = unit.Stamp;
             }
             else
             {
@@ -636,6 +660,9 @@ public sealed class UnrealIndexPlan
         {
             foreach (var unit in pending)
             {
+                // 2단계 기록은 보충 1단계를 해 보고 실패했다는 뜻입니다. 1단계 기록(배운 헤더 없이 실패)은 보충을 해 보지 않았으므로 문서는
+                // 보충 헤더로 먼저 엽니다(SingleUnitUsesPch, 피드백 검토 70).
+                if (unit.Stage > 1) exhausted[unit.Key] = unit.Stamp;
                 unit.Stage = 0;
                 unit.SupplementHeaders = Array.Empty<string>();
                 unit.NeedsPch = true;

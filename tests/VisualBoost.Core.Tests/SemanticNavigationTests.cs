@@ -1281,6 +1281,12 @@ internal static class SemanticNavigationTests
             siblingPlan.Learn(siblingWrapper, Array.Empty<string>());
             Check(afterSibling == 1 && siblingPlan.ProbeTargets(new[] { siblingWrapper }).Count == 0,
                 "모듈이 이미 아는 헤더라도 단위에 없으면 성과, 단위에 있는 헤더만 찾으면 성과 없음");
+            // 검사 대상과 같은 모듈의 단위는 검사 뒤에, 이 계획이 모르는 경로는 이름 인덱스를 기다리지 않고 바로 바꿉니다(피드백 검토 69).
+            var splitUnit2 = Path.Combine(probeContext.Directory, "units", "Module.Game.2.cpp").Replace('\\', '/');
+            var unknownUnit = Path.Combine(probeContext.Directory, "units", "Other.cpp").Replace('\\', '/');
+            var (switchNow, switchAfter) = probePlan.SplitByProbe(new[] { probeUnit, splitUnit2, unknownUnit }, new[] { probeUnit });
+            Check(switchNow.SequenceEqual(new[] { unknownUnit }) && switchAfter.SequenceEqual(new[] { probeUnit, splitUnit2 }),
+                "검사 대상 모듈의 단위만 검사 뒤로: " + string.Join(",", switchNow.Select(Path.GetFileName)));
             Check(supPlan.ProbeTargets(new[] { supUnit1, supUnit2 }).SequenceEqual(new[] { supUnit1 }) &&
                   supPlan.IncludeDirectoriesOf(supUnit1).Contains(source.Replace('\\', '/').TrimEnd('/') + "/"),
                 "배운 헤더가 없는 모듈은 실패한 단위 하나만 열어 봄");
@@ -1364,6 +1370,34 @@ internal static class SemanticNavigationTests
             var legacy = CompileContextBuilder.Prepare(solution, fresh, engine, "clang-cl.exe", supplements: true).Plan!;
             Check(legacy.UnitUsesPch(Source("Solo.cpp")) && legacy.DocumentCommand(Source("Solo.cpp"))!.WithoutPch,
                 "이전 판의 PCH 판단만 있는 파일 하나짜리 단위의 문서는 보충으로 먼저 엶");
+            // 실패만 기록하고 전환 전에 끝나도, 보충 단계를 해 보고 실패한 파일 하나짜리 단위의 문서는 다음 세션에 처음부터 PCH로 엽니다(피드백 검토 70).
+            CompileContext PrepareAt(string name) => CompileContextBuilder.Prepare(solution, Path.Combine(root, name), engine, "clang-cl.exe", supplements: true);
+            string SoloOf(CompileContext context) => Database(context).First(c => Path.GetFileName(c.File).StartsWith("Solo-", StringComparison.Ordinal)).File;
+            var untried = PrepareAt("cache-solo-untried");
+            untried.Plan!.RecordFailure(SoloOf(untried));
+            var untriedNext = PrepareAt("cache-solo-untried").Plan!;
+            Check(untriedNext.UnitUsesPch(Source("Solo.cpp")) && untriedNext.DocumentCommand(Source("Solo.cpp"))!.WithoutPch,
+                "배운 헤더 없이 실패만 기록된 파일 하나짜리 단위의 문서는 보충으로 먼저 엶");
+            var tried = PrepareAt("cache-solo-tried");
+            tried.Plan!.Learn(SoloOf(tried), new[] { shared });
+            tried.Plan.RecordFailure(SoloOf(tried));
+            var triedSup = PrepareAt("cache-solo-tried");
+            Check(SoloOf(triedSup).EndsWith(".sup.cpp", StringComparison.Ordinal) && triedSup.Plan!.DocumentCommand(Source("Solo.cpp"))!.WithoutPch,
+                "배운 헤더가 있으면 실패 기록으로 보충 단계");
+            triedSup.Plan!.RecordFailure(SoloOf(triedSup));
+            var triedLast = PrepareAt("cache-solo-tried").Plan!;
+            Check(triedLast.UnitUsesPch(Source("Solo.cpp")) && !triedLast.DocumentCommand(Source("Solo.cpp"))!.WithoutPch &&
+                  !PrepareAt("cache-solo-tried").Plan!.DocumentCommand(Source("Solo.cpp"))!.WithoutPch,
+                "보충 단계 실패만 기록되고 더 넣을 헤더가 없으면 문서도 처음부터 PCH");
+            var final = PrepareAt("cache-solo-final");
+            final.Plan!.Learn(SoloOf(final), new[] { shared });
+            var finalSup = final.Plan.SwitchFailed(new[] { SoloOf(final) }).Single().File;
+            final.Plan.Learn(finalSup, new[] { calc });
+            var finalSup2 = final.Plan.SwitchFailed(new[] { finalSup }).Single().File;
+            final.Plan.RecordFailure(finalSup2);
+            var finalNext = PrepareAt("cache-solo-final").Plan!;
+            Check(finalSup2.EndsWith(".sup2.cpp", StringComparison.Ordinal) && finalNext.UnitUsesPch(Source("Solo.cpp")) &&
+                  !finalNext.DocumentCommand(Source("Solo.cpp"))!.WithoutPch, "마지막 보충 단계 실패만 기록돼도 문서는 처음부터 PCH");
         }
         finally
         {
@@ -1475,10 +1509,12 @@ internal static class SemanticNavigationTests
             var shared = Path.Combine(source, "Shared.h");
             IReadOnlyList<SourceSymbolLocation> Find(string name) =>
                 name == "FShared" ? new[] { new SourceSymbolLocation("FShared", shared, 2, 8, SourceSymbolKind.Struct) } : Array.Empty<SourceSymbolLocation>();
+            // 이름 인덱스 분석이 끝나지 않아도 대기 상한 뒤에는 지금 색인으로 검사해 전환합니다(피드백 검토 69).
             var options = new ClangdNavigatorOptions
             {
                 ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
-                EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1, PchSwitchDelay = TimeSpan.FromMilliseconds(200), FindSymbols = Find
+                EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1, PchSwitchDelay = TimeSpan.FromMilliseconds(200), FindSymbols = Find,
+                SymbolsReady = () => false, SymbolsWaitLimit = TimeSpan.FromSeconds(1)
             };
             var first = ClangdNavigator.StartAsync(options, CancellationToken.None).Result;
             try

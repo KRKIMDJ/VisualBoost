@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
 using System.IO;
 using System.Linq;
 using System.Threading;
@@ -47,6 +48,12 @@ public sealed class ClangdNavigatorOptions
     /// 실제로 유일하지 않을 수 있음). 없으면 늘 마친 것으로 봅니다.
     /// </summary>
     public Func<bool>? SymbolsReady { get; set; }
+
+    /// <summary>
+    /// <see cref="SymbolsReady"/>를 기다리는 상한입니다. 넘으면 지금까지의 이름 인덱스로 검사합니다. 기다리는 동안 검사 대상 모듈의 단위 전환과
+    /// 메모리 정리·다시 읽기가 미뤄지므로 끝없이 기다리지 않습니다.
+    /// </summary>
+    public TimeSpan SymbolsWaitLimit { get; set; } = TimeSpan.FromMinutes(5);
 
     /// <summary>파일 이름(확장자 제외)으로 파일을 찾는 조회입니다.</summary>
     public Func<string, IReadOnlyList<string>>? FindByStem { get; set; }
@@ -1799,8 +1806,10 @@ public sealed class ClangdNavigator : IDisposable
 
     /// <remarks>
     /// 헤더 보충을 하면 바꾸기 전에 실패한 합성 TU를 컴파일러로 검사해 모르는 이름을 보고 모듈의 보충 헤더를 배웁니다(<see cref="UnrealIndexPlan.ProbeTargets"/>).
-    /// 배운 헤더는 모듈에 기록되므로 이름 인덱스가 분석을 마칠 때까지 기다립니다(<see cref="ClangdNavigatorOptions.SymbolsReady"/>). 검사하는
-    /// 동안 들어온 실패는 다음 차례에 함께 처리하며, 그동안은 바쁨으로 보여 다시 시작을 미룹니다.
+    /// 배운 헤더는 모듈에 기록되므로 이름 인덱스가 분석을 마칠 때까지 기다리되(<see cref="ClangdNavigatorOptions.SymbolsReady"/>), 상한
+    /// (<see cref="ClangdNavigatorOptions.SymbolsWaitLimit"/>)을 넘으면 지금 색인으로 검사합니다. 덜 찬 색인으로 틀린 헤더를 배워도 그 단위는
+    /// 다음 단계에서 다시 검사하거나 PCH로 가므로 결과는 같고 비용만 듭니다. 검사 대상과 다른 모듈의 단위는 기다리기 전에 바꿉니다(피드백 검토 69).
+    /// 검사하는 동안 들어온 실패는 다음 차례에 함께 처리하며, 그동안은 바쁨으로 보여 다시 시작을 미룹니다.
     /// </remarks>
     private async Task FlushFailedUnitsCoreAsync()
     {
@@ -1818,7 +1827,11 @@ public sealed class ClangdNavigator : IDisposable
             var targets = plan.ProbeTargets(failed);
             if (targets.Count > 0)
             {
-                while (options.SymbolsReady is { } ready && !ready())
+                var (now, afterProbe) = plan.SplitByProbe(failed, targets);
+                if (now.Count > 0) SendSwitched(plan.SwitchFailed(now));
+                failed = afterProbe.ToArray();
+                var waited = Stopwatch.StartNew();
+                while (options.SymbolsReady is { } ready && !ready() && waited.Elapsed < options.SymbolsWaitLimit)
                 {
                     await Task.Delay(SymbolsPollInterval, lifetime.Token).ConfigureAwait(false);
                 }
