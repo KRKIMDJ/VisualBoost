@@ -28,7 +28,8 @@ public static class CppSourceAnalyzer
 
     private static readonly Regex FunctionPattern = new(
         // 공백과 식별자를 되감아 분할하지 않습니다. 마스킹된 긴 주석에서도 탐색 비용을 제한합니다.
-        @"(?<![\w:~])(?<name>[A-Za-z_~](?>\w*)(?:::[A-Za-z_~](?>\w*))*)(?>\s*)\([^;{}]*\)(?>\s*)(?:const\b(?>\s*))?(?:noexcept\b(?>\s*))?(?:(?:override|final)\b(?>\s*))?(?:->[^;{]+)?(?<terminator>[;{]?)(?>\s*)$",
+        // 본문을 한 줄에 쓴 정의(int32 GetValue() const { return Value; })는 여는 중괄호 뒤를 줄 끝까지 받습니다.
+        @"(?<![\w:~])(?<name>[A-Za-z_~](?>\w*)(?:::[A-Za-z_~](?>\w*))*)(?>\s*)\([^;{}]*\)(?>\s*)(?:const\b(?>\s*))?(?:noexcept\b(?>\s*))?(?:(?:override|final)\b(?>\s*))?(?:->[^;{]+)?(?:(?<terminator>\{)(?>[^\n]*)|(?<terminator>;?))(?>\s*)$",
         RegexOptions.Compiled | RegexOptions.CultureInvariant, MatchTimeout);
 
     private static readonly Regex VariablePattern = new(
@@ -40,7 +41,17 @@ public static class CppSourceAnalyzer
         "if", "for", "while", "switch", "catch", "return", "sizeof", "alignof", "decltype",
     };
 
-    public static SourceFileAnalysis Analyze(string path, string source, CancellationToken cancellationToken = default)
+    // 변수 선언처럼 "낱말 낱말;" 꼴이 되는 문장의 첫 낱말입니다(return false;의 false를 변수로 등록하던 문제).
+    private static readonly HashSet<string> StatementKeywords = new(StringComparer.Ordinal)
+    {
+        "return", "co_return", "co_yield", "co_await", "throw", "delete", "goto", "case", "else", "do", "new", "break", "continue",
+    };
+
+    /// <param name="intern">
+    /// 결과의 이름·소속·시그니처·include 문자열을 같은 값끼리 한 인스턴스로 모으는 함수입니다(없으면 그대로). 엔진 규모 이름 인덱스에서 같은
+    /// 문자열이 위치마다 따로 있어 관리 힙이 약 0.36 GB 더 들었습니다(2026-10-10 측정).
+    /// </param>
+    public static SourceFileAnalysis Analyze(string path, string source, CancellationToken cancellationToken = default, Func<string, string>? intern = null)
     {
         if (path is null)
         {
@@ -79,8 +90,9 @@ public static class CppSourceAnalyzer
             var includeMatch = code.TrimStart().StartsWith("#", StringComparison.Ordinal) ? IncludePattern.Match(includeCode) : Match.Empty;
             if (includeMatch.Success)
             {
+                var value = includeMatch.Groups["value"].Value.Trim();
                 includes.Add(new SourceIncludeReference(
-                    includeMatch.Groups["value"].Value.Trim(),
+                    intern is null ? value : intern(value),
                     includeMatch.Groups["open"].Value == "<",
                     lineNumber));
                 continue;
@@ -136,6 +148,7 @@ public static class CppSourceAnalyzer
             }
 
             var variableMatch = VariablePattern.Match(code);
+            if (variableMatch.Success && StatementKeywords.Contains(FirstWord(code))) variableMatch = Match.Empty;
             // 전방 선언의 타입 이름을 변수로 다시 등록하면 선언 헤더 후보가 오염됩니다.
             if (variableMatch.Success)
             {
@@ -151,7 +164,7 @@ public static class CppSourceAnalyzer
             AddMatch(symbols, variableMatch, path, lineNumber, SourceSymbolKind.Variable);
         }
 
-        return new SourceFileAnalysis(path, includes, CppSymbolDetails.Enrich(source, symbols, maskedSource, cancellationToken));
+        return new SourceFileAnalysis(path, includes, CppSymbolDetails.Enrich(source, symbols, maskedSource, cancellationToken, intern));
     }
 
     private static bool IsForwardDeclaration(string code, Match match)
@@ -179,6 +192,13 @@ public static class CppSourceAnalyzer
             var qualifier = qualifiedName.Substring(0, qualifierOffset);
             var containingType = LastNameSegment(qualifier);
             return string.Equals(containingType, simpleName, StringComparison.Ordinal);
+        }
+
+        // 생성자 초기화 목록의 멤버 초기화(A::A() : Value(0), Other(1))는 함수가 아닙니다.
+        if (prefix.EndsWith(",", StringComparison.Ordinal) ||
+            prefix.EndsWith(":", StringComparison.Ordinal) && !prefix.EndsWith("::", StringComparison.Ordinal))
+        {
+            return false;
         }
 
         if (prefix.IndexOf('=') >= 0 ||
@@ -267,6 +287,15 @@ public static class CppSourceAnalyzer
         }
 
         return result.ToString();
+    }
+
+    private static string FirstWord(string code)
+    {
+        var start = 0;
+        while (start < code.Length && char.IsWhiteSpace(code[start])) start++;
+        var end = start;
+        while (end < code.Length && (char.IsLetterOrDigit(code[end]) || code[end] == '_')) end++;
+        return code.Substring(start, end - start);
     }
 
     private static string LastNameSegment(string name)

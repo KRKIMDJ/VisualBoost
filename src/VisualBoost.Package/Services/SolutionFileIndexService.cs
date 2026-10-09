@@ -594,6 +594,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             DisposeWatchersNoLock();
             index.Clear();
             sourceAnalyzer.Clear();
+            sourceAnalyzer.ReleasePreviousAnalysis();
             recentFiles.Clear();
             recentFileSet.Clear();
             state = SolutionFileIndexState.Empty;

@@ -22,8 +22,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     private readonly SourceAnalysisCache cache;
     private readonly SourceSymbolIndex symbols = new();
     private readonly object gate = new();
-    private IReadOnlyDictionary<string, string[]> includeGraph =
-        new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
+    // include 연결은 개수만 보여 주므로 그래프는 패스 안에서만 만들고 보관하지 않습니다(엔진 규모 연결 약 78만 개의 경로 문자열).
     private int includeEdgeCount;
     private string? cachedSolution;
     private IReadOnlyDictionary<string, CachedSourceAnalysis>? loadedCache;
@@ -157,6 +156,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         }
         if (previous.Count == 0) symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>(), cancellationToken);
         var current = new ConcurrentDictionary<string, CachedSourceAnalysis>(StringComparer.OrdinalIgnoreCase);
+        // 이 패스에서 새로 분석한 결과의 문자열을 모으는 풀입니다. 패스가 끝나면 버립니다(저장된 분석은 읽을 때 따로 모음).
+        var pool = new StringPool();
         var timedOutFiles = 0;
         var publicationGate = new object();
         var pendingSymbols = new List<SourceSymbolLocation>();
@@ -259,7 +260,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 if (TryReuse(file, info, rank)) return;
 
                 Report(SourceAnalysisStage.Parsing, file);
-                var analysis = CppSourceAnalyzer.Analyze(file, File.ReadAllText(file), cancellationToken);
+                var analysis = CppSourceAnalyzer.Analyze(file, File.ReadAllText(file), cancellationToken, pool.Intern);
                 var after = TryGetInfo(file);
                 if (after is null || after.Length != info.Length || after.LastWriteTimeUtc != info.LastWriteTimeUtc) return;
                 current[file] = new CachedSourceAnalysis(info.Length, info.LastWriteTimeUtc.Ticks, analysis);
@@ -338,7 +339,6 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         lock (gate)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            includeGraph = graph;
             includeEdgeCount = graph.Values.Sum(paths => paths.Length);
         }
         cancellationToken.ThrowIfCancellationRequested();
@@ -372,8 +372,20 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             discoveredCacheFiles.Clear();
             cachedSymbolsPublished = false;
             symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>());
-            includeGraph = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
             includeEdgeCount = 0;
+        }
+    }
+
+    /// <summary>
+    /// Solution을 닫을 때 지난 분석 결과(다음 패스가 바뀌지 않은 파일에 다시 쓰는 파일별 분석)도 놓습니다. <see cref="Clear"/>는 같은 Solution의
+    /// 다시 수집에서도 불려 그때는 이 결과를 다시 쓰므로 놓지 않습니다. 놓지 않으면 엔진 규모에서 약 1.1 GB가 다음 Solution을 열 때까지 남았습니다.
+    /// </summary>
+    public void ReleasePreviousAnalysis()
+    {
+        lock (gate)
+        {
+            loadedCache = null;
+            cachedSolution = null;
         }
     }
 

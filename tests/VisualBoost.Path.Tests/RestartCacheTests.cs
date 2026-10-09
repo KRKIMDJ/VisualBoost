@@ -13,7 +13,7 @@ internal static class RestartCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost-Restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        try { VerifySymbols(root); VerifyRoots(root); }
+        try { VerifySymbols(root); VerifyRoots(root); VerifyPooling(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -80,7 +80,7 @@ internal static class RestartCacheTests
             writer.Write(""); writer.Write(""); writer.Write(2);
         }
         var old = new SourceAnalysisCache(dir); var entries = old.Load(solution);
-        Check(old.NeedsUpgrade && entries[file].Revision == CachedSourceAnalysis.CurrentRevision, "v4 현재 상세 심볼을 재파싱 없이 이관 가능");
+        Check(old.NeedsUpgrade && entries[file].Revision == 1, "v4 캐시는 분석 버전 1로 읽어 다음 분석에서 다시 분석");
         old.Save(solution, entries);
         Check(!old.NeedsUpgrade && new SourceAnalysisCache(dir).Load(solution).Count == 1, "v6 명시적 분석 버전 왕복");
         using var canceled = new CancellationTokenSource(); canceled.Cancel();
@@ -111,6 +111,37 @@ internal static class RestartCacheTests
         File.WriteAllText(Path.Combine(paths[0], "New.h"), "");
         Check(new IncludeRootLookup(paths).Find("New.h", default) == Path.Combine(paths[0], "New.h"), "다음 분석 패스의 새 파일 반영");
     }
+    private static void VerifyPooling(string root)
+    {
+        var dir = Path.Combine(root, "pool"); var solution = Path.Combine(root, "Pool.sln");
+        var first = Path.Combine(root, "PoolA.h"); var second = Path.Combine(root, "PoolB.h");
+        File.WriteAllText(first, "namespace Game\n{\nstruct FShared\n{\n    int Value();\n};\n}\n");
+        File.WriteAllText(second, "namespace Game\n{\nstruct FShared\n{\n    int Value();\n};\n}\n");
+        var files = new[] { first, second };
+        bool Pooled(SolutionSourceAnalyzer analyzer)
+        {
+            var found = analyzer.FindSymbol("Value");
+            return found.Count == 2 && ReferenceEquals(found[0].Name, found[1].Name) && ReferenceEquals(found[0].Scope, found[1].Scope) &&
+                   ReferenceEquals(found[0].Signature, found[1].Signature);
+        }
+
+        using (var analyzer = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
+        {
+            analyzer.Analyze(solution, files, Array.Empty<string>(), default);
+            Check(Pooled(analyzer), "새로 분석한 파일들의 같은 이름·소속·시그니처는 한 문자열");
+            var phases = new List<SourceAnalysisProgress>();
+            analyzer.ReleasePreviousAnalysis();
+            analyzer.Analyze(solution, files, Array.Empty<string>(), default, phases.Add);
+            Check(!phases.Any(p => p.Stage == SourceAnalysisStage.Parsing), "지난 분석을 놓은 뒤에도 저장된 분석을 다시 읽어 재파싱 없음");
+        }
+
+        using (var reopened = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
+        {
+            reopened.LoadCachedSymbols(solution, default, files);
+            Check(Pooled(reopened), "저장된 분석을 읽을 때도 같은 문자열은 한 인스턴스");
+        }
+    }
+
     private static void Check(bool value, string message) { CheckSilent(value, message); Console.WriteLine("PASS: " + message); }
     private static void CheckSilent(bool value, string message) { if (!value) throw new InvalidOperationException(message); }
     private static void Throws<T>(Action action) where T : Exception

@@ -48,11 +48,14 @@ internal sealed class SourceAnalysisCache
 
             var count = ReadCount(reader, MaximumFiles);
             var entries = new Dictionary<string, CachedSourceAnalysis>(count, StringComparer.OrdinalIgnoreCase);
+            // 읽는 동안만 쓰는 풀입니다. 같은 이름·소속·시그니처·include를 한 인스턴스로 모읍니다.
+            var pool = new StringPool();
             for (var fileIndex = 0; fileIndex < count; fileIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 var file = reader.ReadString();
-                var revision = version >= 5 ? reader.ReadInt32() : CachedSourceAnalysis.CurrentRevision;
+                // 분석 버전을 적지 않은 형식(v3·v4)은 분석 버전 1 시절의 결과입니다.
+                var revision = version >= 5 ? reader.ReadInt32() : 1;
                 var length = reader.ReadInt64();
                 var ticks = reader.ReadInt64();
                 var includeCount = ReadCount(reader, MaximumItemsPerFile);
@@ -60,7 +63,7 @@ internal sealed class SourceAnalysisCache
                 for (var includeIndex = 0; includeIndex < includeCount; includeIndex++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    includes.Add(new SourceIncludeReference(reader.ReadString(), reader.ReadBoolean(), reader.ReadInt32()));
+                    includes.Add(new SourceIncludeReference(pool.Intern(reader.ReadString()), reader.ReadBoolean(), reader.ReadInt32()));
                 }
 
                 var symbolCount = ReadCount(reader, MaximumItemsPerFile);
@@ -68,11 +71,12 @@ internal sealed class SourceAnalysisCache
                 for (var symbolIndex = 0; symbolIndex < symbolCount; symbolIndex++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    var name = reader.ReadString();
+                    var name = pool.Intern(reader.ReadString());
                     var line = reader.ReadInt32();
                     var column = reader.ReadInt32();
                     var kind = (SourceSymbolKind)reader.ReadInt32();
-                    symbols.Add(new SourceSymbolLocation(name, file, line, column, kind, reader.ReadString(), reader.ReadString()));
+                    var scope = pool.Intern(reader.ReadString());
+                    symbols.Add(new SourceSymbolLocation(name, file, line, column, kind, scope, pool.Intern(reader.ReadString())));
                     // 이전 실험 버전의 선언·정의 분류 값은 호환성 때문에 읽기만 하고 폐기합니다.
                     if (version == 4 || version == 5) reader.ReadInt32();
                 }

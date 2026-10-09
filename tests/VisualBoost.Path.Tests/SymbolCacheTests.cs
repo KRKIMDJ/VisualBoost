@@ -80,7 +80,7 @@ internal static class SymbolCacheTests
             }
             var loaded = cache.Load(solution);
             if (!cache.NeedsUpgrade || loaded.Count != 2 || loaded.Any(pair =>
-                pair.Value.Revision != CachedSourceAnalysis.CurrentRevision ||
+                pair.Value.Revision != (version >= 5 ? CachedSourceAnalysis.CurrentRevision : 1) ||
                 pair.Value.Analysis.Includes.Single().Value != "Base.h" ||
                 !pair.Value.Analysis.Symbols.Select(s => s.Name).SequenceEqual(new[] { "Move", "Stop" }) ||
                 pair.Value.Analysis.Symbols.Any(s => s.Scope != "Game::Actor" || s.Signature != "(float distance)")))

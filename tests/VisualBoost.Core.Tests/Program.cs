@@ -90,6 +90,7 @@ internal static class Program
         Run("C++ include와 주요 심볼 위치를 추출한다", CppSourceAnalysisFindsIncludesAndSymbols);
         Run("주석 속 심볼은 분석에서 제외한다", CppSourceAnalysisIgnoresComments);
         Run("함수 호출은 심볼 선언에서 제외한다", CppSourceAnalysisIgnoresFunctionCalls);
+        Run("함수 본문 안의 지역 변수·지역 객체는 제외하고 한 줄 정의는 등록한다", CppSourceAnalysisSkipsFunctionLocals);
         Run("클래스 전방 선언은 타입 정의에서 제외한다", CppSourceAnalysisIgnoresForwardDeclarations);
         Run("심볼 인덱스는 이름별 위치를 반환한다", SourceSymbolIndexFindsLocations);
         Run("심볼 검색은 정확한 이름을 우선한다", ExactSymbolNameWinsSearch);
@@ -553,6 +554,55 @@ internal static class Program
         Equal(2, functions.Length);
         Equal("CreateWidget", functions[0]);
         Equal("BuildWidget", functions[1]);
+    }
+
+    private static void CppSourceAnalysisSkipsFunctionLocals()
+    {
+        const string source = """
+            class Widget
+            {
+            public:
+                int32 Count = 0;
+                int32 GetCount() const { return Count; }
+                void Reset()
+                {
+                    const int32 Previous = Count;
+                    FScopeLock Lock(&Mutex);
+                    auto Apply = [this](int32 Value) { int32 Inner = Value; };
+                    return;
+                }
+            };
+            static int GlobalCount = 0;
+            Widget::Widget() : Count(1), Other(2)
+            {
+                int32 Local = 0;
+            }
+            bool IsReady() { return false; }
+            struct alignas(16) FVec
+            {
+                float X;
+                float Y = 0;
+            };
+            """;
+        var symbols = CppSourceAnalyzer.Analyze("Widget.cpp", source).Symbols;
+        string Names(SourceSymbolKind kind) => string.Join(",", symbols.Where(s => s.Kind == kind).Select(s => s.Name));
+        Equal("Count,GlobalCount,X,Y", Names(SourceSymbolKind.Variable));
+        Equal("GetCount,Reset,Widget,IsReady", Names(SourceSymbolKind.Function));
+
+        // 전처리 갈래가 여는 중괄호를 하나씩 가져 파일 끝에서 짝이 맞지 않으면 함수 밖 심볼을 잃지 않도록 빼지 않습니다. return 값은 늘 뺍니다.
+        const string unbalanced = """
+            #if WITH_A
+            void Run() {
+            #else
+            void Run(int Mode) {
+            #endif
+                int32 Local = 0;
+                return false;
+            }
+            int32 After = 0;
+            """;
+        var kept = CppSourceAnalyzer.Analyze("Split.cpp", unbalanced).Symbols.Where(s => s.Kind == SourceSymbolKind.Variable).Select(s => s.Name).ToArray();
+        Equal("Local,After", string.Join(",", kept));
     }
 
     private static void CppSourceAnalysisIgnoresForwardDeclarations()

@@ -7,17 +7,35 @@ using System.Threading;
 
 namespace VisualBoost.Core.Analysis;
 
-// 표시용 정보만 보강합니다. 타입 추론이나 오버로드의 의미적 동일성을 판정하지 않습니다.
+// 표시용 정보(소속·시그니처)를 보강하고 함수 본문 안의 변수·함수 위치를 뺍니다. 타입 추론이나 오버로드의 의미적 동일성을 판정하지 않습니다.
 internal static class CppSymbolDetails
 {
     private static readonly Regex ScopePattern = new(@"\b(?:namespace|class|struct|union)\s+(?:\w+_API\s+)?(?<name>[A-Za-z_]\w*(?:::[A-Za-z_]\w*)*)", RegexOptions.Compiled);
     private static readonly Regex Space = new(@"\s+", RegexOptions.Compiled);
 
-    public static IReadOnlyList<SourceSymbolLocation> Enrich(string source, IReadOnlyList<SourceSymbolLocation> symbols, string maskedSource, CancellationToken cancellationToken)
+    // 함수 본문 머리에서 마지막 ')' 뒤에 올 수 있는 것: 멤버 한정자와 뒤에 쓰는 반환 형식입니다. 생성자 초기화 목록은 마지막 초기화의 ')'로 끝납니다.
+    private static readonly Regex FunctionHeadSuffix = new(@"^(?>\s*)(?:(?:const|volatile|mutable|noexcept|override|final|&&|&)(?>\s*))*(?:->[^{};]*)?$",
+        RegexOptions.Compiled | RegexOptions.CultureInvariant);
+
+    /// <remarks>
+    /// 줄 단위 분석은 함수 본문 안의 지역 변수(<c>const int32 Score = …;</c>)와 지역 객체(<c>FScopeLock Lock(&amp;Mutex);</c>, 함수로 보임)까지
+    /// 등록해, 엔진 규모에서 이름 인덱스 위치의 상당수가 이런 오등록이었습니다(2026-10-10 측정: 변수가 전체의 43%). 중괄호를 따라 함수 본문 안이면
+    /// 변수·함수 위치를 뺍니다. 중괄호 짝이 파일 끝에서 맞지 않으면(<c>#if</c>/<c>#else</c> 갈래가 여는 중괄호를 하나씩 가진 경우 등) 본문 판정이
+    /// 뒤로 밀려 함수 밖 심볼까지 잃을 수 있으므로 그 파일은 빼지 않습니다.
+    /// </remarks>
+    public static IReadOnlyList<SourceSymbolLocation> Enrich(string source, IReadOnlyList<SourceSymbolLocation> symbols, string maskedSource, CancellationToken cancellationToken,
+        Func<string, string>? intern = null)
     {
+        intern ??= static value => value;
         if (symbols.Count == 0) return symbols;
         var code = maskedSource;
         var result = new List<SourceSymbolLocation>(symbols.Count);
+        // 함수 본문 안에서 나온 변수·함수 위치(result 안 번호)입니다. 파일 끝에서 중괄호가 맞으면 뺍니다.
+        var local = new List<int>();
+        // scopes와 같은 깊이로, 그 블록이 함수 본문(또는 그 안)인지입니다.
+        var functionBlocks = new List<bool>();
+        var functionDepth = 0;
+        var unbalanced = false;
         var lineOffsets = new List<int> { 0 };
         for (var i = 0; i < code.Length; i++)
         {
@@ -65,8 +83,9 @@ internal static class CppSymbolDetails
                         nameStart += separator + 2;
                     }
                     var signature = location.Kind == SourceSymbolKind.Function ? ReadSignature(source, code, nameEnd) : string.Empty;
-                    result.Add(new SourceSymbolLocation(location.Name, location.Path, location.Line,
-                        nameStart - lineStart + 1, location.Kind, owner, signature));
+                    if (functionDepth > 0 && location.Kind is SourceSymbolKind.Variable or SourceSymbolKind.Function) local.Add(result.Count);
+                    result.Add(new SourceSymbolLocation(intern(location.Name), location.Path, location.Line,
+                        nameStart - lineStart + 1, location.Kind, intern(owner), intern(signature)));
                 }
             }
             if (offset == code.Length) break;
@@ -88,14 +107,27 @@ internal static class CppSymbolDetails
                 var matches = ScopePattern.Matches(text);
                 // 함수 본문 안의 로컬 블록을 클래스/네임스페이스로 오인하지 않습니다.
                 var lastScope = matches.Count > 0 ? matches[matches.Count - 1] : null;
-                scopes.Add(lastScope is not null && text.IndexOf('(', lastScope.Index) < 0 && text.LastIndexOf(')') < lastScope.Index
-                    ? lastScope.Groups["name"].Value : string.Empty);
+                var named = lastScope is not null && text.IndexOf('(', lastScope.Index) < 0 && text.LastIndexOf(')') < lastScope.Index;
+                scopes.Add(named ? lastScope!.Groups["name"].Value : string.Empty);
+                var function = functionDepth > 0 || !named && IsFunctionHead(text);
+                functionBlocks.Add(function);
+                if (function) functionDepth++;
                 currentScope = string.Join("::", scopes.Where(s => s.Length != 0));
                 statement.Clear();
             }
             else if (c == '}')
             {
-                if (scopes.Count > 0) scopes.RemoveAt(scopes.Count - 1);
+                if (scopes.Count > 0)
+                {
+                    scopes.RemoveAt(scopes.Count - 1);
+                    if (functionBlocks[functionBlocks.Count - 1]) functionDepth--;
+                    functionBlocks.RemoveAt(functionBlocks.Count - 1);
+                }
+                else
+                {
+                    unbalanced = true;
+                }
+
                 currentScope = string.Join("::", scopes.Where(s => s.Length != 0));
                 statement.Clear();
             }
@@ -103,7 +135,27 @@ internal static class CppSymbolDetails
             else if (statement.Length < 4096) statement.Append(c);
             if (c == '\n') { line++; lineStart = offset + 1; }
         }
-        return result;
+
+        if (local.Count == 0 || unbalanced || scopes.Count != 0) return result;
+        var kept = new List<SourceSymbolLocation>(result.Count - local.Count);
+        var next = 0;
+        for (var i = 0; i < result.Count; i++)
+        {
+            if (next < local.Count && local[next] == i) { next++; continue; }
+            kept.Add(result[i]);
+        }
+
+        return kept;
+    }
+
+    /// <summary>
+    /// 여는 중괄호 앞 문장이 함수 본문 머리인지 봅니다: 마지막 ')' 뒤에 멤버 한정자나 뒤에 쓰는 반환 형식만 있습니다(<c>void F() const</c>,
+    /// <c>A::A() : X(1)</c>, <c>auto F() -&gt; int</c>, 람다 <c>[](int V)</c>). <c>struct alignas(16) FVec</c>처럼 괄호 뒤에 이름이 오면 아닙니다.
+    /// </summary>
+    private static bool IsFunctionHead(string text)
+    {
+        var close = text.LastIndexOf(')');
+        return close >= 0 && FunctionHeadSuffix.IsMatch(text.Substring(close + 1));
     }
 
     private static string ReadSignature(string source, string code, int offset)
