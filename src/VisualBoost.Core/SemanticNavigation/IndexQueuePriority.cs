@@ -23,7 +23,13 @@ public static class IndexQueuePriority
 
     private static readonly Regex Include = new(@"^[ \t]*#[ \t]*include[ \t]*[""<]([^"">\r\n]+)["">]", RegexOptions.Multiline | RegexOptions.CultureInvariant);
 
-    /// <summary>문서가 include한 파일의 이름(확장자 제외)입니다. 처음 나온 순서이며 Unreal 생성 헤더(<c>.generated.h</c>)는 뺍니다.</summary>
+    private static readonly char[] InvalidNameChars = Path.GetInvalidFileNameChars();
+
+    /// <summary>
+    /// 문서가 include한 파일의 이름(확장자 제외)입니다. 처음 나온 순서이며 Unreal 생성 헤더(<c>.generated.h</c>)와 파일 이름으로 쓸 수 없는 문자가
+    /// 든 이름은 뺍니다. 편집 중인 문서의 깨진 include 줄에서 .NET Framework의 <see cref="Path"/> 함수가 예외를 내지 않게 경로 함수에 넘기기 전에
+    /// 거릅니다(2026-10-09 검토 64).
+    /// </summary>
     public static IReadOnlyList<string> IncludedStems(string text)
     {
         if (text is null) throw new ArgumentNullException(nameof(text));
@@ -31,8 +37,9 @@ public static class IndexQueuePriority
         var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         foreach (Match match in Include.Matches(text))
         {
-            var name = Path.GetFileName(match.Groups[1].Value.Trim().Replace('\\', '/'));
-            if (name.EndsWith(".generated.h", StringComparison.OrdinalIgnoreCase)) continue;
+            var spelled = match.Groups[1].Value.Trim().Replace('\\', '/');
+            var name = spelled.Substring(spelled.LastIndexOf('/') + 1);
+            if (name.IndexOfAny(InvalidNameChars) >= 0 || name.EndsWith(".generated.h", StringComparison.OrdinalIgnoreCase)) continue;
             var stem = Path.GetFileNameWithoutExtension(name);
             if (stem.Length > 0 && seen.Add(stem)) stems.Add(stem);
         }

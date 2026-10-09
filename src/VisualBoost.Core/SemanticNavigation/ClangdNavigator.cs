@@ -406,9 +406,10 @@ public sealed class ClangdNavigator : IDisposable
         using var tracked = TrackRequest();
         SyncOpenDocuments(query);
         var opened = documents.Acquire(query.Document);
-        PrioritizeEditorDocument(query.Document);
         try
         {
+            // 임대를 받은 뒤에는 어떤 예외에도 finally가 풀도록 try 안에서 합니다(2026-10-09 검토 64).
+            PrioritizeEditorDocument(query.Document);
             await AwaitPchCheckAsync(query.Path, opened, progress, cancellationToken).ConfigureAwait(false);
             var locations = await session.DefinitionAsync(query.Path, query.Line, query.Character, cancellationToken).ConfigureAwait(false);
             var symbol = default(SemanticSymbol);
@@ -489,7 +490,6 @@ public sealed class ClangdNavigator : IDisposable
     {
         SyncOpenDocuments(query);
         var opened = documents.Acquire(query.Document);
-        PrioritizeEditorDocument(query.Document);
         // 역할 표식 근거(선언 제외 참조, 정의·선언 이동)는 표시 보조라 본 요청 뒤에 함께 보내고, 본 결과가 온 뒤 정한 시간까지만 기다립니다.
         // clangd는 한 파일의 AST 요청을 받은 순서대로 하나씩 처리하고 이미 시작한 요청은 취소로 멈추지 않습니다. 그래서 결과 표시에 꼭 필요한
         // symbolInfo와 짧은 정의·선언 요청을 본 요청 바로 뒤에 두고, 본 요청만큼 걸릴 수 있는 선언 제외 참조는 맨 뒤에 보냅니다(2026-10-07 검토).
@@ -498,6 +498,7 @@ public sealed class ClangdNavigator : IDisposable
         var auxiliary = new List<Task>(4);
         try
         {
+            PrioritizeEditorDocument(query.Document);
             await AwaitPchCheckAsync(query.Path, opened, progress, cancellationToken).ConfigureAwait(false);
             var all = session.ReferencesCountedAsync(query.Path, query.Line, query.Character, true, cancellationToken);
             var symbolInfo = session.SymbolInfoAsync(query.Path, query.Line, query.Character, cancellationToken, Spelled(query));

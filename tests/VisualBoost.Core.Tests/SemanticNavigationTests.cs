@@ -960,8 +960,8 @@ internal static class SemanticNavigationTests
     public static void RunIndexQueueAndDefinitionSources()
     {
         var stems = IndexQueuePriority.IncludedStems("#include \"A/B.h\"\n#include <C.hpp>\n#include \"Foo.generated.h\"\n// #include \"Comment.h\"\n#include \"b.h\"\n" +
-                                                     "#include \"Dir\\Win.h\"\n#define X 1\n");
-        Check(stems.SequenceEqual(new[] { "B", "C", "Win" }), "include한 파일 이름(생성 헤더·주석 제외, 대소문자 무시 중복 제거): " + string.Join(",", stems));
+                                                     "#include \"Dir\\Win.h\"\n#define X 1\n#include \"Bad|Name.h\"\n#include <x\u0001y.h>\n#include \"Dir/\"\n");
+        Check(stems.SequenceEqual(new[] { "B", "C", "Win" }), "include한 파일 이름(생성 헤더·주석·파일 이름으로 쓸 수 없는 이름 제외, 대소문자 무시 중복 제거): " + string.Join(",", stems));
         var commands = new[]
         {
             new CompileCommand("C:/p", "C:/p/src/Widget.cpp", new[] { "cl", "C:/p/src/Widget.cpp" }),
