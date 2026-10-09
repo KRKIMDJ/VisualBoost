@@ -50,8 +50,8 @@ public sealed class ClangdNavigatorOptions
     public Func<bool>? SymbolsReady { get; set; }
 
     /// <summary>
-    /// <see cref="SymbolsReady"/>를 기다리는 상한입니다. 넘으면 지금까지의 이름 인덱스로 검사합니다. 기다리는 동안 검사 대상 모듈의 단위 전환과
-    /// 메모리 정리·다시 읽기가 미뤄지므로 끝없이 기다리지 않습니다.
+    /// <see cref="SymbolsReady"/>를 기다리는 상한입니다. 넘으면 지금까지의 이름 인덱스로 검사하고, 그 세션에서는 다시 기다리지 않습니다.
+    /// 기다리는 동안 검사 대상 모듈의 단위 전환과 메모리 정리·다시 읽기가 미뤄지므로 끝없이 기다리지 않습니다.
     /// </summary>
     public TimeSpan SymbolsWaitLimit { get; set; } = TimeSpan.FromMinutes(5);
 
@@ -219,6 +219,10 @@ public sealed class ClangdNavigator : IDisposable
     // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
+    // 이름 인덱스 대기 상한에 한 번 닿았는지입니다. 닿은 뒤로는 이 세션에서 더 기다리지 않습니다. 묶음마다 상한을 새로 세면 실패가 이어지는
+    // 첫 색인에서 바쁨 상태가 묶음 수만큼 길어졌습니다(피드백 검토 71). 실패 묶음 작업은 pchFlushScheduled로 한 번에 하나만 돌고, 표식을
+    // 내리고 올리는 pchGate가 작업 사이의 순서를 보장하므로 따로 잠그지 않습니다.
+    private bool symbolsWaitExpired;
     private int pchUnitIndexed;
     private int indexedUnits;
     // 색인 완료 줄을 하나라도 읽었는지(색인 시작 문서 포함), 로그 형식 확인을 시작했는지, 형식이 맞지 않는다고 판단했는지입니다.
@@ -1831,8 +1835,14 @@ public sealed class ClangdNavigator : IDisposable
                 if (now.Count > 0) SendSwitched(plan.SwitchFailed(now));
                 failed = afterProbe.ToArray();
                 var waited = Stopwatch.StartNew();
-                while (options.SymbolsReady is { } ready && !ready() && waited.Elapsed < options.SymbolsWaitLimit)
+                while (!symbolsWaitExpired && options.SymbolsReady is { } ready && !ready())
                 {
+                    if (waited.Elapsed >= options.SymbolsWaitLimit)
+                    {
+                        symbolsWaitExpired = true;
+                        break;
+                    }
+
                     await Task.Delay(SymbolsPollInterval, lifetime.Token).ConfigureAwait(false);
                 }
             }
