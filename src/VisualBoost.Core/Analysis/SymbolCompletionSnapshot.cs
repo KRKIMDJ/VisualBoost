@@ -9,6 +9,8 @@ public sealed class SymbolCompletionSnapshot
 {
     public static readonly SymbolCompletionSnapshot Empty = new(Array.Empty<SourceSymbolLocation>());
     private readonly SourceSymbolLocation[] entries;
+    // 부분 갱신으로 바뀐 파일의 이름입니다. 같은 이름이면 entries보다 앞세웁니다.
+    private readonly SymbolCompletionSnapshot? newer;
 
     public SymbolCompletionSnapshot(IEnumerable<SourceSymbolLocation> symbols)
     {
@@ -19,11 +21,34 @@ public sealed class SymbolCompletionSnapshot
             .OrderBy(s => s.Name, StringComparer.OrdinalIgnoreCase).ThenBy(s => s.Name, StringComparer.Ordinal).ToArray();
     }
 
+    /// <summary>
+    /// <paramref name="older"/>에 바뀐 파일의 이름을 더합니다. 지운 이름은 빼지 않습니다(같은 이름이 다른 파일에 남았는지 여기서는 모름). 다음 전체
+    /// 재구성에서 정리됩니다.
+    /// </summary>
+    internal SymbolCompletionSnapshot(SymbolCompletionSnapshot older, IEnumerable<SourceSymbolLocation> newer)
+    {
+        entries = older.entries;
+        this.newer = new SymbolCompletionSnapshot(newer);
+    }
+
     public IReadOnlyList<SourceSymbolLocation> Find(string prefix, int limit = 30, CancellationToken token = default)
     {
         token.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(prefix) || prefix.Length < 3 || limit <= 0) return Array.Empty<SourceSymbolLocation>();
         limit = Math.Min(limit, 50);
+        IEnumerable<SourceSymbolLocation> result = Candidates(prefix, token);
+        if (newer is not null)
+        {
+            var fresh = newer.Candidates(prefix, token);
+            var names = new HashSet<string>(fresh.Select(s => s.Name), StringComparer.Ordinal);
+            result = fresh.Concat(result.Where(s => !names.Contains(s.Name)));
+        }
+        return result.OrderByDescending(s => s.Name.StartsWith(prefix, StringComparison.Ordinal)).ThenBy(s => s.Name.Length)
+            .ThenBy(s => s.Name, StringComparer.Ordinal).Take(limit).ToArray();
+    }
+
+    private List<SourceSymbolLocation> Candidates(string prefix, CancellationToken token)
+    {
         var low = 0;
         var high = entries.Length;
         while (low < high)
@@ -41,7 +66,6 @@ public sealed class SymbolCompletionSnapshot
             if (!item.Name.StartsWith(prefix, StringComparison.OrdinalIgnoreCase)) break;
             if (item.Name != prefix) result.Add(item);
         }
-        return result.OrderByDescending(s => s.Name.StartsWith(prefix, StringComparison.Ordinal)).ThenBy(s => s.Name.Length)
-            .ThenBy(s => s.Name, StringComparer.Ordinal).Take(limit).ToArray();
+        return result;
     }
 }

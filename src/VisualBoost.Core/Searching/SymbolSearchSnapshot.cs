@@ -18,7 +18,9 @@ internal sealed class SymbolSearchSnapshot
                 .ThenBy(s => s.Line).ThenBy(s => s.Column).ToArray())).ToArray();
     }
 
-    public IReadOnlyList<SourceSymbolMatch> Search(string query, int limit, CancellationToken token, Func<string, bool>? includes = null)
+    /// <param name="excluded">부분 갱신으로 숨긴 위치입니다. 상위 결과를 고르기 전에 빼야 숨긴 위치가 자리를 차지하지 않습니다.</param>
+    public IReadOnlyList<SourceSymbolMatch> Search(string query, int limit, CancellationToken token, Func<string, bool>? includes = null,
+        HashSet<SourceSymbolLocation>? excluded = null)
     {
         token.ThrowIfCancellationRequested();
         if (string.IsNullOrWhiteSpace(query) || limit <= 0) return Array.Empty<SourceSymbolMatch>();
@@ -37,6 +39,7 @@ internal sealed class SymbolSearchSnapshot
             {
                 token.ThrowIfCancellationRequested();
                 if (includes is not null && !includes(location.Path)) continue;
+                if (excluded is not null && excluded.Contains(location)) continue;
                 var candidate = new SourceSymbolMatch(location, score, FuzzySymbolSearch.ContainsAllTokens(location.Name, tokens));
                 if (matches.Count == limit && FuzzySymbolSearch.Compare(candidate, matches[matches.Count - 1]) >= 0)
                     break;

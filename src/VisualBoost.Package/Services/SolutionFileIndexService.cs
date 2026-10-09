@@ -21,6 +21,10 @@ internal sealed class SolutionFileIndexService : IDisposable
     private readonly SemaphoreSlim workerGate = new(1, 1);
     private Timer? refreshTimer;
     private int refreshEpoch;
+    // 저장·생성·삭제된 파일입니다. 묶어서 그 파일만 다시 분석합니다(UpdateSourcesAsync). 수집·분석 패스 중이면 패스가 끝날 때까지 모읍니다.
+    private readonly HashSet<string> changedFiles = new(StringComparer.OrdinalIgnoreCase);
+    // 폴더가 생겨 파일 열거부터 다시 해야 합니다.
+    private bool fullRefreshPending;
     private Task outstandingWork = Task.CompletedTask;
     private long generation;
     private CancellationTokenSource rebuildCancellation = new();
@@ -79,6 +83,8 @@ internal sealed class SolutionFileIndexService : IDisposable
             refreshTimer?.Dispose();
             refreshTimer = null;
             refreshEpoch++;
+            changedFiles.Clear();
+            fullRefreshPending = false;
             requestedRoots = Array.Empty<string>();
             requestedFiles = Array.Empty<string>();
             roots = Array.Empty<string>();
@@ -193,6 +199,9 @@ internal sealed class SolutionFileIndexService : IDisposable
             }
 
             requestedRoots = candidateRoots;
+            // 새 패스가 디스크에서 다시 읽으므로 그 전에 모은 변경은 따로 처리하지 않습니다.
+            changedFiles.Clear();
+            fullRefreshPending = false;
             Interlocked.Increment(ref generation);
             requestedFiles = candidateFiles;
             if (!string.Equals(solutionPath, discovery.SolutionPath, StringComparison.OrdinalIgnoreCase))
@@ -591,6 +600,8 @@ internal sealed class SolutionFileIndexService : IDisposable
             refreshTimer?.Dispose();
             refreshTimer = null;
             refreshEpoch++;
+            changedFiles.Clear();
+            fullRefreshPending = false;
             DisposeWatchersNoLock();
             index.Clear();
             sourceAnalyzer.Clear();
@@ -793,6 +804,8 @@ internal sealed class SolutionFileIndexService : IDisposable
                     isAnalyzing = false;
                     analysisProgress = null;
                     analysisError = sourceAnalyzer.LastWarning;
+                    // 패스 중에 바뀐 파일을 이제 반영합니다.
+                    if (changedFiles.Count > 0) ArmRefreshTimerNoLock();
                 }
             }
         }
@@ -836,7 +849,7 @@ internal sealed class SolutionFileIndexService : IDisposable
                     EnableRaisingEvents = false,
                 };
                 watcher.Created += OnCreated;
-                watcher.Changed += OnCreated;
+                watcher.Changed += OnChanged;
                 watcher.Deleted += OnDeleted;
                 watcher.Renamed += OnRenamed;
                 watcher.Error += OnWatcherError;
@@ -864,11 +877,18 @@ internal sealed class SolutionFileIndexService : IDisposable
                 ProjectSourceScope.IsSupplementalCode(eventArgs.FullPath)))
             {
                 index.Add(eventArgs.FullPath);
-                ScheduleRefreshNoLock();
+                ScheduleUpdateNoLock(new[] { eventArgs.FullPath });
             }
             else if (directoryExists && !SolutionFileCatalog.IsExcludedPath(eventArgs.FullPath))
                 ScheduleRefreshNoLock();
         }
+    }
+
+    private void OnChanged(object sender, FileSystemEventArgs eventArgs)
+    {
+        // 폴더의 Changed는 안의 항목이 생기거나 지워질 때마다(저장할 때도) 오고, 그 항목의 알림이 따로 옵니다. 파일만 봅니다.
+        if (!File.Exists(eventArgs.FullPath)) return;
+        OnCreated(sender, eventArgs);
     }
 
     private void OnDeleted(object sender, FileSystemEventArgs eventArgs)
@@ -882,7 +902,7 @@ internal sealed class SolutionFileIndexService : IDisposable
                 index.Remove(path);
             if (removed.Length > 0)
             {
-                ScheduleRefreshNoLock();
+                ScheduleUpdateNoLock(removed);
             }
         }
     }
@@ -910,6 +930,18 @@ internal sealed class SolutionFileIndexService : IDisposable
 
     private void ScheduleRefreshNoLock()
     {
+        fullRefreshPending = true;
+        ArmRefreshTimerNoLock();
+    }
+
+    private void ScheduleUpdateNoLock(IEnumerable<string> paths)
+    {
+        changedFiles.UnionWith(paths);
+        ArmRefreshTimerNoLock();
+    }
+
+    private void ArmRefreshTimerNoLock()
+    {
         if (refreshTimer is null)
         {
             var epoch = ++refreshEpoch;
@@ -918,12 +950,73 @@ internal sealed class SolutionFileIndexService : IDisposable
                 lock (gate)
                 {
                     if (disposed || epoch != refreshEpoch || state == SolutionFileIndexState.Empty) return;
-                    Start(new SolutionIndexDiscoveryResult(solutionPath, requestedRoots, requestedFiles), force: true);
+                    if (fullRefreshPending)
+                    {
+                        Start(new SolutionIndexDiscoveryResult(solutionPath, requestedRoots, requestedFiles), force: true);
+                        return;
+                    }
+                    // 수집·분석 패스 중에 바뀐 파일은 패스가 끝난 뒤 처리합니다(AnalyzeSourcesAsync가 다시 예약). 패스를 처음부터 다시 돌리지
+                    // 않으므로 첫 분석 중에 저장해도 그때까지 분석한 결과를 잃지 않습니다.
+                    if (changedFiles.Count == 0 || state != SolutionFileIndexState.Ready || isAnalyzing) return;
+                    var paths = changedFiles.ToArray();
+                    changedFiles.Clear();
+                    var current = solutionPath;
+                    var analyze = configuration.EnableSourceAnalysis;
+                    var token = rebuildCancellation.Token;
+                    var work = Task.Run(() => UpdateSourcesAsync(current, paths, analyze, token), token);
+                    outstandingWork = Task.WhenAll(outstandingWork, work);
                 }
             }, null, Timeout.Infinite, Timeout.Infinite);
         }
-        // 저장·생성 시 연속으로 발생하는 알림을 한 번의 캐시 검증으로 합칩니다.
+        // 저장·생성 시 연속으로 발생하는 알림을 한 번의 처리로 합칩니다.
         refreshTimer.Change(750, Timeout.Infinite);
+    }
+
+    /// <summary>
+    /// 바뀐 파일만 파일 목록과 이름 인덱스에 반영합니다. 마친 분석 패스가 없어 부분 갱신할 수 없으면 전체 다시 수집합니다.
+    /// </summary>
+    /// <remarks>
+    /// 예전에는 파일 하나를 저장해도 전체 다시 수집(파일 열거·모든 파일 확인·이름 인덱스 두 번 재구성·include 연결·분석 캐시 저장)을 해서
+    /// 엔진 규모에서 저장마다 수십 초의 배경 작업과 1 GB 넘는 일시 메모리가 들었고, 그동안 상태가 수집 중으로 바뀌었습니다.
+    /// </remarks>
+    private async Task UpdateSourcesAsync(string currentSolutionPath, IReadOnlyList<string> paths, bool analyze, CancellationToken cancellationToken)
+    {
+        var entered = false;
+        try
+        {
+            await workerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+            entered = true;
+            // 저장은 임시 파일 이름 바꾸기로 지움·생성 알림이 섞여 오므로, 알림 순서가 아니라 지금 디스크 상태로 파일 목록을 맞춥니다.
+            var present = new HashSet<string>(paths.Where(File.Exists), StringComparer.OrdinalIgnoreCase);
+            lock (gate)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                foreach (var path in paths)
+                {
+                    if (present.Contains(path) && (explicitFiles.Contains(path, StringComparer.OrdinalIgnoreCase) ||
+                        ProjectSourceScope.IsSupplementalCode(path)))
+                        index.Add(path);
+                    else index.Remove(path);
+                }
+            }
+            if (analyze && !sourceAnalyzer.UpdateFiles(currentSolutionPath, paths, cancellationToken))
+            {
+                lock (gate)
+                {
+                    if (!disposed && !cancellationToken.IsCancellationRequested)
+                        Start(new SolutionIndexDiscoveryResult(solutionPath, requestedRoots, requestedFiles), force: true);
+                }
+            }
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            lock (gate)
+                if (!disposed && !cancellationToken.IsCancellationRequested) analysisError = exception.Message;
+        }
+        finally { if (entered) workerGate.Release(); }
     }
 
     private void CancelBuildNoLock()

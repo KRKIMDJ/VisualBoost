@@ -93,6 +93,7 @@ internal static class Program
         Run("함수 본문 안의 지역 변수·지역 객체는 제외하고 한 줄 정의는 등록한다", CppSourceAnalysisSkipsFunctionLocals);
         Run("클래스 전방 선언은 타입 정의에서 제외한다", CppSourceAnalysisIgnoresForwardDeclarations);
         Run("심볼 인덱스는 이름별 위치를 반환한다", SourceSymbolIndexFindsLocations);
+        Run("심볼 인덱스는 바뀐 파일의 위치만 숨기고 더한다", SourceSymbolIndexUpdatesChangedFiles);
         Run("심볼 검색은 정확한 이름을 우선한다", ExactSymbolNameWinsSearch);
         Run("심볼 검색은 파일 경로를 검색하지 않는다", SymbolSearchIgnoresFilePaths);
         Run("심볼 검색은 결과 수와 취소를 적용한다", SymbolSearchLimitsResultsAndCancels);
@@ -578,6 +579,7 @@ internal static class Program
                 int32 Local = 0;
             }
             bool IsReady() { return false; }
+            int USampleLibrary::GetValue() { return Sample::Detail::ReadFlag(); }
             struct alignas(16) FVec
             {
                 float X;
@@ -587,7 +589,8 @@ internal static class Program
         var symbols = CppSourceAnalyzer.Analyze("Widget.cpp", source).Symbols;
         string Names(SourceSymbolKind kind) => string.Join(",", symbols.Where(s => s.Kind == kind).Select(s => s.Name));
         Equal("Count,GlobalCount,X,Y", Names(SourceSymbolKind.Variable));
-        Equal("GetCount,Reset,Widget,IsReady", Names(SourceSymbolKind.Function));
+        Equal("GetCount,Reset,Widget,IsReady,GetValue", Names(SourceSymbolKind.Function));
+        Equal("USampleLibrary", symbols.Single(s => s.Name == "GetValue").Scope);
 
         // 전처리 갈래가 여는 중괄호를 하나씩 가져 파일 끝에서 짝이 맞지 않으면 함수 밖 심볼을 잃지 않도록 빼지 않습니다. return 값은 늘 뺍니다.
         const string unbalanced = """
@@ -635,6 +638,51 @@ internal static class Program
         Equal(2, index.Count);
         Equal("A.cpp", index.Find("widget")[0].Path);
         Equal(0, index.Find("missing").Count);
+    }
+
+    private static void SourceSymbolIndexUpdatesChangedFiles()
+    {
+        using var index = new SourceSymbolIndex();
+        var keep = new SourceSymbolLocation("SharedName", "A.h", 1, 1, SourceSymbolKind.Function);
+        var removedOnly = new SourceSymbolLocation("RemovedFunction", "B.h", 2, 1, SourceSymbolKind.Function);
+        var oldShared = new SourceSymbolLocation("SharedName", "B.h", 3, 1, SourceSymbolKind.Function);
+        index.ReplaceAll(new[] { keep, removedOnly, oldShared });
+        var revision = index.Revision;
+
+        // B.h를 저장해 RemovedFunction이 AddedFunction으로 바뀌고 SharedName은 같은 자리에 다시 나옵니다(값이 같아도 다른 객체).
+        var newShared = new SourceSymbolLocation("SharedName", "B.h", 3, 1, SourceSymbolKind.Function);
+        var added = new SourceSymbolLocation("AddedFunction", "B.h", 2, 1, SourceSymbolKind.Function);
+        index.Update(new[] { removedOnly, oldShared }, new[] { newShared, added });
+        Equal(3, index.Count);
+        Equal(true, index.Revision > revision);
+        Equal(0, index.Find("RemovedFunction").Count);
+        Equal(true, index.Search("RemovedFunction").All(match => match.Location != removedOnly));
+        var shared = index.Find("SharedName");
+        Equal(2, shared.Count);
+        Equal(true, ReferenceEquals(shared[0], keep) && ReferenceEquals(shared[1], newShared));
+        var searched = index.Search("SharedName").Select(match => match.Location).ToArray();
+        Equal(true, searched.Length == 2 && searched.Contains(keep) && searched.Contains(newShared));
+        Equal("AddedFunction", index.CompletionSnapshot.Find("Added").Single().Name);
+
+        // 같은 파일을 다시 저장하면 앞 갱신의 묶음과 병합하면서 숨긴 위치를 버립니다.
+        var again = new SourceSymbolLocation("AddedFunction", "B.h", 5, 1, SourceSymbolKind.Function);
+        index.Update(new[] { newShared, added }, new[] { again });
+        Equal(2, index.Count);
+        Equal(5, index.Find("AddedFunction").Single().Line);
+        Equal(true, ReferenceEquals(index.Find("SharedName").Single(), keep));
+        Equal(true, ReferenceEquals(index.Search("SharedName").Single().Location, keep));
+
+        // 숨긴 위치·추가 묶음이 쌓이면 남은 위치로 다시 만듭니다. 결과와 입력 추천이 같아야 합니다.
+        var bulk = Enumerable.Range(0, 60_000)
+            .Select(i => new SourceSymbolLocation("Bulk" + i, "C.h", i + 1, 1, SourceSymbolKind.Function)).ToArray();
+        index.Update(Array.Empty<SourceSymbolLocation>(), bulk);
+        Equal(60_002, index.Count);
+        Equal(1, index.Find("Bulk7").Count);
+        index.Update(bulk, Array.Empty<SourceSymbolLocation>());
+        Equal(2, index.Count);
+        Equal(0, index.Find("Bulk7").Count);
+        Equal(0, index.CompletionSnapshot.Find("Bulk").Count);
+        Equal(5, index.Find("AddedFunction").Single().Line);
     }
 
     private static void ExactSymbolNameWinsSearch()

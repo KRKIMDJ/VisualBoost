@@ -13,7 +13,7 @@ internal static class RestartCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost-Restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        try { VerifySymbols(root); VerifyRoots(root); VerifyPooling(root); }
+        try { VerifySymbols(root); VerifyRoots(root); VerifyPooling(root); VerifyPartialUpdate(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -139,6 +139,33 @@ internal static class RestartCacheTests
         {
             reopened.LoadCachedSymbols(solution, default, files);
             Check(Pooled(reopened), "저장된 분석을 읽을 때도 같은 문자열은 한 인스턴스");
+        }
+    }
+
+    private static void VerifyPartialUpdate(string root)
+    {
+        var dir = Path.Combine(root, "partial"); var solution = Path.Combine(root, "Partial.sln");
+        var first = Path.Combine(root, "PartA.h"); var second = Path.Combine(root, "PartB.h");
+        File.WriteAllText(first, "void KeepPart();\n");
+        File.WriteAllText(second, "void OldPart();\n");
+        var files = new[] { first, second };
+        using (var analyzer = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
+        {
+            Check(!analyzer.UpdateFiles(solution, new[] { second }, default), "마친 분석 패스 전에는 부분 갱신하지 않음");
+            analyzer.Analyze(solution, files, Array.Empty<string>(), default);
+            File.WriteAllText(second, "void NewPartName();\n");
+            Check(analyzer.UpdateFiles(solution, new[] { second }, default) && analyzer.FindSymbol("NewPartName").Count == 1 &&
+                analyzer.FindSymbol("OldPart").Count == 0 && analyzer.FindSymbol("KeepPart").Count == 1, "저장한 파일만 다시 분석해 이름 인덱스 갱신");
+            File.Delete(first);
+            Check(analyzer.UpdateFiles(solution, new[] { first }, default) && analyzer.FindSymbol("KeepPart").Count == 0, "지운 파일의 이름 제거");
+            // 부분 갱신은 분석 캐시 파일에 쓰지 않으므로, 다음 패스는 바뀐 파일이 없어도 저장해야 합니다.
+            analyzer.Analyze(solution, new[] { second }, Array.Empty<string>(), default);
+        }
+        using (var reopened = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
+        {
+            reopened.LoadCachedSymbols(solution, default);
+            Check(reopened.FindSymbol("NewPartName").Count == 1 && reopened.FindSymbol("OldPart").Count == 0 &&
+                reopened.FindSymbol("KeepPart").Count == 0, "부분 갱신 결과를 다음 분석 패스가 저장");
         }
     }
 

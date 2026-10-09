@@ -54,6 +54,7 @@ internal static class ProjectScopeTests
             File.WriteAllText(fresh, "void ChangedSymbol();");
             Until(() => service.FindSymbol("ChangedSymbol").Count == 1 && service.FindSymbol("FreshSymbol").Count == 0,
                 "저장 후 이전 심볼 제거");
+            Check(service.CompletionSnapshot.Find("ChangedSym").Any(symbol => symbol.Name == "ChangedSymbol"), "저장한 파일의 새 이름을 입력 추천에 반영");
             var renamed = Path.Combine(Path.GetDirectoryName(fresh)!, "Renamed.cpp");
             File.Move(fresh, renamed);
             Until(() => service.FindByStem("Fresh").Count == 0 && service.FindByStem("Renamed").Count == 1 &&
@@ -61,6 +62,8 @@ internal static class ProjectScopeTests
             File.Delete(renamed);
             Until(() => service.FindByStem("Renamed").Count == 0 && service.FindSymbol("ChangedSymbol").Count == 0,
                 "삭제 후 파일·심볼 제거");
+            Check(service.Generation == assetGeneration && service.GetSnapshot().State == SolutionFileIndexState.Ready,
+                "파일 생성·저장·이름 변경·삭제는 전체 다시 수집 없이 반영");
             service.Start(new SolutionIndexDiscoveryResult(solution, Array.Empty<string>(), new[] { header }), force: true);
             service.WaitUntilReadyAsync().GetAwaiter().GetResult();
             service.WaitUntilAnalysisReadyAsync().GetAwaiter().GetResult();
