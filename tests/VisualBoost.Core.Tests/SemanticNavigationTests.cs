@@ -3054,6 +3054,33 @@ internal static class SemanticNavigationTests
         return install is null ? null : MsBuildCompileCommands.FindMsBuild(install);
     }
 
+    public static void RunProcessLaunchSafety()
+    {
+        foreach (var path in new[] { @"C:\VS\VC\Tools\Llvm\x64\bin\clang-cl.exe", "c:/llvm/bin/clang-cl.exe", @"\\server\share\clang-cl.exe", "//server/share/a.exe" })
+        {
+            Check(ProcessLaunchSafety.IsFullyQualified(path), "절대 경로 실행 허용: " + path);
+        }
+
+        foreach (var path in new[] { "clang-cl.exe", @".\clang-cl.exe", @"bin\clang-cl.exe", @"\clang-cl.exe", "C:clang-cl.exe", "C:", "", null })
+        {
+            Check(!ProcessLaunchSafety.IsFullyQualified(path), "현재 폴더에 따라 달라지는 경로 거부: " + (path ?? "null"));
+        }
+
+        // 실제 빌드 명령(헤더 보충의 cc1 강제 include 포함)은 그대로 둡니다.
+        var normal = new[] { "/Zs", "--driver-mode=cl", "/DX=1", "/IC:/w/Inc", "-Xclang", "-include", "-Xclang", "C:/w/Defs.h", "/clang:-ferror-limit=0", "-load", "C:/w/a.cpp" };
+        Check(ReferenceEquals(ProcessLaunchSafety.WithoutCodeLoadingOptions(normal), normal), "정상 명령 유지");
+
+        var hostile = new[]
+        {
+            "/DX=1", "-Xclang", "-load", "-Xclang", @"\\evil\share\p.dll", "/clang:-fplugin=C:/e.dll", "-fpass-plugin=p.dll", "/clang:-fplugin-arg-p-x",
+            "--config", "a.cfg", "--config=b.cfg", "-clang:--config-user-dir=C:/d", "@more.rsp", "-Xclang", "-plugin-arg-p", "-Xclang", "v",
+            "-Xclang", "-add-plugin", "-Xclang", "p", "/clang:-Xclang", "/clang:-load", "/clang:-Xclang", "/clang:q.dll", "-Xclang=-fpass-plugin=r.dll",
+            "-Xclang", "@x.rsp", "/IC:/w/Inc", "C:/w/a.cpp"
+        };
+        var kept = ProcessLaunchSafety.WithoutCodeLoadingOptions(hostile);
+        Check(kept.SequenceEqual(new[] { "/DX=1", "/IC:/w/Inc", "C:/w/a.cpp" }), "플러그인·설정 파일·응답 파일 옵션 제거: " + string.Join(" ", kept));
+    }
+
     public static void RunNinjaCommands()
     {
         var entries = JsonValue.Parse("[" +

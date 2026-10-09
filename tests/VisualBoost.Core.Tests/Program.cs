@@ -44,6 +44,7 @@ internal static class Program
         Run("MSBuild 설계 시점 명령 변환", SemanticNavigationTests.RunMsBuildCommands);
         Run("MSBuild 설계 시점 명령 통합(vcxproj → clangd)", SemanticNavigationTests.RunMsBuildIntegration);
         Run("Ninja 빌드 파일 명령·폴더 작업 영역", SemanticNavigationTests.RunNinjaCommands);
+        Run("외부 도구 실행 경로·컴파일러 코드 로드 옵션 거르기", SemanticNavigationTests.RunProcessLaunchSafety);
         Run("편집기 밖 소스 변경 감시", SemanticNavigationTests.RunSourceChangeMonitor);
         Run("clangd 탐색 통합(Unreal 배치·요청 시점 엔진·프로젝트 정의·저장·외부 변경 반영)", SemanticNavigationTests.RunNavigatorIntegration);
         Run("색인 파일 참조로 정의 정하기(커서 심볼·정의 기록·분석 오류 표시)", SemanticNavigationTests.RunIndexedDefinitions);

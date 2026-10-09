@@ -39,7 +39,14 @@ internal static class CppProjectSearchRootLocator
         try
         {
             var projectDirectory = Path.GetDirectoryName(projectFile) ?? string.Empty;
-            var document = XDocument.Load(projectFile, LoadOptions.None);
+            // 프로젝트 파일은 받은 저장소의 내용이므로 DTD(엔터티 확장·외부 참조)를 처리하지 않습니다. 나머지 설정은 XDocument.Load(경로)와 같습니다.
+            using var reader = XmlReader.Create(projectFile, new XmlReaderSettings
+            {
+                DtdProcessing = DtdProcessing.Ignore,
+                XmlResolver = null,
+                IgnoreWhitespace = true,
+            });
+            var document = XDocument.Load(reader, LoadOptions.None);
             foreach (var element in document.Descendants().Where(element =>
                          IncludePropertyNames.Contains(element.Name.LocalName)))
             {

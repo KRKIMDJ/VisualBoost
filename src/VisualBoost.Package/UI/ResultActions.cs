@@ -1,6 +1,7 @@
 using System;
 using System.ComponentModel;
 using System.Diagnostics;
+using System.IO;
 using System.Runtime.InteropServices;
 using System.Windows;
 
@@ -30,7 +31,8 @@ internal static class ResultActions
         {
             Process.Start(new ProcessStartInfo
             {
-                FileName = "explorer.exe",
+                // 이름만 주면 현재 폴더(열린 저장소일 수 있음)를 Windows 폴더보다 먼저 찾으므로 Windows 폴더의 탐색기를 경로로 지정합니다.
+                FileName = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Windows), "explorer.exe"),
                 Arguments = $"/select,\"{path}\"",
                 UseShellExecute = true,
             });

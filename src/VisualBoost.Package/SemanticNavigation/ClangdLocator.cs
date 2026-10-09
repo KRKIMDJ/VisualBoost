@@ -2,6 +2,7 @@ using System;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using VisualBoost.Core.SemanticNavigation;
 
 namespace VisualBoost.SemanticNavigation;
 
@@ -32,9 +33,12 @@ internal static class ClangdLocator
             .FirstOrDefault();
         if (other is not null) return other;
 
+        // 상대 항목(. 등)은 VS의 현재 폴더 기준이라 열린 저장소에 둔 clangd.exe를 고를 수 있으므로 절대 경로 항목만 봅니다.
         return (Environment.GetEnvironmentVariable("PATH") ?? string.Empty)
             .Split(new[] { Path.PathSeparator }, StringSplitOptions.RemoveEmptyEntries)
-            .Select(directory => SafeCombine(directory.Trim('"'), "clangd.exe"))
+            .Select(directory => directory.Trim('"'))
+            .Where(ProcessLaunchSafety.IsFullyQualified)
+            .Select(directory => SafeCombine(directory, "clangd.exe"))
             .FirstOrDefault(path => path is not null && File.Exists(path));
     }
 

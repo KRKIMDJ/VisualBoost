@@ -38,10 +38,12 @@ internal static class CompilerProbe
     /// </summary>
     public static async Task<IReadOnlyList<string>?> MissingNamesAsync(CompileCommand command, TimeSpan timeout, CancellationToken cancellationToken)
     {
-        if (command.Arguments.Count < 2 || !File.Exists(command.Arguments[0])) return null;
+        // 이름만 있는 컴파일러("clang-cl.exe")는 Windows가 VS의 현재 폴더(열린 저장소일 수 있음)에서 먼저 찾으므로 절대 경로일 때만 실행합니다.
+        if (command.Arguments.Count < 2 || !ProcessLaunchSafety.IsFullyQualified(command.Arguments[0]) || !File.Exists(command.Arguments[0])) return null;
         // clangd는 없는 명령 폴더도 받지만 프로세스는 그 폴더에서 시작할 수 없습니다. 상대 경로는 어느 쪽이든 찾지 못하므로 파일 폴더에서 돌립니다.
         var directory = Directory.Exists(command.Directory) ? command.Directory : Path.GetDirectoryName(command.File) ?? command.Directory;
-        var arguments = command.Arguments.Skip(1).Where(a => a is not ("/c" or "-c")).ToList();
+        // 인자는 프로젝트의 빌드 응답 파일에서 오므로 컴파일러에 DLL·설정 파일을 올리게 하는 옵션을 빼고 실행합니다.
+        var arguments = ProcessLaunchSafety.WithoutCodeLoadingOptions(command.Arguments.Skip(1).Where(a => a is not ("/c" or "-c")).ToList()).ToList();
         arguments.InsertRange(0, new[] { "/Zs", "/clang:-fno-caret-diagnostics", "/clang:-ferror-limit=0" });
         for (var attempt = 0; attempt < MaxAttempts; attempt++)
         {
