@@ -495,7 +495,12 @@ public sealed class ClangdNavigator : IDisposable
                         sites.AddRange(await OtherDefinitionReferencesAsync(symbol, progress, cancellationToken).ConfigureAwait(false));
                         if (sites.Count > 0)
                         {
-                            locations = locations.Concat(sites.SelectMany(s => s.Locations)).Distinct()
+                            // 다른 위치에서 찾은 결과에도 clangd가 더한 기반·재정의 함수 위치가 들어 있으므로 새로 생긴 위치만 같은 기준으로 거릅니다
+                            // (2026-10-09 독립 표본: 선언 파일에서 다시 찾은 결과의 기반 클래스 선언이 남았음).
+                            var known = new HashSet<NavigationLocation>(locations);
+                            var added = await WithoutRelatedSymbolsAsync(query, symbol,
+                                sites.SelectMany(s => s.Locations).Distinct().Where(l => !known.Contains(l)).ToArray(), cancellationToken).ConfigureAwait(false);
+                            locations = locations.Concat(added)
                                 .OrderBy(l => l.Path, StringComparer.OrdinalIgnoreCase).ThenBy(l => l.Line).ThenBy(l => l.Character).ToArray();
                             limited = sites.Any(s => s.Limited);
                         }
