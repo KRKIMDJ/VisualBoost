@@ -218,6 +218,10 @@ public sealed class ClangdNavigator : IDisposable
     // 문서 분석에서 고른 보충 헤더입니다(이 세션의 그 문서에만 넣음). 편집 중 코드의 include 누락이나 덜 찬 이름 색인으로 잘못 고른 헤더가
     // 모듈 전체와 다음 세션에 남지 않게 모듈 학습은 디스크 내용을 검사하는 색인 단위에서만 합니다(피드백 검토 65). pchGate로 보호합니다.
     private readonly Dictionary<string, IReadOnlyList<string>> documentOwnSupplements = new(StringComparer.OrdinalIgnoreCase);
+    // 디스크 내용 그대로 보충 헤더로 오류 없이 분석된 문서의 기억입니다(자동 공유 PCH에서 보충을 쓸 때만). documentOwnSupplements의 다음 세션
+    // 시작값이며, 기록은 처음 쓸 때 한 번 읽고 바꾸지 않습니다.
+    private readonly DocumentSupplementStore? supplementStore;
+    private readonly Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>? storedSupplements;
     // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
@@ -246,6 +250,16 @@ public sealed class ClangdNavigator : IDisposable
         rememberedSources = definitionSources is { } store
             ? new Lazy<HashSet<string>>(() => new HashSet<string>(store.Load(), StringComparer.OrdinalIgnoreCase))
             : null;
+        if (context.Plan is { SupplementsEnabled: true, Mode: UnrealPchMode.Auto })
+        {
+            var supplements = new DocumentSupplementStore(context.Directory);
+            supplementStore = supplements;
+            storedSupplements = new Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>(supplements.Load);
+            // 첫 문서를 여는 콜백(문서 집합 잠금 안)이 파일을 읽지 않게 미리 읽습니다.
+            var preload = storedSupplements;
+            Observe(Task.Run(() => preload.Value));
+        }
+
         documents =new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () =>
         {
@@ -1384,7 +1398,18 @@ public sealed class ClangdNavigator : IDisposable
         if (Context.Plan is { } plan && documentCommandsSent.Add(path))
         {
             IReadOnlyList<string>? own;
-            lock (pchGate) own = documentOwnSupplements.TryGetValue(path, out var found) ? found : null;
+            var stored = storedSupplements?.Value;
+            lock (pchGate)
+            {
+                if (!documentOwnSupplements.TryGetValue(path, out own) && stored is not null && stored.TryGetValue(path, out var remembered))
+                {
+                    // 지난 세션에 이 문서를 오류 없이 분석한 보충 헤더를 처음부터 넣어 보충 재분석을 건너뜁니다. 그래도 오류가 나면 이 세션의
+                    // 보충 단계가 그 위에 더하고, 공유 PCH로 돌아가면 기억을 지웁니다.
+                    own = remembered;
+                    documentOwnSupplements[path] = remembered;
+                }
+            }
+
             if (plan.DocumentCommand(path, extra: own) is { } choice)
             {
                 if (choice.WithoutPch && plan.Mode == UnrealPchMode.Auto)
@@ -1592,7 +1617,19 @@ public sealed class ClangdNavigator : IDisposable
         // 잠금 순서는 pchGate → 계획·세션 잠금이며, 세션은 자기 잠금을 쥔 채 이 콜백을 부르지 않습니다.
         lock (pchGate)
         {
-            if (!pchPending.Remove(path) || errors is null && !undefinedConditionMacros) return;
+            if (!pchPending.Remove(path)) return;
+            if (errors is null && !undefinedConditionMacros)
+            {
+                // 이 문서만의 보충 헤더를 모두 넣은 분석이 오류 없이 끝났으면 다음 세션에 처음부터 넣도록 기억합니다.
+                if (supplementStore is { } store && documentOwnSupplements.TryGetValue(path, out var own) && own.Count > 0 &&
+                    documentSupplements.TryGetValue(path, out var sent) && own.All(h => sent.Contains(h, StringComparer.OrdinalIgnoreCase)))
+                {
+                    Observe(Task.Run(() => RememberSupplements(store, path, own)));
+                }
+
+                return;
+            }
+
             if (Context.Plan is not { } plan) return;
             // 다시 분석한 진단을 기다릴 수 있게 대기를 먼저 등록하고 명령을 바꿉니다. 보충 헤더 고르기는 파일을 읽으므로 작업 스레드에서 합니다.
             var reparsed = session.WaitForNextDiagnosticsAsync(path, lifetime.Token);
@@ -1619,6 +1656,8 @@ public sealed class ClangdNavigator : IDisposable
             if (AuxiliaryFailed is { } handler) handler($"필요한 헤더를 고르지 못해 공유 PCH로 분석합니다({Path.GetFileName(path)}): {exception.Message}");
         }
 
+        // 보충으로 풀지 못한 문서는 다음 세션에도 같은 헤더로 시작할 이유가 없습니다.
+        supplementStore?.Forget(path);
         if (plan.DocumentCommand(path, pch: true) is { } choice)
         {
             SendSwitched(new[] { choice.Command });
@@ -1626,6 +1665,17 @@ public sealed class ClangdNavigator : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// 문서의 보충 헤더를 기억합니다. clangd에 보낸 내용이 디스크와 다르면(저장하지 않은 편집) 그 편집에 맞춰 고른 헤더일 수 있어 기억하지
+    /// 않습니다. 작업 스레드에서 부릅니다.
+    /// </summary>
+    private void RememberSupplements(DocumentSupplementStore store, string path, IReadOnlyList<string> headers)
+    {
+        var sent = documents.SentText(path);
+        if (sent is null || !string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) return;
+        store.Record(path, headers);
     }
 
     /// <remarks>

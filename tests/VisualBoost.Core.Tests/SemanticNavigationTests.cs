@@ -1587,6 +1587,39 @@ internal static class SemanticNavigationTests
                     new CollectProgress(flagReports), timeout.Token).Result;
                 Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
                     "이름 색인이 모르는 조건 매크로는 PCH로: " + string.Join(",", twice.Locations) + " / " + string.Join("|", flagReports));
+                // 디스크 내용 그대로 보충 헤더로 오류 없이 분석된 문서만 다음 세션을 위해 기억합니다.
+                var store = new DocumentSupplementStore(navigator.Context.Directory);
+                Check(SpinUntil(() => store.Load().TryGetValue(u5, out var kept) && kept.SequenceEqual(new[] { Path.GetFullPath(docShared) }), 10000) &&
+                      !store.Load().ContainsKey(flag), "오류 없이 끝난 문서 보충 헤더 기억: " + string.Join(",", store.Load().Keys.Select(Path.GetFileName)));
+                // PCH로 돌아간 문서의 기억을 지우는지 보려고 다음 세션 전에 기록을 하나 더 둡니다.
+                Check(store.Record(flag, new[] { docShared }), "기록 추가");
+                navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
+            }
+
+            // 다음 세션: 기억한 헤더를 처음부터 넣어 보충 재분석 없이 답하고, 그래도 풀리지 않아 PCH로 간 문서는 기억을 지웁니다.
+            using (var navigator = ClangdNavigator.StartAsync(new ClangdNavigatorOptions
+                   {
+                       ClangdPath = clangd, CacheRoot = Path.Combine(docRoot, "cache"), SolutionPath = Path.Combine(docProject, "Game.sln"),
+                       EngineRoot = Path.Combine(docRoot, "Engine Root"), WorkerCount = 1, PchSwitchDelay = TimeSpan.FromMilliseconds(200),
+                       FindSymbols = name => name == "FShared" ? new[] { new SourceSymbolLocation("FShared", docShared, 2, 8, SourceSymbolKind.Struct) } : Array.Empty<SourceSymbolLocation>()
+                   }, CancellationToken.None).Result)
+            {
+                Check(SpinUntil(() => navigator.Progress.Completed, 60000), "다음 세션 색인 완료");
+                using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+                var u5 = Path.Combine(docSource, "U5.cpp");
+                var u5Text = File.ReadAllText(u5);
+                var reports = new List<string>();
+                var definition = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(u5, u5Text, 1), 0, u5Text.IndexOf("Value", StringComparison.Ordinal)),
+                    new CollectProgress(reports), timeout.Token).Result;
+                Check(definition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") && navigator.ErrorsOf(u5) is null &&
+                      reports.All(r => !r.Contains("다시 분석")), "기억한 보충 헤더로 연 문서는 다시 분석 없이 답함: " + string.Join("|", reports));
+                var flagText = File.ReadAllText(flag);
+                var flagReports = new List<string>();
+                navigator.DefinitionAsync(new NavigationQuery(new DocumentText(flag, flagText, 1), 3, flagText.Split('\n')[3].IndexOf("Twice", StringComparison.Ordinal)),
+                    new CollectProgress(flagReports), timeout.Token).Wait();
+                var store = new DocumentSupplementStore(navigator.Context.Directory);
+                Check(flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…") && !store.Load().ContainsKey(flag) && store.Load().ContainsKey(u5),
+                    "PCH로 돌아간 문서의 기억 삭제: " + string.Join("|", flagReports));
                 navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             }
         }
@@ -1741,6 +1774,17 @@ internal static class SemanticNavigationTests
             Check(analyzed.Symbols.Any(s => s.Name == "EPhysicalSurface" && s.Kind == SourceSymbolKind.Enum && s.Line == 2) &&
                   analyzed.Symbols.Any(s => s.Name == "FTimerHandle" && s.Kind == SourceSymbolKind.Struct) && analyzed.Symbols.All(s => s.Name != "UForward"),
                 "이름 색인이 Unreal 타입 정의를 기록(줄은 1부터, 전방 선언 제외): " + string.Join(",", analyzed.Symbols.Select(s => s.Name + ":" + s.Kind)));
+
+            Write(doc, docText);
+            Write(header, headerText);
+            var storeDirectory = Path.Combine(root, "store");
+            var supplementStore = new DocumentSupplementStore(storeDirectory);
+            Check(supplementStore.Record(doc, new[] { header, Path.Combine(root, "Gone.h") }) &&
+                  supplementStore.Load()[doc].SequenceEqual(new[] { Path.GetFullPath(header) }), "문서별 보충 헤더 기억(지금 없는 헤더 제외)");
+            File.WriteAllText(Path.Combine(storeDirectory, DocumentSupplementStore.FileName), "{broken");
+            Check(supplementStore.Load().Count == 0 && supplementStore.Record(doc, new[] { header }) && supplementStore.Load().Count == 1,
+                "깨진 기록은 버리고 새로 기억");
+            Check(supplementStore.Forget(doc) && supplementStore.Load().Count == 0 && supplementStore.Forget(doc), "기억 지우기(없어도 성공)");
         }
         finally
         {
