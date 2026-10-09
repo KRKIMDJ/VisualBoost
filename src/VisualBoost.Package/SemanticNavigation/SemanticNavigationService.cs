@@ -120,6 +120,7 @@ internal sealed class SemanticNavigationService : IDisposable
     private Task previousShutdown = Task.CompletedTask;
     // 색인 로그를 읽지 못한다고 이미 알린 탐색기입니다.
     private ClangdNavigator? warnedLogFormat;
+    private ClangdNavigator? warnedShardFormat;
     // 요청이 탐색기를 받아 간 마지막 시각입니다. 받아 간 뒤 탐색기에 요청을 등록하기 전의 틈에 메모리 정리가 끼지 않게 합니다.
     private DateTime lastAcquireUtc;
     private int disposed;
@@ -351,7 +352,7 @@ internal sealed class SemanticNavigationService : IDisposable
                               (plan.SupplementsEnabled ? $" · 필요한 헤더만 넣은 색인 단위 {plan.SupplementUnitCount:N0}개" : string.Empty));
                 }
 
-                if (current.IndexLogUnreadable) lines.Add("주의: " + IndexLogUnreadableMessage);
+                if (current.IndexSignalsUnreadable) lines.Add("주의: " + IndexSignalsUnreadableMessage);
 
                 lines.Add("clangd: " + clangdPath + $" (PID {current.ProcessId})");
                 lines.Add($"메모리 정리 기준: {memoryPolicy.EffectiveLimitBytes / (1024 * 1024):N0} MB(넘으면 탐색하지 않는 동안 다시 시작)");
@@ -681,9 +682,17 @@ internal sealed class SemanticNavigationService : IDisposable
         var sample = new ClangdMemorySample(bytes, current.Progress.Active, current.IsBusy, now - lastRequest, now - current.StartedUtc);
         var needsReload = current.NeedsReload;
         var indexedUnits = current.IndexedUnits;
-        if (current.IndexLogUnreadable && !ReferenceEquals(Interlocked.Exchange(ref warnedLogFormat, current), current))
+        if (current.IndexSignalsUnreadable && !ReferenceEquals(Interlocked.Exchange(ref warnedLogFormat, current), current))
         {
-            ActivityLog.LogWarning("VisualBoost/SemanticNavigation", IndexLogUnreadableMessage + " clangd: " + clangdPath);
+            ActivityLog.LogWarning("VisualBoost/SemanticNavigation", IndexSignalsUnreadableMessage + " clangd: " + clangdPath);
+        }
+
+        // 색인 파일만 읽지 못하면 로그 줄로 판단을 이어 가므로 사용자 경고 대신 진단 기록만 남깁니다.
+        if (current.IndexShardFormatUnreadable && !ReferenceEquals(Interlocked.Exchange(ref warnedShardFormat, current), current))
+        {
+            ActivityLog.LogWarning("VisualBoost/SemanticNavigation",
+                "clangd 색인 파일의 파일 목록을 읽지 못해 색인 완료·실패를 clangd 로그 줄로만 판단합니다. clangd 색인 형식이 바뀌었을 수 있습니다. clangd: " +
+                clangdPath);
         }
 
         string message;
@@ -774,8 +783,8 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private void RaiseStateChanged() => StateChanged?.Invoke();
 
-    private const string IndexLogUnreadableMessage =
-        "clangd 색인 로그를 읽지 못해 공유 PCH 자동 판단과 색인 뒤 메모리 정리를 하지 못했습니다. clangd 버전이 바뀌었을 수 있습니다. " +
+    private const string IndexSignalsUnreadableMessage =
+        "clangd 색인 결과(색인 파일·로그)를 읽지 못해 공유 PCH 자동 판단과 색인 뒤 메모리 정리를 하지 못했습니다. clangd 버전이 바뀌었을 수 있습니다. " +
         "공유 PCH에 기대는 파일의 참조가 빠지면 옵션 'Unreal 공유 PCH 포함'을 항상으로 바꾸세요.";
 
     /// <summary>

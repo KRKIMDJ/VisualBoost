@@ -40,6 +40,22 @@ public readonly struct IndexedReference
     public bool Spelled => (Kind & 8) != 0;
 }
 
+/// <summary>색인 파일이 기록한 TU 하나의 색인 결과입니다(<see cref="ClangdIndexShards.TranslationUnitOf"/>).</summary>
+public readonly struct IndexedTranslationUnit
+{
+    public IndexedTranslationUnit(string path, bool hadErrors)
+    {
+        Path = path;
+        HadErrors = hadErrors;
+    }
+
+    /// <summary>clangd가 쓰는 실제 경로입니다.</summary>
+    public string Path { get; }
+
+    /// <summary>색인할 때 컴파일할 수 없는 오류가 있었는지입니다. 참이면 그 TU의 색인이 덜 되었을 수 있습니다.</summary>
+    public bool HadErrors { get; }
+}
+
 /// <summary>
 /// clangd background index가 파일마다 쓰는 색인 파일(<c>.cache/clangd/index/이름.해시.idx</c>)에서 참조만 읽습니다. 스레드 안전합니다.
 /// </summary>
@@ -200,23 +216,7 @@ public sealed class ClangdIndexShards
     /// </summary>
     public static IReadOnlyList<IndexedReference>? Parse(byte[] data)
     {
-        if (data.Length < 12 || Encoding.ASCII.GetString(data, 0, 4) != "RIFF" || Encoding.ASCII.GetString(data, 8, 4) != "CdIx")
-        {
-            throw new InvalidDataException("clangd 색인 파일 형식이 아닙니다.");
-        }
-
-        var chunks = new Dictionary<string, (int Offset, int Length)>(StringComparer.Ordinal);
-        var position = 12;
-        while (position + 8 <= data.Length)
-        {
-            var id = Encoding.ASCII.GetString(data, position, 4);
-            var declared = BitConverter.ToUInt32(data, position + 4);
-            if (declared > (uint)(data.Length - position - 8)) throw new InvalidDataException("clangd 색인 파일이 잘렸습니다.");
-            var length = (int)declared;
-            chunks[id] = (position + 8, length);
-            position += 8 + length + (length & 1);
-        }
-
+        var chunks = Chunks(data);
         if (!chunks.TryGetValue("meta", out var meta) || meta.Length < 4 || BitConverter.ToUInt32(data, meta.Offset) != FormatVersion) return null;
         if (!chunks.TryGetValue("stri", out var stri)) throw new InvalidDataException("문자열 표가 없습니다.");
         var strings = Strings(data, stri.Offset, stri.Length);
@@ -249,6 +249,91 @@ public sealed class ClangdIndexShards
         }
 
         return references;
+    }
+
+    // srcs 목록의 파일별 플래그입니다(clangd IncludeGraphNode::SourceFlag).
+    private const byte IsTranslationUnitFlag = 1;
+    private const byte HadErrorsFlag = 2;
+
+    /// <summary>
+    /// 색인 파일의 파일 목록(<c>srcs</c>)에서 이 색인 파일의 소스가 TU로 색인된 기록을 읽습니다. 그 소스가 TU가 아니면(헤더, unity 묶음에
+    /// 포함된 구성원 cpp) null입니다. clangd는 TU에 컴파일할 수 없는 오류가 있으면 그 색인에서 나온 파일마다 오류 플래그를 남깁니다.
+    /// </summary>
+    /// <remarks>
+    /// 공유 PCH·헤더 보충 자동 판단이 clangd 로그 문구에 기대지 않게 하는 신호입니다. 로그 문구는 버전 표시 없이 바뀔 수 있지만 이 목록은
+    /// 색인 파일에 저장되는 자료라 형식이 바뀌면 구조가 어긋납니다. 그래서 형식 버전 번호(<see cref="FormatVersion"/>)는 보지 않고, 목록을
+    /// 끝까지 구조대로(플래그 1바이트, 파일 URI 문자열 번호, digest 8바이트, 직접 include URI 번호들) 읽고 URI가 모두 <c>file:</c>일 때만
+    /// 씁니다. 맞지 않으면 <see cref="InvalidDataException"/>입니다. 구조는 clangd 공개 소스(index/Serialization.cpp)를 따릅니다.
+    /// </remarks>
+    /// <param name="sourceFileName">색인 파일 이름 앞부분(<c>이름.해시.idx</c>의 이름)입니다.</param>
+    public static IndexedTranslationUnit? TranslationUnitOf(byte[] data, string sourceFileName)
+    {
+        var chunks = Chunks(data);
+        if (!chunks.TryGetValue("stri", out var stri)) throw new InvalidDataException("문자열 표가 없습니다.");
+        if (!chunks.TryGetValue("srcs", out var srcs)) throw new InvalidDataException("파일 목록이 없습니다.");
+        var strings = Strings(data, stri.Offset, stri.Length);
+        string Uri(uint index)
+        {
+            if (index >= (uint)strings.Count) throw new InvalidDataException("문자열 번호가 범위를 벗어났습니다.");
+            var uri = strings[(int)index];
+            if (!uri.StartsWith("file:", StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("파일 목록의 URI가 파일 URI가 아닙니다.");
+            return uri;
+        }
+
+        IndexedTranslationUnit? found = null;
+        var reader = new Reader(data, srcs.Offset, srcs.Offset + srcs.Length);
+        while (!reader.AtEnd)
+        {
+            var flags = reader.Byte();
+            var uri = Uri(reader.Var());
+            reader.Skip(8);
+            var includes = reader.Var();
+            for (var i = 0; i < includes; i++) Uri(reader.Var());
+            if ((flags & IsTranslationUnitFlag) == 0 || DocumentUri.ToPath(uri) is not { } path) continue;
+            if (string.Equals(Path.GetFileName(path), sourceFileName, StringComparison.OrdinalIgnoreCase))
+            {
+                found = new IndexedTranslationUnit(path, (flags & HadErrorsFlag) != 0);
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// 색인 파일 이름(<c>이름.해시16자리.idx</c>)에서 소스 파일 이름을 꺼냅니다. 형식이 다르면 null입니다.
+    /// </summary>
+    public static string? SourceNameOfShard(string shardFileName)
+    {
+        if (!shardFileName.EndsWith(".idx", StringComparison.OrdinalIgnoreCase)) return null;
+        var name = shardFileName.Substring(0, shardFileName.Length - 4);
+        var dot = name.LastIndexOf('.');
+        return dot > 0 ? name.Substring(0, dot) : null;
+    }
+
+    /// <summary>색인 파일을 다른 프로세스가 쓰는 중에도 읽습니다. 너무 크거나 읽는 중에 줄면 <see cref="InvalidDataException"/>입니다.</summary>
+    public static byte[] ReadShard(string path) => ReadShared(path);
+
+    /// <summary>RIFF 컨테이너(<c>CdIx</c>)의 청크 표입니다. 형식이 아니거나 잘렸으면 <see cref="InvalidDataException"/>입니다.</summary>
+    private static Dictionary<string, (int Offset, int Length)> Chunks(byte[] data)
+    {
+        if (data.Length < 12 || Encoding.ASCII.GetString(data, 0, 4) != "RIFF" || Encoding.ASCII.GetString(data, 8, 4) != "CdIx")
+        {
+            throw new InvalidDataException("clangd 색인 파일 형식이 아닙니다.");
+        }
+
+        var chunks = new Dictionary<string, (int Offset, int Length)>(StringComparer.Ordinal);
+        var position = 12;
+        while (position + 8 <= data.Length)
+        {
+            var id = Encoding.ASCII.GetString(data, position, 4);
+            var declared = BitConverter.ToUInt32(data, position + 4);
+            if (declared > (uint)(data.Length - position - 8)) throw new InvalidDataException("clangd 색인 파일이 잘렸습니다.");
+            var length = (int)declared;
+            chunks[id] = (position + 8, length);
+            position += 8 + length + (length & 1);
+        }
+
+        return chunks;
     }
 
     /// <summary>문자열 표: 원래 크기(0이면 압축 안 함) 뒤에 zlib으로 압축한 NUL 구분 문자열들입니다.</summary>
@@ -332,13 +417,19 @@ public sealed class ClangdIndexShards
 
         public byte Byte()
         {
-            if (position >= end) throw new InvalidDataException("참조 표가 잘렸습니다.");
+            if (position >= end) throw new InvalidDataException("색인 파일의 표가 잘렸습니다.");
             return data[position++];
+        }
+
+        public void Skip(int count)
+        {
+            if (position + count > end) throw new InvalidDataException("색인 파일의 표가 잘렸습니다.");
+            position += count;
         }
 
         public string Id()
         {
-            if (position + 8 > end) throw new InvalidDataException("참조 표가 잘렸습니다.");
+            if (position + 8 > end) throw new InvalidDataException("색인 파일의 표가 잘렸습니다.");
             var text = new StringBuilder(16);
             for (var i = 0; i < 8; i++) text.Append(data[position + i].ToString("X2", System.Globalization.CultureInfo.InvariantCulture));
             position += 8;

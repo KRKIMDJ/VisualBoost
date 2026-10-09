@@ -398,11 +398,101 @@ internal static class SemanticNavigationTests
                 "파일별 색인 참조");
             File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddMinutes(5));
             Check(shards.ReferencesIn(source) is null, "원본이 더 새로우면 읽지 않음");
+
+            // 색인 실패 신호: 파일 목록(srcs)의 TU·오류 플래그를 형식 버전 번호와 무관하게 구조로 읽습니다.
+            var unitPath = Path.Combine(root, "units", "Module.Game.1.cpp");
+            var unitUri = DocumentUri.FromPath(unitPath);
+            var headerUri = DocumentUri.FromPath(Path.Combine(root, "src", "Head.h"));
+            var failedShard = SourcesShard(ClangdIndexShards.FormatVersion, (3, unitUri, new[] { headerUri }), (0, headerUri, Array.Empty<string>()));
+            Check(ClangdIndexShards.TranslationUnitOf(failedShard, "Module.Game.1.cpp") is { HadErrors: true } failedUnit &&
+                  string.Equals(Path.GetFullPath(failedUnit.Path), unitPath, StringComparison.OrdinalIgnoreCase) &&
+                  ClangdIndexShards.TranslationUnitOf(SourcesShard(ClangdIndexShards.FormatVersion + 7, (1, unitUri, Array.Empty<string>())), "Module.Game.1.cpp") is
+                      { HadErrors: false } &&
+                  ClangdIndexShards.TranslationUnitOf(failedShard, "Head.h") is null &&
+                  ClangdIndexShards.TranslationUnitOf(SourcesShard(ClangdIndexShards.FormatVersion, (2, unitUri, Array.Empty<string>())), "Module.Game.1.cpp") is null,
+                "색인 파일의 TU·오류 플래그(다른 형식 버전도 구조가 맞으면 읽음, TU가 아닌 노드 제외)");
+            Check(Throws<InvalidDataException>(() => ClangdIndexShards.TranslationUnitOf(failedShard.Take(failedShard.Length - 3).ToArray(), "Module.Game.1.cpp")) &&
+                  Throws<InvalidDataException>(() => ClangdIndexShards.TranslationUnitOf(SourcesShard(ClangdIndexShards.FormatVersion, (1, "Module.Game.1.cpp", Array.Empty<string>())), "Module.Game.1.cpp")) &&
+                  Throws<InvalidDataException>(() => ClangdIndexShards.TranslationUnitOf(plain, "Use.cpp")),
+                "파일 목록 구조가 맞지 않으면 형식 오류(잘림, 파일 URI 아님, 목록 없음)");
+            Check(ClangdIndexShards.SourceNameOfShard("Module.Game.1.sup.cpp.0123456789ABCDEF.idx") == "Module.Game.1.sup.cpp" &&
+                  ClangdIndexShards.SourceNameOfShard("Use.cpp.idx-1a2b.tmp") is null, "색인 파일 이름에서 소스 이름");
+
+            var units = Path.Combine(root, "unit-index");
+            Directory.CreateDirectory(units);
+            var since = DateTime.UtcNow.AddMinutes(-1);
+            void Shard(string name, byte[] data, DateTime written)
+            {
+                var file = Path.Combine(units, name);
+                File.WriteAllBytes(file, data);
+                File.SetLastWriteTimeUtc(file, written);
+            }
+
+            var okPath = Path.Combine(root, "src", "Ok.cpp");
+            var memberPath = Path.Combine(root, "src", "Member.cpp");
+            Shard("Module.Game.1.cpp.0123456789ABCDEF.idx", failedShard, DateTime.UtcNow);
+            Shard("Ok.cpp.1111111111111111.idx", SourcesShard(20, (1, DocumentUri.FromPath(okPath), Array.Empty<string>())), DateTime.UtcNow);
+            // unity 묶음에 포함된 구성원 cpp는 TU가 아니고, 헤더 색인 파일은 열지 않으며, 이전 clangd가 쓴 색인 파일은 세지 않습니다.
+            Shard("Member.cpp.2222222222222222.idx", SourcesShard(20, (2, DocumentUri.FromPath(memberPath), Array.Empty<string>())), DateTime.UtcNow);
+            Shard("Head.h.3333333333333333.idx", Encoding.ASCII.GetBytes("not an index"), DateTime.UtcNow);
+            Shard("Old.cpp.4444444444444444.idx", SourcesShard(20, (3, DocumentUri.FromPath(Path.Combine(root, "src", "Old.cpp")), Array.Empty<string>())),
+                DateTime.UtcNow.AddMinutes(-10));
+            var scanner = new IndexedUnitScanner(units, since);
+            var scanned = scanner.Scan().Select(u => Path.GetFileName(u.Path) + ":" + u.HadErrors).OrderBy(s => s, StringComparer.Ordinal).ToArray();
+            Check(scanned.SequenceEqual(new[] { "Module.Game.1.cpp:True", "Ok.cpp:False" }) && scanner.AnyRead && !scanner.FormatUnreadable && scanner.Scan().Count == 0,
+                "새로 쓴 소스 색인 파일의 TU 색인 결과(구성원·헤더·이전 색인 제외, 한 번만): " + string.Join(",", scanned));
+            Shard("Ok.cpp.1111111111111111.idx", SourcesShard(20, (3, DocumentUri.FromPath(okPath), Array.Empty<string>())), DateTime.UtcNow.AddSeconds(5));
+            Shard("Bad.cpp.5555555555555555.idx", Encoding.ASCII.GetBytes("RIFF\0\0\0\0CdIx"), DateTime.UtcNow);
+            var rescanned = scanner.Scan();
+            Check(rescanned.Count == 1 && rescanned[0].HadErrors && Path.GetFileName(rescanned[0].Path) == "Ok.cpp" && scanner.FormatUnreadable,
+                "다시 쓴 색인 파일을 다시 읽고, 구조가 맞지 않는 소스 색인 파일은 형식 문제로 표시");
         }
         finally
         {
             TryDelete(root);
         }
+    }
+
+    /// <summary>clangd 색인 파일을 파일 목록(<c>srcs</c>)만 담아 만듭니다. 노드마다 플래그, 파일 URI, 직접 include URI입니다(digest는 0).</summary>
+    private static byte[] SourcesShard(uint version, params (byte Flags, string Uri, string[] Includes)[] nodes)
+    {
+        var strings = nodes.SelectMany(n => new[] { n.Uri }.Concat(n.Includes)).Distinct(StringComparer.Ordinal).ToList();
+        var srcs = new MemoryStream();
+        void Var(int value)
+        {
+            var v = (uint)value;
+            while (v >= 0x80)
+            {
+                srcs.WriteByte((byte)(v | 0x80));
+                v >>= 7;
+            }
+
+            srcs.WriteByte((byte)v);
+        }
+
+        foreach (var node in nodes)
+        {
+            srcs.WriteByte(node.Flags);
+            Var(strings.IndexOf(node.Uri));
+            srcs.Write(new byte[8]);
+            Var(node.Includes.Length);
+            foreach (var include in node.Includes) Var(strings.IndexOf(include));
+        }
+
+        var body = new MemoryStream();
+        void Chunk(string id, byte[] data)
+        {
+            body.Write(Encoding.ASCII.GetBytes(id));
+            body.Write(BitConverter.GetBytes((uint)data.Length));
+            body.Write(data);
+            if ((data.Length & 1) != 0) body.WriteByte(0);
+        }
+
+        Chunk("meta", BitConverter.GetBytes(version));
+        Chunk("stri", BitConverter.GetBytes(0u).Concat(Encoding.UTF8.GetBytes(string.Concat(strings.Select(s => s + "\0")))).ToArray());
+        Chunk("srcs", srcs.ToArray());
+        var content = body.ToArray();
+        return Encoding.ASCII.GetBytes("RIFF").Concat(BitConverter.GetBytes((uint)(content.Length + 4))).Concat(Encoding.ASCII.GetBytes("CdIx")).Concat(content).ToArray();
     }
 
     /// <summary>clangd background index 색인 파일(RIFF <c>CdIx</c>)을 참조 표만 담아 만듭니다. 모든 참조의 파일은 문자열 0번입니다.</summary>
@@ -1510,11 +1600,12 @@ internal static class SemanticNavigationTests
             IReadOnlyList<SourceSymbolLocation> Find(string name) =>
                 name == "FShared" ? new[] { new SourceSymbolLocation("FShared", shared, 2, 8, SourceSymbolKind.Struct) } : Array.Empty<SourceSymbolLocation>();
             // 이름 인덱스 분석이 끝나지 않아도 대기 상한 뒤에는 지금 색인으로 검사해 전환합니다(피드백 검토 69).
+            // clangd 로그 줄을 끄고 색인 파일(파일 목록의 TU·오류 플래그)만으로 실패 단위와 다시 읽기를 판단하는지 봅니다.
             var options = new ClangdNavigatorOptions
             {
                 ClangdPath = clangd, CacheRoot = Path.Combine(root, "cache"), SolutionPath = Path.Combine(project, "Game.sln"),
                 EngineRoot = Path.Combine(root, "Engine Root"), WorkerCount = 1, PchSwitchDelay = TimeSpan.FromMilliseconds(200), FindSymbols = Find,
-                SymbolsReady = () => false, SymbolsWaitLimit = TimeSpan.FromSeconds(1)
+                SymbolsReady = () => false, SymbolsWaitLimit = TimeSpan.FromSeconds(1), IndexLogSignals = false
             };
             var first = ClangdNavigator.StartAsync(options, CancellationToken.None).Result;
             try
@@ -1524,6 +1615,8 @@ internal static class SemanticNavigationTests
                 Check(SpinUntil(() => first.NeedsReload, 60000) && !File.Exists(Path.Combine(units, "Module.Game.1.pch.cpp")) &&
                       first.Context.Plan!.PchUnitCount == 0 && first.Context.Plan.SupplementUnitCount == 1,
                     "보충 단위가 PCH 없이 색인되고 다시 시작 필요: PCH " + first.Context.Plan!.PchUnitCount);
+                Check(first.IndexedUnits > 0 && SpinUntil(() => first.Progress.Completed, 60000) && !first.IndexShardFormatUnreadable &&
+                      !SpinUntil(() => first.IndexSignalsUnreadable, 8000), "로그 줄 없이 색인 파일로 색인 완료 신호: " + first.IndexedUnits);
                 first.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             }
             finally

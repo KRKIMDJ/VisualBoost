@@ -77,6 +77,12 @@ public sealed class ClangdNavigatorOptions
     /// (<see cref="IndexQueuePriority"/>). 끄면 clangd의 무작위 순서를 따릅니다.
     /// </summary>
     public bool PrioritizeOpenDocuments { get; set; } = true;
+
+    /// <summary>
+    /// clangd 로그 줄(<c>Indexed …</c>, <c>Failed to compile …</c>)을 TU 색인 완료·실패의 보조 신호로 씁니다. 주 신호는 색인 파일이며
+    /// (<see cref="IndexedUnitScanner"/>), 끄면 색인 파일만으로 판단합니다(테스트·측정에서 색인 파일 신호만 확인할 때).
+    /// </summary>
+    public bool IndexLogSignals { get; set; } = true;
 }
 
 /// <summary>요청 위치와 그때의 편집기 내용입니다. 좌표는 0기반 줄과 UTF-16 문자 위치입니다.</summary>
@@ -231,10 +237,19 @@ public sealed class ClangdNavigator : IDisposable
     private bool symbolsWaitExpired;
     private int pchUnitIndexed;
     private int indexedUnits;
-    // 색인 완료 줄을 하나라도 읽었는지(색인 시작 문서 포함), 로그 형식 확인을 시작했는지, 형식이 맞지 않는다고 판단했는지입니다.
-    private int indexedLineSeen;
+    // TU 색인 완료를 색인 파일이나 로그 줄로 하나라도 알았는지(색인 시작 문서 포함), 신호 확인을 시작했는지, 두 신호를 모두 읽지 못한다고
+    // 판단했는지입니다.
+    private int indexedSignalSeen;
     private int logFormatChecking;
     private int logFormatUnreadable;
+    // 색인 파일로 TU 색인 완료·실패를 알아냅니다(clangd 로그 문구에 기대지 않는 주 신호). unitScanGate로 한 번에 하나만 훑습니다.
+    private readonly IndexedUnitScanner unitScanner;
+    private readonly object unitScanGate = new();
+    // 지난 훑기 뒤 색인 진행 알림이 왔는지입니다. 훑기 간격보다 짧게 끝난 색인도 한 번은 훑게 합니다.
+    private int unitScanRequested;
+    // 이 세션에 처리한 TU 색인 완료·실패와 그 시각입니다. 로그 줄과 색인 파일이 같은 색인을 두 번 알리므로 짧은 시간 안의 두 번째는 버립니다.
+    // unitReports 잠금으로 보호합니다.
+    private readonly Dictionary<string, DateTime> unitReports = new(StringComparer.OrdinalIgnoreCase);
     private bool touchRunning;
     private int activeRequests;
     private long lastRequestTicks = DateTime.UtcNow.Ticks;
@@ -263,30 +278,25 @@ public sealed class ClangdNavigator : IDisposable
         documents = new ClangdDocumentSet(Math.Max(1, options.DocumentCapacity), OpenDocument, session.ChangeDocument, session.CloseDocument);
         session.ProgressChanged += () =>
         {
+            Volatile.Write(ref unitScanRequested, 1);
             if (Progress.Completed && Interlocked.Exchange(ref logFormatChecking, 1) == 0) _ = Task.Run(CheckLogFormatAsync);
             Changed?.Invoke();
         };
-        var autoPch = context.Plan is { Mode: UnrealPchMode.Auto };
-        if (autoPch)
+        unitScanner = new IndexedUnitScanner(Path.Combine(context.Directory, ".cache", "clangd", "index"), StartedUtc);
+        if (context.Plan is { Mode: UnrealPchMode.Auto })
         {
-            session.IndexFailed += OnIndexFailed;
+            if (options.IndexLogSignals) session.IndexFailed += path => OnUnitIndexed(path, failed: true);
             session.DiagnosticsPublished += OnDiagnostics;
         }
 
-        session.TranslationUnitIndexed += path =>
-        {
-            Volatile.Write(ref indexedLineSeen, 1);
-            if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase) || IsQueueMarker(path)) return;
-            OwnIndexed(path);
-            Interlocked.Increment(ref indexedUnits);
-            if (autoPch && UnrealIndexPlan.IsSwitchedWrapper(path)) Volatile.Write(ref pchUnitIndexed, 1);
-        };
+        if (options.IndexLogSignals) session.TranslationUnitIndexed += path => OnUnitIndexed(path, failed: false);
 
         session.Exited += _ =>
         {
             lifetime.Cancel();
             Changed?.Invoke();
         };
+        Observe(Task.Run(ScanIndexedUnitsAsync));
     }
 
     /// <summary>색인 진행이나 종료가 바뀌었습니다. 임의 스레드에서 호출됩니다.</summary>
@@ -364,14 +374,21 @@ public sealed class ClangdNavigator : IDisposable
     public bool PchUnitsIndexed => Volatile.Read(ref pchUnitIndexed) != 0;
 
     /// <summary>
-    /// clangd가 색인 파일을 새로 썼는데 색인 완료 로그 줄을 하나도 읽지 못했습니다. clangd 버전이 바뀌어 로그 형식이 달라졌을 수 있으며,
-    /// 그동안 공유 PCH 자동 전환과 색인 뒤 메모리 정리가 동작하지 않습니다(연 문서의 PCH 전환은 진단 알림이라 계속 동작).
+    /// clangd가 색인 파일을 새로 썼는데 TU 색인 완료를 색인 파일(파일 목록)로도 로그 줄로도 하나도 읽지 못했습니다. clangd 버전이 바뀌어 두
+    /// 형식이 모두 달라졌을 수 있으며, 그동안 공유 PCH 자동 전환과 색인 뒤 메모리 정리가 동작하지 않습니다(연 문서의 PCH 전환은 진단 알림이라
+    /// 계속 동작).
     /// </summary>
     /// <remarks>
-    /// 진척 알림만으로는 판단하지 않습니다. 저장된 색인을 읽기만 하는 재시작 세션도 진척을 알리고 완료 줄이 없어(2026-10-09 확인) 잘못
+    /// 진척 알림만으로는 판단하지 않습니다. 저장된 색인을 읽기만 하는 재시작 세션도 진척을 알리고 색인 파일을 쓰지 않아(2026-10-09 확인) 잘못
     /// 판단하기 때문입니다. 첫 색인이 끝난 뒤 한 번, 이 세션이 시작한 뒤 쓴 색인 파일이 있는지로 실제 색인 여부를 봅니다.
     /// </remarks>
-    public bool IndexLogUnreadable => Volatile.Read(ref logFormatUnreadable) != 0;
+    public bool IndexSignalsUnreadable => Volatile.Read(ref logFormatUnreadable) != 0;
+
+    /// <summary>
+    /// 이 세션에 쓴 소스 색인 파일의 파일 목록 구조를 읽지 못했습니다. clangd 색인 형식이 바뀌었을 수 있으며, 그동안 색인 완료·실패는 로그 줄로만
+    /// 판단합니다(<see cref="IndexSignalsUnreadable"/>가 거짓이면 판단은 계속됨).
+    /// </summary>
+    public bool IndexShardFormatUnreadable => unitScanner.FormatUnreadable;
 
     public string LogPath => Path.Combine(Context.Directory, "clangd.log");
 
@@ -1808,6 +1825,106 @@ public sealed class ClangdNavigator : IDisposable
     /// <summary>
     /// background index가 분석 오류를 알린 TU를 모읍니다. stderr 읽기 스레드에서 호출되므로 파일 작업은 잠시 뒤 작업 스레드에서 묶어 합니다.
     /// </summary>
+    /// <summary>
+    /// TU 하나의 색인 완료(<paramref name="failed"/> 거짓)나 분석 오류(참)를 처리합니다. 색인 파일(주 신호, <see cref="ScanIndexedUnits"/>)과
+    /// clangd 로그 줄(보조 신호)이 같은 색인을 각각 알리므로 같은 TU의 같은 종류 알림은 <see cref="UnitReportWindow"/> 안에서 한 번만 처리합니다.
+    /// 둘 중 하나만 읽혀도 판단이 이어집니다. 임의 스레드에서 호출됩니다.
+    /// </summary>
+    private void OnUnitIndexed(string path, bool failed)
+    {
+        if (!failed) Volatile.Write(ref indexedSignalSeen, 1);
+        if (!FirstReport(path, failed)) return;
+        var autoPch = Context.Plan is { Mode: UnrealPchMode.Auto };
+        if (failed)
+        {
+            if (autoPch) OnIndexFailed(path);
+            return;
+        }
+
+        if (string.Equals(Path.GetFileName(path), CompileContext.IndexStartFileName, StringComparison.OrdinalIgnoreCase) || IsQueueMarker(path)) return;
+        OwnIndexed(path);
+        Interlocked.Increment(ref indexedUnits);
+        if (autoPch && UnrealIndexPlan.IsSwitchedWrapper(path)) Volatile.Write(ref pchUnitIndexed, 1);
+    }
+
+    /// <summary>
+    /// 두 신호가 같은 색인을 알리는 간격의 상한입니다. 로그 줄은 색인 직후, 색인 파일은 다음 훑기(<see cref="UnitScanInterval"/>)에 옵니다. 같은
+    /// TU를 이 안에 다시 색인해도 이미 처리한 판단이라 잃는 것이 없습니다.
+    /// </summary>
+    private static readonly TimeSpan UnitReportWindow = TimeSpan.FromSeconds(60);
+
+    private bool FirstReport(string path, bool failed)
+    {
+        string key;
+        try
+        {
+            key = (failed ? "failed|" : "indexed|") + Path.GetFullPath(path);
+        }
+        catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException || exception is PathTooLongException)
+        {
+            key = (failed ? "failed|" : "indexed|") + path;
+        }
+
+        var now = DateTime.UtcNow;
+        lock (unitReports)
+        {
+            if (unitReports.TryGetValue(key, out var at) && now - at < UnitReportWindow) return false;
+            unitReports[key] = now;
+            return true;
+        }
+    }
+
+    /// <summary>색인이 진행 중일 때 색인 파일을 훑는 간격입니다.</summary>
+    private static readonly TimeSpan UnitScanInterval = TimeSpan.FromSeconds(2);
+
+    /// <summary>
+    /// 색인이 진행 중이거나 지난 훑기 뒤 색인 진행 알림이 왔으면 <see cref="UnitScanInterval"/>마다 색인 파일을 훑습니다. 진행 중 상태만 보면
+    /// 간격보다 짧게 끝난 색인(작은 단위의 전환 뒤 다시 색인)을 놓쳤습니다. 끝난 뒤에도 한 번 더 훑어 마지막 TU를 놓치지 않고, 쉬는 동안에는
+    /// 훑지 않습니다.
+    /// </summary>
+    private async Task ScanIndexedUnitsAsync()
+    {
+        var once = false;
+        try
+        {
+            while (true)
+            {
+                await Task.Delay(UnitScanInterval, lifetime.Token).ConfigureAwait(false);
+                var active = Progress.Active;
+                var requested = Interlocked.Exchange(ref unitScanRequested, 0) != 0;
+                if (!active && !requested && !once) continue;
+                once = active || requested;
+                try
+                {
+                    ScanIndexedUnits();
+                }
+                catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+                {
+                    // 판단 기록 쓰기 실패 등은 다음 훑기를 막지 않게 알리고 이어 갑니다.
+                    AuxiliaryFailed?.Invoke("색인 결과를 처리하지 못했습니다: " + exception.Message);
+                }
+            }
+        }
+        catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
+        {
+            // 종료 중입니다.
+        }
+    }
+
+    /// <summary>새로 쓴 소스 색인 파일에서 TU 색인 완료·실패를 읽어 처리합니다. 훑기 반복과 신호 확인이 함께 부를 수 있어 한 번에 하나만 훑습니다.</summary>
+    private void ScanIndexedUnits()
+    {
+        IReadOnlyList<IndexedTranslationUnit> units;
+        lock (unitScanGate) units = unitScanner.Scan();
+        foreach (var unit in units)
+        {
+            var path = Context.Paths.ToGiven(unit.Path);
+            // 로그와 같은 순서(실패 줄 뒤 완료 줄)로 처리합니다.
+            if (unit.HadErrors) OnUnitIndexed(path, failed: true);
+            OnUnitIndexed(path, failed: false);
+        }
+    }
+
     private void OnIndexFailed(string translationUnit)
     {
         // 판단은 바로 남깁니다. 모아서 전환하기 전에 다시 시작해도 다음 세션이 PCH로 색인합니다(clangd는 오류가 있던 같은 내용의 TU를
@@ -1935,8 +2052,8 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <summary>
-    /// 색인이 끝날 때 로그 형식이 맞는지 봅니다(<see cref="IndexLogUnreadable"/>). 이 세션이 색인 파일을 쓰지 않았으면 판단을 미루고 다음 색인
-    /// 완료 때 다시 봅니다. 한 번 판단하면 더 보지 않습니다.
+    /// 색인이 끝날 때 색인 완료 신호(색인 파일·로그 줄)를 하나라도 읽었는지 봅니다(<see cref="IndexSignalsUnreadable"/>). 이 세션이 색인 파일을
+    /// 쓰지 않았으면 판단을 미루고 다음 색인 완료 때 다시 봅니다. 한 번 판단하면 더 보지 않습니다.
     /// </summary>
     private async Task CheckLogFormatAsync()
     {
@@ -1947,13 +2064,20 @@ public sealed class ClangdNavigator : IDisposable
             await Task.Delay(TimeSpan.FromSeconds(3), lifetime.Token).ConfigureAwait(false);
             if (!IndexWrittenSince(Path.Combine(Context.Directory, ".cache", "clangd", "index"), StartedUtc)) return;
             concluded = true;
-            if (Volatile.Read(ref indexedLineSeen) != 0) return;
+            ScanIndexedUnits();
+            if (Volatile.Read(ref indexedSignalSeen) != 0) return;
             Volatile.Write(ref logFormatUnreadable, 1);
             Changed?.Invoke();
         }
         catch (Exception exception) when (exception is OperationCanceledException || exception is ObjectDisposedException)
         {
             concluded = true;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            // 마지막 훑기의 판단 기록 쓰기 실패입니다. 신호 확인은 다음 색인 완료 때 다시 합니다.
+            concluded = false;
+            AuxiliaryFailed?.Invoke("색인 결과를 처리하지 못했습니다: " + exception.Message);
         }
         finally
         {
