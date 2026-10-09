@@ -1266,6 +1266,21 @@ internal static class SemanticNavigationTests
             var secondProbe = probePlan.ProbeTargets(new[] { probeUnit }).Count;
             probePlan.Learn(probeUnit, Array.Empty<string>());
             Check(secondProbe == 1 && probePlan.ProbeTargets(new[] { probeUnit }).Count == 0, "배운 것 없는 열어 보기는 모듈마다 두 번까지");
+            // 같은 묶음의 다른 단위가 먼저 모듈에 배운 헤더를 찾은 검사는 그 단위의 다음 단계에 들어가므로 성과 없음으로 세지 않습니다.
+            var siblingContext = CompileContextBuilder.Prepare(solution, Path.Combine(root, "cache-sibling"), engine, "clang-cl.exe", supplements: true);
+            var siblingPlan = siblingContext.Plan!;
+            var siblingUnit = Path.Combine(siblingContext.Directory, "units", "Module.Game.1.cpp").Replace('\\', '/');
+            var siblingWrapper = Path.Combine(siblingContext.Directory, "units", "Module.Game.1.sup.cpp").Replace('\\', '/');
+            siblingPlan.Learn(siblingUnit, new[] { Source("Shared.h") });
+            siblingPlan.SwitchFailed(new[] { siblingUnit });
+            siblingPlan.Learn(Source("U5.cpp"), new[] { Source("Calc.h") });
+            siblingPlan.Learn(siblingWrapper, new[] { Source("Calc.h") });
+            siblingPlan.Learn(siblingWrapper, new[] { Source("Calc.h") });
+            var afterSibling = siblingPlan.ProbeTargets(new[] { siblingWrapper }).Count;
+            siblingPlan.Learn(siblingWrapper, new[] { Source("Shared.h") });
+            siblingPlan.Learn(siblingWrapper, Array.Empty<string>());
+            Check(afterSibling == 1 && siblingPlan.ProbeTargets(new[] { siblingWrapper }).Count == 0,
+                "모듈이 이미 아는 헤더라도 단위에 없으면 성과, 단위에 있는 헤더만 찾으면 성과 없음");
             Check(supPlan.ProbeTargets(new[] { supUnit1, supUnit2 }).SequenceEqual(new[] { supUnit1 }) &&
                   supPlan.IncludeDirectoriesOf(supUnit1).Contains(source.Replace('\\', '/').TrimEnd('/') + "/"),
                 "배운 헤더가 없는 모듈은 실패한 단위 하나만 열어 봄");

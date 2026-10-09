@@ -97,10 +97,10 @@ public sealed class UnrealIndexPlan
     private readonly Dictionary<string, string> exhausted;
     // 파일 폴더별 소속 모듈 폴더입니다. 모듈 찾기는 위쪽 폴더를 열거하므로 기억합니다.
     private readonly ConcurrentDictionary<string, string?> moduleOfDirectory = new(StringComparer.OrdinalIgnoreCase);
-    // 이 세션에서 합성 TU를 열어 보고도 배운 헤더가 없었던 횟수(모듈 폴더별)입니다. gate로 보호합니다.
+    // 이 세션에서 합성 TU를 검사하고도 그 단위에 더 넣을 헤더를 찾지 못한 횟수(모듈 폴더별)입니다. gate로 보호합니다.
     private readonly Dictionary<string, int> fruitlessProbes = new(StringComparer.OrdinalIgnoreCase);
 
-    /// <summary>모듈마다 배운 것 없이 합성 TU를 열어 보는 세션당 최대 횟수입니다. 이름 색인이 원인 헤더를 모르면 실패 묶음마다 열어 메모리만 씁니다.</summary>
+    /// <summary>모듈마다 성과 없이 합성 TU를 검사하는 세션당 최대 횟수입니다. 이름 색인이 원인 헤더를 모르면 실패 묶음마다 검사해 시간만 씁니다.</summary>
     internal const int MaxFruitlessProbes = 2;
 
     // 판단 기록 파일은 이전 세션의 늦은 기록과 새 세션의 준비가 겹칠 수 있어 캐시 폴더마다 잠그고, 읽는 쪽이 쓰다 만 파일을 보지 않게 바꿔치기로 씁니다.
@@ -369,18 +369,25 @@ public sealed class UnrealIndexPlan
             var module = UnitOfWrapper(file) is { } unit ? ModuleOfUnit(unit) : ModuleOf(file);
             if (module is null) return Array.Empty<string>();
             if (!supplements.TryGetValue(module, out var list)) supplements[module] = list = new List<string>();
+            var found = headers.Select(FullPath).ToList();
             var added = new List<string>();
-            foreach (var header in headers)
+            foreach (var full in found)
             {
                 if (list.Count >= IncludeSupplements.MaxHeadersPerModule) break;
-                var full = FullPath(header);
                 if (list.Contains(full, StringComparer.OrdinalIgnoreCase)) continue;
                 list.Add(full);
                 added.Add(full);
             }
 
             if (added.Count > 0) WriteDecisions();
-            else if (UnitOfWrapper(file) is not null) fruitlessProbes[module] = (fruitlessProbes.TryGetValue(module, out var count) ? count : 0) + 1;
+            // 같은 묶음의 다른 단위가 먼저 배운 헤더를 찾았어도 이 단위의 다음 단계에 들어가므로 성과입니다. 이를 성과 없음으로 세면 실패한 단위가
+            // 여럿인 모듈에서 상한에 일찍 닿아, 나중 단위가 검사 없이 PCH로 갔습니다.
+            else if (UnitOfWrapper(file) is { } probed &&
+                     found.All(h => probed.SupplementHeaders.Contains(h, StringComparer.OrdinalIgnoreCase)))
+            {
+                fruitlessProbes[module] = (fruitlessProbes.TryGetValue(module, out var count) ? count : 0) + 1;
+            }
+
             return added;
         }
     }
