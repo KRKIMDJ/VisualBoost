@@ -590,9 +590,10 @@ public sealed class ClangdNavigator : IDisposable
         foreach (var group in locations.GroupBy(l => l.Path, StringComparer.OrdinalIgnoreCase))
         {
             // clangd에 열린 다른 문서는 저장하지 않은 내용으로 분석되어 참조 위치가 디스크 기준 색인 파일과 어긋날 수 있으므로 요청 문서처럼
-            // 열린 AST에 묻습니다(2026-10-09 검토 40). 확인하는 동안 닫히지 않게 임대합니다.
+            // 열린 AST에 묻습니다(2026-10-09 검토 40). 확인하는 동안 닫히지 않게 사용 순서를 바꾸지 않고 임대합니다. 보낸 버전의 분석이 아직
+            // 끝나지 않았으면 묻는 동안 분석을 기다리게 되므로 색인 파일로 확인합니다(검토 53).
             var current = string.Equals(group.Key, query.Path, StringComparison.OrdinalIgnoreCase);
-            var leased = !current && documents.AcquireIfOpen(group.Key) is not null;
+            var leased = !current && LeaseAnalyzed(group.Key) is not null;
             if (current || leased)
             {
                 try
@@ -605,7 +606,7 @@ public sealed class ClangdNavigator : IDisposable
                 }
                 finally
                 {
-                    if (leased) documents.Release(group.Key);
+                    if (leased) documents.Release(group.Key, touch: false);
                 }
 
                 continue;
@@ -854,6 +855,19 @@ public sealed class ClangdNavigator : IDisposable
     }
 
     /// <summary>
+    /// 이미 열려 있고 보낸 버전의 분석을 마친 문서만 사용 순서를 바꾸지 않고 임대해 그 내용을 돌려줍니다. 아니면 null이며 임대하지 않습니다.
+    /// 호출자는 <c>Release(path, touch: false)</c>로 풀어야 합니다.
+    /// </summary>
+    private string? LeaseAnalyzed(string path)
+    {
+        var text = documents.AcquireIfOpen(path, out var version, touch: false);
+        if (text is null) return null;
+        if (session.HasDiagnostics(path, version)) return text;
+        documents.Release(path, touch: false);
+        return null;
+    }
+
+    /// <summary>
     /// 오버로드를 정하지 못한 위치에서 찾았으면(<see cref="SemanticSymbol.OverloadIds"/>) clangd에 열린 문서에서 빠진 같은 이름 위치를 더합니다.
     /// clangd는 그 위치의 후보 함수 모두의 참조를 색인에서 찾지만, 열린 문서는 열린 AST의 참조로 대신하고 AST 참조에는 정해지지 않은 호출이
     /// 없어 누른 위치조차 결과에 없었습니다(2026-10-09 독립 표본: 템플릿 안의 <c>Forward&lt;Args&gt;(args)</c>, 색인 파일에는 기록 있음).
@@ -874,8 +888,8 @@ public sealed class ClangdNavigator : IDisposable
             if (checks > MaxQualifierChecks) break;
             cancellationToken.ThrowIfCancellationRequested();
             var current = string.Equals(path, query.Path, StringComparison.OrdinalIgnoreCase);
-            // 요청 문서는 이 요청이 이미 붙잡고 있습니다. 다른 문서는 확인하는 동안 닫히지 않게 임대합니다.
-            var text = current ? query.Document.Text : documents.AcquireIfOpen(path);
+            // 요청 문서는 이 요청이 이미 붙잡고 있습니다. 다른 문서는 분석을 마친 것만 사용 순서를 바꾸지 않고 임대해 훑습니다(검토 53·55).
+            var text = current ? query.Document.Text : LeaseAnalyzed(path);
             if (text is null) continue;
             try
             {
@@ -889,7 +903,7 @@ public sealed class ClangdNavigator : IDisposable
             }
             finally
             {
-                if (!current) documents.Release(path);
+                if (!current) documents.Release(path, touch: false);
             }
         }
 
@@ -919,7 +933,9 @@ public sealed class ClangdNavigator : IDisposable
         foreach (var path in new[] { query.Path }.Concat(locations.Select(l => l.Path)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             cancellationToken.ThrowIfCancellationRequested();
-            var openText = documents.AcquireIfOpen(path);
+            // 분석을 마친 열린 문서만 AST에 묻고, 분석 중인 문서는 닫힌 파일처럼 색인 파일로 봅니다(검토 53).
+            var current = string.Equals(path, query.Path, StringComparison.OrdinalIgnoreCase);
+            var openText = current ? documents.AcquireIfOpen(path, out _, touch: false) : LeaseAnalyzed(path);
             if (openText is not null)
             {
                 try
@@ -934,7 +950,7 @@ public sealed class ClangdNavigator : IDisposable
                 }
                 finally
                 {
-                    documents.Release(path);
+                    documents.Release(path, touch: false);
                 }
 
                 continue;
@@ -1214,13 +1230,13 @@ public sealed class ClangdNavigator : IDisposable
         Saved(new DocumentText(path, text, 0));
     }
 
-    /// <summary>편집기에서 마지막 창을 닫은 문서를 clangd에서도 닫습니다(진행 중인 요청이 없을 때).</summary>
+    /// <summary>편집기에서 마지막 창을 닫은 문서를 clangd에서도 닫습니다. 진행 중인 요청이 쓰고 있으면 그 요청이 끝날 때 닫습니다.</summary>
     public void Closed(string path)
     {
         if (HasExited) return;
         try
         {
-            documents.TryClose(path);
+            documents.CloseWhenReleased(path);
         }
         catch (LspConnectionClosedException)
         {
@@ -1310,7 +1326,9 @@ public sealed class ClangdNavigator : IDisposable
         catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
         {
             documentCommandsSent.Remove(path);
-            AuxiliaryFailed?.Invoke($"근사 컴파일 명령을 만들지 못해 clangd 추정 명령으로 엽니다({Path.GetFileName(path)}): {exception.Message}");
+            // 문서 집합 잠금 안(열기 콜백)이므로 구독자의 기록이 잠금을 오래 쥐지 않게 다른 스레드에서 알립니다(검토 58).
+            var message = $"근사 컴파일 명령을 만들지 못해 clangd 추정 명령으로 엽니다({Path.GetFileName(path)}): {exception.Message}";
+            if (AuxiliaryFailed is { } handler) _ = Task.Run(() => handler(message));
             return null;
         }
     }

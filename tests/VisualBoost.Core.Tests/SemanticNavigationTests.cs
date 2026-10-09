@@ -146,19 +146,25 @@ internal static class SemanticNavigationTests
         Check(!policy.ShouldRestart(Sample(3 * Gib)), "기준 이하는 유지");
         Check(!policy.ShouldRestart(Sample(5 * Gib, indexing: true)) && !policy.ShouldRestart(Sample(5 * Gib, busy: true)) &&
               !policy.ShouldRestart(Sample(5 * Gib, sinceRequest: TimeSpan.FromSeconds(30))) &&
-              !policy.ShouldRestart(Sample(5 * Gib, sinceStart: TimeSpan.FromMinutes(1))), "색인·요청 중이거나 최근 요청·시작 직후에는 다시 시작하지 않음");
+              !policy.ShouldRestart(Sample(5 * Gib, sinceRequest: TimeSpan.FromMinutes(5))) &&
+              !policy.ShouldRestart(Sample(5 * Gib, sinceStart: TimeSpan.FromMinutes(1))), "색인·요청 중이거나 최근 요청(10분 안)·시작 직후에는 다시 시작하지 않음");
         Check(policy.ShouldRestart(Sample(5 * Gib)), "유휴 상태에서 기준을 넘으면 다시 시작");
 
         // 다시 시작한 직후와 색인을 다시 읽는 동안은 기준 사용량을 재지 않고, 안정된 뒤 첫 표본으로 잽니다.
         Check(!policy.ShouldRestart(Sample(5 * Gib, sinceStart: TimeSpan.FromSeconds(20))) &&
               !policy.ShouldRestart(Sample(5 * Gib, indexing: true)), "다시 시작 직후에는 판단하지 않음");
         Check(!policy.ShouldRestart(Sample(1 * Gib)) && policy.EffectiveLimitBytes == 4 * Gib, "작은 기준 사용량은 기준을 바꾸지 않음");
-        Check(policy.ShouldRestart(Sample(5 * Gib)), "기준 사용량을 잰 뒤 다시 넘으면 다시 시작");
+        // 정리한 뒤 작업하며 다시 넘으면 그 작업 집합은 정리해도 다시 차므로, 다시 시작하지 않고 그 사용량의 1.5배로 기준을 올립니다(검토 54).
+        Check(!policy.ShouldRestart(Sample(5 * Gib)) && policy.EffectiveLimitBytes == 5 * Gib * 3 / 2,
+            "정리 뒤 다시 넘으면 기준을 올림: " + policy.EffectiveLimitBytes / (1024 * 1024));
+        Check(!policy.ShouldRestart(Sample(7 * Gib)) && policy.ShouldRestart(Sample(8 * Gib)), "올린 기준보다 더 쌓이면 다시 시작");
 
         // 다시 시작해도 기준 가까이 남는 큰 프로젝트: 기준을 1.5배로 올려 되풀이하지 않습니다.
-        Check(!policy.ShouldRestart(Sample(3500L * 1024 * 1024)) && policy.EffectiveLimitBytes == 3500L * 1024 * 1024 * 3 / 2,
-            "큰 기준 사용량이면 정리 기준을 올림: " + policy.EffectiveLimitBytes / (1024 * 1024));
-        Check(!policy.ShouldRestart(Sample(5 * Gib)) && policy.ShouldRestart(Sample(6 * Gib)), "올린 기준으로 판단");
+        var large = new ClangdMemoryPolicy(4 * Gib);
+        Check(large.ShouldRestart(Sample(5 * Gib)) && !large.ShouldRestart(Sample(3500L * 1024 * 1024)) && large.EffectiveLimitBytes == 3500L * 1024 * 1024 * 3 / 2,
+            "큰 기준 사용량이면 정리 기준을 올림: " + large.EffectiveLimitBytes / (1024 * 1024));
+        Check(!large.ShouldRestart(Sample(5 * Gib)) && !large.ShouldRestart(Sample(6 * Gib)) && large.EffectiveLimitBytes == 9 * Gib,
+            "올린 기준으로 판단하고, 정리 뒤 첫 초과는 기준만 올림: " + large.EffectiveLimitBytes / (1024 * 1024));
         Check(!new ClangdMemoryPolicy(0).ShouldRestart(Sample(64 * Gib)), "기준 0은 정리하지 않음");
 
         // 색인 결과 다시 읽기는 메모리와 상관없이, 색인·요청이 멈추고 짧은 유휴 뒤에 하되 Solution마다 횟수를 제한합니다.
@@ -291,6 +297,10 @@ internal static class SemanticNavigationTests
             "#if 0\n#if IN_DISABLED\n#endif\n#elif AFTER_DISABLED\n#endif\n#if 0 // off\n#  if ALSO_DISABLED\n#  endif\n#else\n#if IN_ELSE\n#endif\n#endif\n");
         Check(inactive.SequenceEqual(new[] { "WINVER", "HAS_REAL", "AFTER_DISABLED", "IN_ELSE" }),
             "숫자 접미사·16진수 글자, 여러 줄 주석, #if 0 구역은 빼고 #else·#elif는 봄: " + string.Join(",", inactive));
+        var commented = ConditionMacros.Used(
+            "// Plugin/*.ini\n#if AFTER_LINE_COMMENT\n#endif\nconst char* P = \"a/*b\";\n#if AFTER_STRING\n#endif\n/* real\n#if IN_REAL_COMMENT\n#endif\n*/\n#if AFTER_REAL\n#endif\n");
+        Check(commented.SequenceEqual(new[] { "AFTER_LINE_COMMENT", "AFTER_STRING", "AFTER_REAL" }),
+            "줄 주석·문자열 안의 /*는 여러 줄 주석 시작이 아님(검토 56): " + string.Join(",", commented));
         // 닫힌 파일 매크로 인수 보완: #undef 뒤 다시 #define하기 전의 같은 이름은 그 매크로가 아닙니다.
         var undefined = ClangdNavigator.UndefinedLines("#define M(x) x\nM(1)\n#undef M\nM(2)\n#define M 3\nM\n", "M");
         Check(!undefined(1) && undefined(3) && !undefined(5) && !ClangdNavigator.UndefinedLines("M(1)\n", "M")(0), "#undef 뒤 구간");
@@ -312,6 +322,13 @@ internal static class SemanticNavigationTests
         Check(OwnDefinitionReferences.Kept(ctorUses, ctorLines, false, "ABase", "ABase").Count == 4 &&
               OwnDefinitionReferences.Kept(ctorUses, ctorLines, false, "ABase", "ns::Outer").Count == 0,
             "생성자 사용처(위임·별칭·지역 변수·new)는 이름이 쓰이지 않아도 남김(검토 39)");
+        var macroLines = new[] { "    GENERATED_BODY()", "    FVector V(1);" };
+        var macroUses = new[]
+        {
+            new NavigationLocation(@"C:\p\a.h", 0, 4, 0, 18, "AUser"), new NavigationLocation(@"C:\p\a.cpp", 1, 12, 1, 13, "Make")
+        };
+        Check(OwnDefinitionReferences.Kept(macroUses, macroLines, false, "FVector", "FVector").SequenceEqual(new[] { 1 }),
+            "생성자라도 매크로 이름 꼴(GENERATED_BODY)은 빼고 짧은 변수 이름은 남김(검토 57)");
         Check(OwnDefinitionReferences.IsConstructor("TBox", "ns::TBox<T>") && OwnDefinitionReferences.IsConstructor("ABase", "ABase") &&
               !OwnDefinitionReferences.IsConstructor("Make", "TBox") && !OwnDefinitionReferences.IsConstructor("TBox", null) &&
               !OwnDefinitionReferences.IsConstructor("Box", "TBox"), "생성자 판단");
@@ -1314,6 +1331,33 @@ internal static class SemanticNavigationTests
         Check(events.SequenceEqual(new[] { "open a x 1", "open b y 1", "change b y2 2", "open c z 1", "close a", "close b" }), "알림 순서: " + string.Join(" | ", events));
         set.Reset();
         Check(set.OpenPaths.Count == 0 && events.Count == 6, "재시작 초기화는 알림 없음");
+
+        // 확인용 임대(touch: false)는 사용 순서를 바꾸지 않습니다(검토 55). old는 recent보다 먼저 열었으므로 정원을 넘으면 old가 닫혀야 합니다.
+        events.Clear();
+        set.Acquire(new DocumentText("old", "1"));
+        set.Release("old");
+        set.Acquire(new DocumentText("recent", "2"));
+        set.Release("recent");
+        Check(set.AcquireIfOpen("old", out var oldVersion, touch: false) == "1" && oldVersion == 1, "확인용 임대는 내용과 버전을 돌려줌");
+        set.Release("old", touch: false);
+        set.Acquire(new DocumentText("next", "3"));
+        set.Release("next");
+        Check(!set.Contains("old") && set.Contains("recent") && set.Contains("next"), "확인용 임대 뒤에도 오래된 문서부터 닫음: " + string.Join(",", set.OpenPaths));
+
+        // 임대 중에 편집기에서 닫으면 마지막 임대가 끝날 때 닫고, 그 전에 다시 쓰면 닫기를 거둡니다.
+        set.AcquireIfOpen("recent", out _, touch: false);
+        set.CloseWhenReleased("recent");
+        Check(set.Contains("recent"), "임대 중에는 닫지 않음");
+        set.Release("recent", touch: false);
+        Check(!set.Contains("recent") && events.Last() == "close recent", "마지막 임대가 끝나면 닫음");
+        set.Acquire(new DocumentText("kept", "4"));
+        set.CloseWhenReleased("kept");
+        set.Acquire(new DocumentText("kept", "4"));
+        set.Release("kept");
+        set.Release("kept");
+        Check(set.Contains("kept"), "닫기 요청 뒤 다시 쓴 문서는 남김");
+        set.CloseWhenReleased("next");
+        Check(!set.Contains("next"), "임대 없는 문서는 바로 닫음");
     }
 
     public static void RunCompileContext()

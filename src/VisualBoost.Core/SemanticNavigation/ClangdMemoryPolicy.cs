@@ -40,10 +40,19 @@ public readonly struct ClangdMemorySample
 /// <c>--malloc-trim</c> 없음) 다시 시작이 유일한 방법입니다.
 /// 다시 시작하면 열린 문서의 분석이 사라지고 색인을 다시 읽는 동안 결과가 불완전하므로, 색인 중·요청 중이 아니고 일정 시간 탐색 요청이
 /// 없을 때만 합니다. 다시 시작한 뒤에도 상한을 넘는 큰 프로젝트에서 되풀이하지 않도록 상한을 그 사용량의 1.5배로 올립니다.
+/// 다시 시작한 직후의 사용량은 초점 문서 하나만 연 값이라 평소 작업 집합(연 문서 3개, Unreal 공유 PCH 문서 하나 약 2 GB)보다 작습니다.
+/// 그래서 정리한 뒤 다음 작업 구간에서 다시 상한을 넘으면 그 작업 집합은 정리해도 다시 차는 것으로 보고, 이번에는 다시 시작하지 않고
+/// 상한을 그 사용량의 1.5배로 올립니다(2026-10-09 검토 54: 2~4 GB 상한에서 쉴 때마다 다시 시작해 문서마다 분석을 다시 만드는 반복).
 /// </remarks>
 public sealed class ClangdMemoryPolicy
 {
     public static readonly TimeSpan DefaultIdle = TimeSpan.FromMinutes(2);
+
+    /// <summary>
+    /// 정리 기준을 넘었을 때 다시 시작하기 전에 기다리는 탐색 요청 없는 시간입니다. 코드를 읽는 짧은 쉼마다 다시 시작해 열린 문서의 분석을
+    /// 잃지 않도록 색인 뒤 정리(<see cref="DefaultIdle"/>)보다 길게 둡니다. 목적은 장기 점유 해소입니다(2026-10-09 검토 54).
+    /// </summary>
+    public static readonly TimeSpan DefaultMemoryIdle = TimeSpan.FromMinutes(10);
 
     public static readonly TimeSpan DefaultMinimumUptime = TimeSpan.FromMinutes(5);
 
@@ -52,12 +61,15 @@ public sealed class ClangdMemoryPolicy
 
     private bool measuring;
 
+    // 기준 초과로 다시 시작한 뒤 아직 다시 넘지 않았습니다. 다시 넘으면 다시 시작하는 대신 기준을 올립니다.
+    private bool reclaimed;
+
     /// <param name="limitBytes">이 값을 넘으면 정리합니다. 0 이하면 정리하지 않습니다.</param>
     public ClangdMemoryPolicy(long limitBytes, TimeSpan? idle = null, TimeSpan? minimumUptime = null)
     {
         LimitBytes = limitBytes;
         EffectiveLimitBytes = limitBytes;
-        Idle = idle ?? DefaultIdle;
+        Idle = idle ?? DefaultMemoryIdle;
         MinimumUptime = minimumUptime ?? DefaultMinimumUptime;
     }
 
@@ -83,6 +95,7 @@ public sealed class ClangdMemoryPolicy
             // 정리 뒤 첫 안정 표본: 색인을 다시 읽은 기준 사용량입니다.
             if (sample.Indexing || sample.SinceStart < SettleTime) return false;
             measuring = false;
+            reclaimed = true;
             if (sample.PrivateBytes * 4 > EffectiveLimitBytes * 3)
             {
                 EffectiveLimitBytes = Math.Max(EffectiveLimitBytes, sample.PrivateBytes + sample.PrivateBytes / 2);
@@ -94,6 +107,14 @@ public sealed class ClangdMemoryPolicy
         if (sample.Indexing || sample.Busy || sample.SinceLastRequest < Idle || sample.SinceStart < MinimumUptime ||
             sample.PrivateBytes <= EffectiveLimitBytes)
         {
+            return false;
+        }
+
+        if (reclaimed)
+        {
+            // 정리한 뒤 다시 찼습니다. 이 사용량이 실제 작업 집합이므로 기준을 올리고, 그보다 더 쌓이면 그때 다시 시작합니다.
+            reclaimed = false;
+            EffectiveLimitBytes = Math.Max(EffectiveLimitBytes, sample.PrivateBytes + sample.PrivateBytes / 2);
             return false;
         }
 
@@ -146,7 +167,7 @@ public sealed class ClangdMemoryPolicy
     /// <remarks>
     /// 0.45.1까지 최대 8 GiB였으나, 실제 Unreal 프로젝트에서 서로 다른 파일 60곳을 연속 조회하면 clangd가 6.5~6.7 GB까지 올라도
     /// 64 GB PC의 기준(7.7 GB)을 넘지 않아 정리하지 않았습니다(2026-10-09 정확도 시험, 회사 피드백의 장기 점유와 같은 모양).
-    /// 정리 뒤 기준 사용량이 상한에 가까우면 <see cref="ShouldRestart"/>가 상한을 올리므로 큰 프로젝트에서 되풀이하지 않습니다.
+    /// 정리 뒤 기준 사용량이 상한에 가깝거나 정리한 뒤 다시 상한을 넘으면 <see cref="ShouldRestart"/>가 상한을 올리므로 되풀이하지 않습니다.
     /// </remarks>
     public static long DefaultLimitBytes(long physicalBytes)
     {

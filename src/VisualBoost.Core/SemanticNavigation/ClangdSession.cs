@@ -427,6 +427,15 @@ public sealed class ClangdSession : IDisposable
                 Path.GetFullPath(c.File),
                 JsonValue.Object(("workingDirectory", c.Directory), ("compilationCommand", JsonValue.Array(c.Arguments.Select(a => (JsonValue)a))))))))))));
 
+    /// <summary>
+    /// 그 문서의 진단(= AST 준비)을 <paramref name="version"/> 이상으로 이미 받았는지 봅니다. 분석이 끝나지 않은 문서에 보낸 요청은 분석이
+    /// 끝날 때까지 기다리므로(Unreal 문서 9~13초) 다른 문서를 확인하는 보조 요청 전에 씁니다.
+    /// </summary>
+    public bool HasDiagnostics(string path, int version)
+    {
+        lock (stateLock) return diagnosticsVersions.TryGetValue(path, out var received) && received >= version;
+    }
+
     /// <summary>해당 문서의 진단(= AST 준비)이 <paramref name="minimumVersion"/> 이상으로 도착할 때까지 기다립니다.</summary>
     public Task WaitForDiagnosticsAsync(string path, int minimumVersion, CancellationToken cancellationToken)
     {

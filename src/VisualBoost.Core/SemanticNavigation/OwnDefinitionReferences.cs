@@ -37,12 +37,16 @@ public static class OwnDefinitionReferences
         if (lines is null) throw new ArgumentNullException(nameof(lines));
         // clangd는 생성자 사용을 그 생성자를 부르는 식의 위치에 기록하므로 생성자 이름이 쓰이지 않은 자리가 정상 사용처입니다:
         // `: Super(1)`의 Super, `FAlias First(3);`의 First, `ABase Second(4);`의 Second, `new FAlias(5)`의 FAlias(2026-10-09 검토 39, clangd 22 확인).
-        var expansionName = IsConstructor(symbolName, symbolContainer) ? null : symbolName;
+        // 다만 매크로 이름 꼴(대문자·숫자·밑줄, 밑줄 포함)의 자리는 매크로가 펼친 호출이므로 뺍니다. Unreal `GENERATED_BODY()`는 펼친 본문에서
+        // 생성자를 부르므로 클래스 헤더마다 생성자 참조로 나왔습니다(검토 57). `FVector V(1)`의 V 같은 짧은 이름은 밑줄이 없어 남습니다.
+        var constructor = IsConstructor(symbolName, symbolContainer);
         var kept = new List<int>(locations.Count);
         for (var i = 0; i < locations.Count; i++)
         {
             var line = i < lines.Count ? lines[i] : null;
-            if (!IsOwnDefinitionName(locations[i], line, symbolIsType) && !IsMacroExpansion(locations[i], line, expansionName)) kept.Add(i);
+            if (IsOwnDefinitionName(locations[i], line, symbolIsType)) continue;
+            if (IsMacroExpansion(locations[i], line, symbolName) && (!constructor || IsMacroNameAt(locations[i], line!))) continue;
+            kept.Add(i);
         }
 
         return kept;
@@ -81,6 +85,19 @@ public static class OwnDefinitionReferences
         if (start < 0 || end <= start || end > lineText.Length) return false;
         var written = lineText.Substring(start, end - start);
         return IsIdentifierText(written) && !string.Equals(written, symbolName, StringComparison.Ordinal);
+    }
+
+    /// <summary>위치에 쓰인 글자가 매크로 이름 꼴(대문자로 시작하고 대문자·숫자·밑줄만, 밑줄 하나 이상)인지 봅니다.</summary>
+    private static bool IsMacroNameAt(NavigationLocation location, string lineText)
+    {
+        var written = lineText.Substring(location.Character, location.EndCharacter - location.Character);
+        if (written.Length < 2 || !char.IsUpper(written[0]) || written.IndexOf('_') < 0) return false;
+        foreach (var c in written)
+        {
+            if (!(c is >= 'A' and <= 'Z' || c is >= '0' and <= '9' || c == '_')) return false;
+        }
+
+        return true;
     }
 
     private static bool IsIdentifierText(string text)

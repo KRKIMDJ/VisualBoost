@@ -95,20 +95,29 @@ public sealed class ClangdDocumentSet
                 Send(document, entry);
             }
 
+            // 다시 쓰는 문서이므로 임대 중에 받아 둔 닫기 요청은 거둡니다.
+            entry.CloseRequested = false;
             entry.Leases++;
             entry.LastUse = ++clock;
             return entry.Version;
         }
     }
 
-    public void Release(string path)
+    /// <param name="touch">거짓이면 최근 사용 순서를 바꾸지 않습니다. 확인용 임대(<see cref="AcquireIfOpen(string, out int, bool)"/>)와 짝을 맞춥니다.</param>
+    public void Release(string path, bool touch = true)
     {
         lock (gate)
         {
             if (entries.TryGetValue(path, out var entry) && entry.Leases > 0)
             {
                 entry.Leases--;
-                entry.LastUse = ++clock;
+                if (touch) entry.LastUse = ++clock;
+                // 임대 중에 편집기에서 닫은 문서는 마지막 임대가 끝날 때 닫습니다(2026-10-09 검토 55).
+                if (entry.Leases == 0 && entry.CloseRequested)
+                {
+                    entries.Remove(path);
+                    close(path);
+                }
             }
 
             Evict();
@@ -116,13 +125,24 @@ public sealed class ClangdDocumentSet
     }
 
     /// <summary>이미 열린 문서만 임대하고 clangd에 보낸 내용을 돌려줍니다. 열려 있지 않으면 임대하지 않고 null입니다.</summary>
-    public string? AcquireIfOpen(string path)
+    public string? AcquireIfOpen(string path) => AcquireIfOpen(path, out _, touch: true);
+
+    /// <summary>
+    /// 이미 열린 문서만 임대하고 clangd에 보낸 내용과 버전을 돌려줍니다. 열려 있지 않으면 임대하지 않고 null입니다.
+    /// </summary>
+    /// <param name="touch">
+    /// 거짓이면 최근 사용 순서를 바꾸지 않습니다. 참조 결과를 확인하려고 열린 문서를 훑을 때 쓰며, 훑은 순서로 사용 순서가 덮여 사용자가 방금 보던
+    /// 문서가 먼저 닫히지 않게 합니다(2026-10-09 검토 55).
+    /// </param>
+    public string? AcquireIfOpen(string path, out int version, bool touch)
     {
         lock (gate)
         {
+            version = 0;
             if (!entries.TryGetValue(path, out var entry)) return null;
             entry.Leases++;
-            entry.LastUse = ++clock;
+            if (touch) entry.LastUse = ++clock;
+            version = entry.Version;
             return entry.Text;
         }
     }
@@ -174,6 +194,26 @@ public sealed class ClangdDocumentSet
             close(path);
             open(path, entry.Text, entry.Version);
             return true;
+        }
+    }
+
+    /// <summary>
+    /// 편집기에서 닫은 문서를 닫습니다. 임대 중이면 표시해 두고 마지막 임대가 끝날 때 닫습니다. 임대 중에 닫기를 놓치면 열린 문서가 정원보다
+    /// 적은 동안 그 문서의 분석(Unreal 문서 하나 0.5~1.7 GB)이 계속 남았습니다(2026-10-09 검토 55).
+    /// </summary>
+    public void CloseWhenReleased(string path)
+    {
+        lock (gate)
+        {
+            if (!entries.TryGetValue(path, out var entry)) return;
+            if (entry.Leases > 0)
+            {
+                entry.CloseRequested = true;
+                return;
+            }
+
+            entries.Remove(path);
+            close(path);
         }
     }
 
@@ -233,5 +273,8 @@ public sealed class ClangdDocumentSet
         public int Leases { get; set; }
 
         public long LastUse { get; set; }
+
+        /// <summary>임대 중에 편집기에서 닫았습니다. 마지막 임대가 끝나면 닫습니다.</summary>
+        public bool CloseRequested { get; set; }
     }
 }

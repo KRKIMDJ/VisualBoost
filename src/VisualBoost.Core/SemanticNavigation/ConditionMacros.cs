@@ -24,7 +24,6 @@ public static class ConditionMacros
         RegexOptions.CultureInvariant);
     // 앞 경계가 없으면 숫자 접미사·16진수의 글자(`201703L`의 L, `0x0600`의 x0600)를 이름으로 뽑았습니다(2026-10-09 검토 49).
     private static readonly Regex Identifier = new(@"\b[A-Za-z_]\w*", RegexOptions.CultureInvariant);
-    private static readonly Regex BlockComment = new(@"/\*.*?\*/", RegexOptions.Singleline | RegexOptions.CultureInvariant);
     private static readonly Regex Conditional = new(@"^[ \t]*#[ \t]*(?<kind>if|ifdef|ifndef|elif|else|endif)\b(?<rest>.*)$", RegexOptions.CultureInvariant);
 
     private static readonly HashSet<string> Keywords = new(StringComparer.Ordinal)
@@ -86,7 +85,7 @@ public static class ConditionMacros
     /// </summary>
     private static string ActiveText(string text)
     {
-        text = BlockComment.Replace(text, m => new string('\n', m.Value.Count(c => c == '\n')));
+        text = WithoutBlockComments(text);
         var lines = text.Split('\n');
         var skipDepth = 0;
         for (var i = 0; i < lines.Length; i++)
@@ -110,6 +109,57 @@ public static class ConditionMacros
         }
 
         return string.Join("\n", lines);
+    }
+
+    /// <summary>
+    /// 여러 줄 주석을 지우고 그 안의 줄바꿈만 남깁니다. 줄 주석·문자열·문자 상수 안의 <c>/*</c>는 주석 시작이 아닙니다. 정규식으로 먼저 지우면
+    /// <c>// Plugin/*.ini</c> 같은 줄부터 다음 <c>*/</c>까지의 조건식이 빠졌습니다(UE 5.8 Core 등 87줄, 2026-10-09 검토 56).
+    /// </summary>
+    private static string WithoutBlockComments(string text)
+    {
+        if (text.IndexOf("/*", StringComparison.Ordinal) < 0) return text;
+        var result = new System.Text.StringBuilder(text.Length);
+        var i = 0;
+        while (i < text.Length)
+        {
+            var c = text[i];
+            var next = i + 1 < text.Length ? text[i + 1] : '\0';
+            if (c == '/' && next == '/')
+            {
+                var end = text.IndexOf('\n', i);
+                if (end < 0) end = text.Length;
+                result.Append(text, i, end - i);
+                i = end;
+            }
+            else if (c == '/' && next == '*')
+            {
+                var end = text.IndexOf("*/", i + 2, StringComparison.Ordinal);
+                var stop = end < 0 ? text.Length : end + 2;
+                for (var j = i; j < stop; j++)
+                {
+                    if (text[j] == '\n') result.Append('\n');
+                }
+
+                result.Append(' ');
+                i = stop;
+            }
+            else if (c == '"' || c == '\'' && (i == 0 || !char.IsLetterOrDigit(text[i - 1])))
+            {
+                // 문자열·문자 상수는 닫는 따옴표나 줄 끝까지 그대로 둡니다. 숫자 구분자(1'000)는 앞 글자가 숫자라 상수로 보지 않습니다.
+                var j = i + 1;
+                while (j < text.Length && text[j] != c && text[j] != '\n') j += text[j] == '\\' ? 2 : 1;
+                var stop = Math.Min(text.Length, j < text.Length && text[j] == c ? j + 1 : j);
+                result.Append(text, i, stop - i);
+                i = stop;
+            }
+            else
+            {
+                result.Append(c);
+                i++;
+            }
+        }
+
+        return result.ToString();
     }
 
     private static string WithoutLineComment(string text)
