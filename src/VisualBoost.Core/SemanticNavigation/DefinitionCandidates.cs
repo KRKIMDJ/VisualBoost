@@ -117,6 +117,108 @@ public static class DefinitionCandidates
             .ToArray();
     }
 
+    /// <summary>
+    /// 자체 이름 색인에서 선언과 소속·이름이 같은 함수 정의(소스 파일)가 하나로 정해지면 그 위치입니다. 여럿이면(오버로드, 조건 갈래별 정의)
+    /// 선언의 매개변수 수로 좁히고, 그래도 하나가 아니면 null입니다. 색인이 오래되어 그 자리에 이름이 없으면 쓰지 않습니다.
+    /// </summary>
+    /// <remarks>
+    /// 후보 cpp를 clangd로 열어 확정하면 대형 엔진 TU 하나에 2~17초가 들었습니다(2026-10-09 측정, <c>World.cpp</c> 16.7초). 소속까지 같은
+    /// 정의가 하나뿐이면 clangd가 확정해도 같은 위치이므로 분석을 건너뜁니다. 이름 색인은 의미 분석이 아니므로 틀린 곳으로 가지 않는 쪽을
+    /// 택합니다: 소속은 한쪽이 다른 쪽의 뒷부분(<c>using namespace</c>로 줄여 쓴 정의)일 때만 같다고 보고, 소속 없는 함수는 정의 파일이
+    /// 선언 헤더를 직접 include할 때만 씁니다(다른 파일의 같은 이름 <c>static</c>·익명 네임스페이스 함수 배제).
+    /// </remarks>
+    /// <param name="container">clangd가 알려 준 소속입니다. 없으면 소속 없는 정의만 봅니다.</param>
+    /// <param name="headerPath">선언이 있는 파일입니다.</param>
+    /// <param name="declaration">선언 위치부터의 글(매개변수 목록 포함)입니다. 모르면 null이며, 그때는 오버로드를 좁히지 않습니다.</param>
+    /// <param name="readText">정의 파일의 현재 내용입니다. 읽지 못하면 null을 돌려줍니다.</param>
+    public static SourceSymbolLocation? UniqueDefinition(string name, string container, string headerPath, IEnumerable<SourceSymbolLocation> symbols,
+        string? declaration, Func<string, string?> readText)
+    {
+        var owner = container.TrimEnd(':');
+        var matches = symbols
+            .Where(s => s.Kind == SourceSymbolKind.Function && IsSource(s.Path) && LastSegment(s.Name) == name &&
+                        SameOwner(owner, s.Scope.Length > 0 ? s.Scope : Qualifier(s.Name)))
+            .GroupBy(s => (Path.GetFullPath(s.Path).ToUpperInvariant(), s.Line))
+            .Select(g => g.First())
+            .ToList();
+        if (matches.Count > 1 && declaration is not null && ParameterCount(declaration) is { } wanted)
+        {
+            matches = matches.Where(s => ParameterCount(s.Signature) == wanted).ToList();
+        }
+
+        if (matches.Count != 1) return null;
+        var found = matches[0];
+        var text = readText(found.Path);
+        if (text is null || owner.Length == 0 && !Includes(text, Path.GetFileName(headerPath))) return null;
+        var line = SourceLinePreview.LineAt(text, found.Line - 1);
+        var start = found.Column - 1;
+        return start >= 0 && start + name.Length <= line.Length && string.CompareOrdinal(line, start, name, 0, name.Length) == 0 &&
+               (start == 0 || !IsWordChar(line[start - 1])) && (start + name.Length == line.Length || !IsWordChar(line[start + name.Length]))
+            ? found
+            : null;
+    }
+
+    /// <summary>
+    /// 소속이 같으면 true입니다. 정의가 <c>using namespace</c> 아래에서 줄여 쓴 소속(<c>FImpl</c>)이나 clangd가 줄여 알린 소속도 받도록
+    /// 한쪽이 다른 쪽의 <c>::</c> 경계 뒷부분이면 같다고 봅니다. 마지막 이름만 비교하면 다른 네임스페이스의 같은 이름 클래스가 섞입니다.
+    /// </summary>
+    public static bool SameOwner(string expected, string actual)
+    {
+        actual = actual.TrimEnd(':');
+        if (expected.Length == 0 || actual.Length == 0) return expected.Length == actual.Length;
+        var (longer, shorter) = expected.Length >= actual.Length ? (expected, actual) : (actual, expected);
+        return longer.EndsWith(shorter, StringComparison.Ordinal) &&
+               (longer.Length == shorter.Length || longer.Substring(0, longer.Length - shorter.Length).EndsWith("::", StringComparison.Ordinal));
+    }
+
+    /// <summary>글에 <paramref name="fileName"/>을(경로 앞부분은 무관) include하는 줄이 있으면 true입니다.</summary>
+    private static bool Includes(string text, string fileName) =>
+        Regex.IsMatch(text, @"^[ \t]*#[ \t]*include[ \t]*[<""](?:[^<>""\r\n]*[/\\])?" + Regex.Escape(fileName) + @"[>""]",
+            RegexOptions.Multiline | RegexOptions.IgnoreCase | RegexOptions.CultureInvariant);
+
+    /// <summary>
+    /// 글에서 처음 나오는 괄호 목록의 매개변수 수입니다. 비었거나 <c>void</c>면 0입니다. 괄호가 닫히지 않으면 null입니다. 템플릿 인수(&lt;…&gt;)와
+    /// 안쪽 괄호의 쉼표는 세지 않습니다.
+    /// </summary>
+    public static int? ParameterCount(string text)
+    {
+        var open = text.IndexOf('(');
+        if (open < 0) return null;
+        var depth = 0;
+        var angle = 0;
+        var commas = 0;
+        for (var i = open; i < text.Length; i++)
+        {
+            var c = text[i];
+            if (c is '(' or '[' or '{')
+            {
+                depth++;
+            }
+            else if (c is ')' or ']' or '}')
+            {
+                if (--depth > 0) continue;
+                var inside = text.Substring(open + 1, i - open - 1).Trim();
+                return inside.Length == 0 || inside == "void" ? 0 : commas + 1;
+            }
+            else if (depth == 1 && c == '<')
+            {
+                angle++;
+            }
+            else if (depth == 1 && c == '>' && angle > 0)
+            {
+                angle--;
+            }
+            else if (depth == 1 && angle == 0 && c == ',')
+            {
+                commas++;
+            }
+        }
+
+        return null;
+    }
+
+    private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
+
     private static string LastSegment(string name)
     {
         var trimmed = name.TrimEnd(':');

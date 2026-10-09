@@ -1973,6 +1973,50 @@ internal static class SemanticNavigationTests
             Check(selected.SequenceEqual(new[] { "SavePackage2.cpp", "Free.cpp", "Package.cpp" }), "소속 일치·소속 없음·같은 이름 순, 다른 소속 제외: " + string.Join(",", selected));
             Check(DefinitionCandidates.Select("SavePackage", "UE::Core::UPackage::", header, symbols, stems, 1).Select(Path.GetFileName).Single() == "SavePackage2.cpp",
                 "한정 소속의 마지막 이름 비교와 개수 제한");
+
+            Check(DefinitionCandidates.ParameterCount("Save(UPackage* InOuter, const TCHAR* Name = TEXT(\"a,b\"), TMap<int, FString> Map = {});") == 3 &&
+                  DefinitionCandidates.ParameterCount("Tick( )") == 0 && DefinitionCandidates.ParameterCount("Tick(void) const") == 0 &&
+                  DefinitionCandidates.ParameterCount("Run(TFunction<void(int, int)> Callback, int32 (&Values)[2, 3])") == 2 &&
+                  DefinitionCandidates.ParameterCount("Open(int A,") is null && DefinitionCandidates.ParameterCount("NoParen") is null,
+                "매개변수 수: 기본값·템플릿·안쪽 괄호의 쉼표 제외, 빈 목록·void, 닫히지 않은 목록");
+            Check(DefinitionCandidates.SameOwner("UE::Private::FImpl", "FImpl") && DefinitionCandidates.SameOwner("FImpl", "UE::Private::FImpl::") &&
+                  DefinitionCandidates.SameOwner("", "") && !DefinitionCandidates.SameOwner("A::FImpl", "B::FImpl") &&
+                  !DefinitionCandidates.SameOwner("FImpl", "XFImpl") && !DefinitionCandidates.SameOwner("FImpl", ""),
+                "소속 비교: ::경계 뒷부분만 같다고 봄");
+
+            var texts = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            string? Read(string path) => texts.TryGetValue(path, out var text) ? text : null;
+            var worldCpp = Path.Combine(engine, "Private", "World.cpp");
+            var otherCpp = Path.Combine(engine, "Private", "Other.cpp");
+            var worldHeader = Path.Combine(engine, "Public", "Engine", "World.h");
+            texts[worldCpp] = "#include \"Engine/World.h\"\nvoid UWorld::Tick(float Delta)\n{\n}\nvoid UWorld::Load(int A)\n{\n}\nvoid UWorld::Load(int A, int B)\n{\n}\n" +
+                              "void Helper()\n{\n}\n";
+            texts[otherCpp] = "static void Helper()\n{\n}\nvoid Stray()\n{\n}\n";
+            var definitions = new[]
+            {
+                new SourceSymbolLocation("Tick", worldCpp, 2, 14, SourceSymbolKind.Function, "UWorld", "(float Delta)"),
+                new SourceSymbolLocation("Tick", worldHeader, 9, 10, SourceSymbolKind.Function, "UWorld", "(float Delta)"),
+                new SourceSymbolLocation("Tick", otherCpp, 1, 1, SourceSymbolKind.Variable, "UWorld"),
+                new SourceSymbolLocation("Tick", otherCpp, 4, 6, SourceSymbolKind.Function, "Editor::UWorld", "(float Delta)"),
+                new SourceSymbolLocation("Load", worldCpp, 5, 14, SourceSymbolKind.Function, "UWorld", "(int A)"),
+                new SourceSymbolLocation("Load", worldCpp, 8, 14, SourceSymbolKind.Function, "UWorld", "(int A, int B)"),
+                new SourceSymbolLocation("Helper", worldCpp, 11, 6, SourceSymbolKind.Function, string.Empty, "()"),
+                new SourceSymbolLocation("Stray", otherCpp, 4, 6, SourceSymbolKind.Function, string.Empty, "()"),
+            };
+            Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta);", Read) is { Line: 2 } &&
+                  DefinitionCandidates.UniqueDefinition("Tick", "UWorld::", worldHeader, definitions, null, Read) is null,
+                "소속까지 같은 소스 정의 하나만 씀(헤더·변수·다른 네임스페이스 제외), 줄여 쓴 소속이 여럿과 맞으면 쓰지 않음");
+            Check(DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(int A, int B = 0) const;", Read) is { Line: 8 } &&
+                  DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, null, Read) is null &&
+                  DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(", Read) is null,
+                "오버로드는 매개변수 수로 좁히고, 모르면 쓰지 않음");
+            Check(DefinitionCandidates.UniqueDefinition("Helper", string.Empty, worldHeader, definitions, "Helper();", Read) is { Line: 11 } &&
+                  DefinitionCandidates.UniqueDefinition("Stray", string.Empty, worldHeader, definitions, "Stray();", Read) is null,
+                "소속 없는 함수는 선언 헤더를 include하는 파일의 정의만 씀");
+            texts[worldCpp] = "#include \"Engine/World.h\"\n\nvoid UWorld::Tick(float Delta)\n{\n}\n";
+            Check(DefinitionCandidates.UniqueDefinition("Tick", "UWorld::", worldHeader, definitions, null, Read) is null &&
+                  DefinitionCandidates.UniqueDefinition("Tick", "UWorld::", worldHeader, definitions, null, _ => null) is null,
+                "색인 뒤 줄이 바뀌었거나 파일을 읽지 못하면 쓰지 않음");
         }
         finally
         {
@@ -2100,12 +2144,14 @@ internal static class SemanticNavigationTests
             Check(File.ReadAllText(use) == useText && File.ReadAllText(engineSource).Contains("Value * 2"), "원본 파일 보존");
             Check(!Directory.EnumerateFiles(project, "compile_commands.json", SearchOption.AllDirectories).Any(), "프로젝트 폴더에 database를 쓰지 않음");
 
-            // 색인에 없는 프로젝트 정의: 정의 이동은 후보 cpp를 열어 확정하고, 참조는 확정한 뒤 다시 찾아 정의를 더합니다.
+            // 색인에 없는 프로젝트 정의: 이름 인덱스가 정의 하나를 알면 정의 이동은 파일을 열지 않고 그 위치로 가고, 참조는 정의 파일을 열어
+            // 확정한 뒤 다시 찾아 정의를 더합니다.
             var callerLine = callerText.Split('\n')[1];
+            var totalReports = new List<string>();
             var total = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1, callerLine.IndexOf("CalcTotal", StringComparison.Ordinal)),
-                null, timeout.Token).Result;
-            Check(total.ResolvedOnDemand && !total.ResolvedFromEngine && total.Locations.Single().Path == calcImpl, "색인에 없는 프로젝트 정의 파일을 요청 시점에 확정: " +
-                  string.Join(",", total.Locations));
+                new SyncProgress(totalReports.Add), timeout.Token).Result;
+            Check(!total.ResolvedOnDemand && totalReports.Count == 0 && total.Locations.Single() is { Line: 1, Character: 4 } totalAt && totalAt.Path == calcImpl,
+                "색인에 없는 프로젝트 정의를 이름 인덱스로 바로 찾음: " + string.Join(",", total.Locations) + " / " + string.Join(",", totalReports));
             var otherReferences = navigator.ReferencesAsync(new NavigationQuery(new DocumentText(caller, callerText, 1), 1,
                 callerLine.IndexOf("CalcOther", StringComparison.Ordinal)), timeout.Token).Result;
             Check(otherReferences.ResolvedOnDemand && otherReferences.Locations.Any(l => l.Path == otherImpl) && otherReferences.Locations.Any(l => l.Path == caller),

@@ -444,10 +444,14 @@ public sealed class ClangdNavigator : IDisposable
                 // 요청 파일의 AST가 정의를 알면(헤더의 인라인 정의 등) 다른 파일을 열지 않습니다.
                 if (symbol is { Definition: null })
                 {
-                    var found = await ResolveDefinitionFileAsync(query, symbol, locations[0].Path, progress, cancellationToken).ConfigureAwait(false);
+                    var found = IndexedDefinition(symbol, locations[0]);
                     if (found is not null)
                     {
                         locations = found;
+                    }
+                    else if (await ResolveDefinitionFileAsync(query, symbol, locations[0].Path, progress, cancellationToken).ConfigureAwait(false) is { } confirmed)
+                    {
+                        locations = confirmed;
                         resolved = true;
                     }
                 }
@@ -2000,6 +2004,41 @@ public sealed class ClangdNavigator : IDisposable
         var text = SourceLinePreview.ReadText(location.Path);
         return text is not null && !DefinitionCandidates.LooksLikeTypeOrMacro(SourceLinePreview.LineAt(text, location.Line)) &&
                !DefinitionCandidates.LooksLikeNoSourceBody(text, location.Line);
+    }
+
+    /// <summary>
+    /// 정의가 색인에 없는 함수의 정의를 자체 이름 색인에서 바로 찾습니다(<see cref="DefinitionCandidates.UniqueDefinition"/>). 소속·이름이 같은
+    /// 정의가 하나로 정해질 때만 쓰고, 아니면 null을 돌려 후보 cpp를 clangd로 열어 확정하게 합니다.
+    /// </summary>
+    /// <remarks>
+    /// clangd가 오버로드를 정하지 못한 위치(후보 여럿)와 이름 인덱스가 아직 분석 중일 때(정의 하나가 실제로 유일하지 않을 수 있음)는 쓰지
+    /// 않습니다. 정의 이동에만 쓰고, 참조 탐색은 정의 파일의 참조까지 색인에 넣어야 하므로 지금처럼 clangd로 확정합니다.
+    /// </remarks>
+    private IReadOnlyList<NavigationLocation>? IndexedDefinition(SemanticSymbol symbol, NavigationLocation declaration)
+    {
+        if (options.FindSymbols is not { } find || symbol.Name.Length == 0 || symbol.OverloadIds.Count > 1 ||
+            options.SymbolsReady is { } ready && !ready())
+        {
+            return null;
+        }
+
+        var text = SourceLinePreview.ReadText(declaration.Path);
+        var found = DefinitionCandidates.UniqueDefinition(symbol.Name, symbol.ContainerName, declaration.Path, find(symbol.Name),
+            text is null ? null : TextFrom(text, declaration.Line, declaration.Character), SourceLinePreview.ReadText);
+        if (found is null || IsEngine(found.Path) && Context.Kind != CompileContextKind.Unreal) return null;
+        var line = found.Line - 1;
+        var column = found.Column - 1;
+        return new[] { new NavigationLocation(found.Path, line, column, line, column + symbol.Name.Length) };
+    }
+
+    /// <summary>줄·열부터의 글입니다(선언의 매개변수 목록을 읽을 만큼, 최대 40줄).</summary>
+    private static string TextFrom(string text, int line, int character)
+    {
+        var lines = text.Split('\n');
+        if (line < 0 || line >= lines.Length) return string.Empty;
+        var first = lines[line];
+        var rest = string.Join("\n", lines.Skip(line + 1).Take(40));
+        return (character >= 0 && character <= first.Length ? first.Substring(character) : first) + "\n" + rest;
     }
 
     /// <summary>
