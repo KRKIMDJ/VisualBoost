@@ -65,8 +65,8 @@ internal static class DiscoveryReuseTests
               AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Building, true, null, true)) is null,
             "처음 열 때만 파일 수집을 표시");
         var cold = new SourceAnalysisProgress(SourceAnalysisStage.CacheChecking, 5, 10, @"C:\p\A.cpp");
-        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, cold, false)) == "VisualBoost: 소스 분석 준비 중 · 5/10 · A.cpp",
-            "처음 분석은 모든 단계를 표시");
+        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, cold, false)) == "VisualBoost: 소스 분석 중 · 5/10 · A.cpp",
+            "처음 분석의 캐시 확인은 파일 사이에 '준비'가 끼지 않게 분석으로 표시");
         // 분석 패스가 진행 값을 낸 뒤에는 분석이 저장된 결과를 재사용하는지로 정합니다. 파일 목록 캐시만 있고 분석 캐시를 쓰지 못한 첫 분석은
         // 모든 단계를 보입니다.
         foreach (var stage in new[] { SourceAnalysisStage.CacheChecking, SourceAnalysisStage.Indexing, SourceAnalysisStage.Saving })
@@ -87,7 +87,7 @@ internal static class DiscoveryReuseTests
         Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, coldParsing, false), out refreshing) == "VisualBoost: 소스 분석 중 · 0/2 · A.cpp" && !refreshing &&
               AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, coldParsing, true), out refreshing) == "VisualBoost: 소스 분석 중 · 0/2 · A.cpp" && !refreshing,
             "처음 분석(분석 캐시를 쓰지 못한 다시 열기 포함)은 소스 분석 문구 유지");
-        // 처음 열기의 내부 단계(캐시 읽기·대기·캐시 확인)는 "준비"로 묶고, 사용자가 구분할 단계만 이름을 나눕니다.
+        // 처음 열기의 진행 수 없는 단계(캐시 읽기·대기)는 "준비", 파일마다 파싱 앞뒤에 보고하는 캐시 확인은 "분석"으로 묶습니다.
         string? Cold(SourceAnalysisStage stage) => AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, new SourceAnalysisProgress(stage, 0, 0), false));
         Check(Cold(SourceAnalysisStage.CacheLoading) == "VisualBoost: 소스 분석 준비 중" && Cold(SourceAnalysisStage.Indexing) == "VisualBoost: 심볼 탐색 준비 중" &&
               Cold(SourceAnalysisStage.Saving) == "VisualBoost: 분석 결과 저장 중",
