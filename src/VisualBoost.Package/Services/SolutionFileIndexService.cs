@@ -671,10 +671,35 @@ internal sealed class SolutionFileIndexService : IDisposable
         }
     }
 
+    /// <summary>
+    /// 현재 Solution의 저장된 파일 목록·이름 분석을 지우고 인덱스를 비웁니다(인덱스 다시 만들기). 호출자가 이어서 처음 열 때처럼 수집을 시작합니다.
+    /// 지우지 못한 캐시 파일이 있으면(다른 VS가 쓰는 중 등) false입니다.
+    /// </summary>
+    public async Task<bool> ResetAsync()
+    {
+        string path;
+        Task pending;
+        lock (gate)
+        {
+            ThrowIfDisposed();
+            path = solutionPath;
+        }
+
+        Clear();
+        lock (gate) pending = outstandingWork;
+        // 취소한 작업이 캐시를 다 쓰고 지운 파일을 되살리지 않게 끝나기를 기다립니다. 취소는 파일·항목마다 확인하므로 곧 끝납니다.
+        await Task.WhenAny(pending, Task.Delay(WorkStopTimeout)).ConfigureAwait(false);
+        if (path.Length == 0) return true;
+        var deleted = cache.Delete(path);
+        return sourceAnalyzer.DeleteCache(path) && deleted;
+    }
+
+    // 취소한 배경 작업이 끝나기를 기다리는 상한입니다. 취소는 파일·항목마다 확인하므로 보통 곧 끝나며, VS 종료를 오래 붙잡지 않게 합니다.
+    private static readonly TimeSpan WorkStopTimeout = TimeSpan.FromSeconds(2);
+
     public void Dispose()
     {
-        Task build;
-        Task analysis;
+        Task pending;
         lock (gate)
         {
             if (disposed)
@@ -688,11 +713,19 @@ internal sealed class SolutionFileIndexService : IDisposable
             refreshTimer?.Dispose();
             refreshEpoch++;
             DisposeWatchersNoLock();
-            build = outstandingWork;
-            analysis = activeAnalysis;
+            pending = Task.WhenAll(outstandingWork, activeAnalysis);
         }
 
-        _ = Task.WhenAll(build, analysis).ContinueWith(
+        // 캐시를 쓰던 작업이 취소되어 임시 파일을 지울 때까지 잠시 기다립니다. 예전에는 기다리지 않아 VS가 그 사이 끝나면 임시 파일(이름 분석은
+        // 엔진 규모 약 300 MB)이 남았습니다. 상한 안에 끝나지 않으면 끝날 때 자원을 놓습니다.
+        if (SpinWait.SpinUntil(() => pending.IsCompleted, WorkStopTimeout))
+        {
+            index.Dispose();
+            sourceAnalyzer.Dispose();
+            return;
+        }
+
+        _ = pending.ContinueWith(
             _ =>
             {
                 index.Dispose();

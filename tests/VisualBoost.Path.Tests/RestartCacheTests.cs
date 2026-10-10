@@ -14,7 +14,8 @@ internal static class RestartCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost-Restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); VerifyServiceReopen(root); VerifyProjectItemChanges(root); }
+        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); VerifyServiceReopen(root); VerifyProjectItemChanges(root);
+              VerifyCacheRobustness(root); VerifyServiceReset(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -179,6 +180,68 @@ internal static class RestartCacheTests
         service.Start(Discovery());
         Check(SpinUntil(() => !service.GetSnapshot().IsAnalyzing) && !SpinUntil(() => service.FindSymbol("KeptItem").Count == 0 || !Listed(service, kept), 1500) &&
               service.Generation == generation, "수집 루트 안 파일은 항목에서 빠져도 보충 코드로 남고, 항목 변경 내내 다시 수집하지 않음");
+    }
+
+    private static void VerifyCacheRobustness(string root)
+    {
+        var dir = Path.Combine(root, "robust");
+        var solution = Path.Combine(root, "Robust.sln");
+        var generated = Path.Combine(root, "Generated.h");
+        var many = Enumerable.Range(0, 100_001)
+            .Select(i => new SourceSymbolLocation("Generated" + i, generated, i + 1, 1, SourceSymbolKind.Function)).ToArray();
+        var cache = new SourceAnalysisCache(dir);
+        cache.Save(solution, new Dictionary<string, CachedSourceAnalysis>
+        {
+            [generated] = new(10, 20, new SourceFileAnalysis(generated, Array.Empty<SourceIncludeReference>(), many)),
+        });
+        var loaded = cache.Load(solution);
+        Check(loaded.Count == 1 && loaded[generated].Analysis.Symbols.Count == 100_000,
+            "파일당 항목 상한을 넘는 분석은 잘라 저장해 다음 열기에서 캐시 전체를 버리지 않음");
+        var stored = Directory.GetFiles(dir, "*.bin").Single();
+        var leftover = stored + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        File.WriteAllText(leftover, "partial");
+        cache.Save(solution, loaded);
+        Check(!File.Exists(leftover) && File.Exists(stored), "저장 도중 끝나 남은 임시 파일을 다음 저장에서 지움");
+        File.WriteAllText(leftover, "partial");
+        Check(cache.Delete(solution) && !File.Exists(stored) && !File.Exists(leftover) && cache.Load(solution).Count == 0,
+            "Solution의 저장된 분석과 남은 임시 파일 지우기");
+    }
+
+    /// <summary>인덱스 다시 만들기의 서비스 쪽: 인덱스를 비우고 이 Solution의 저장된 파일 목록·분석을 지웁니다. Dispose는 취소한 작업을 잠시 기다립니다.</summary>
+    private static void VerifyServiceReset(string root)
+    {
+        var source = Path.Combine(root, "ResetSource");
+        Directory.CreateDirectory(source);
+        var files = Enumerable.Range(0, 200).Select(i => Path.Combine(source, "Reset" + i + ".h")).ToArray();
+        for (var i = 0; i < files.Length; i++) File.WriteAllText(files[i], "struct ResetName" + i + " { void Run(); };\n");
+        var solution = Path.Combine(root, "Reset.sln");
+        var analysisDirectory = Path.Combine(root, "reset-analysis");
+        var filesDirectory = Path.Combine(root, "reset-files");
+        SolutionFileIndexService Open()
+        {
+            var opened = new SolutionFileIndexService(new SolutionSourceAnalyzer(new SourceAnalysisCache(analysisDirectory)), new FileIndexCache(filesDirectory));
+            opened.Configure(new SolutionFileIndexConfiguration(true, true, TimeSpan.Zero));
+            opened.BeginDiscovery(solution);
+            opened.Start(new SolutionIndexDiscoveryResult(solution, new[] { source }, files));
+            return opened;
+        }
+        bool Stored(string directory) => Directory.Exists(directory) && Directory.GetFiles(directory, "*.bin").Length > 0;
+
+        using (var service = Open())
+        {
+            service.WaitUntilReadyAsync().GetAwaiter().GetResult();
+            service.WaitUntilAnalysisReadyAsync().GetAwaiter().GetResult();
+            Check(Stored(analysisDirectory) && Stored(filesDirectory) && service.FindSymbol("ResetName0").Count == 1, "다시 만들기 전 저장된 결과");
+            Check(service.ResetAsync().GetAwaiter().GetResult() && !Stored(analysisDirectory) && !Stored(filesDirectory) &&
+                  service.FindSymbol("ResetName0").Count == 0 && service.GetSnapshot().State == SolutionFileIndexState.Empty,
+                "인덱스를 비우고 이 Solution의 저장된 파일 목록·분석을 지움");
+        }
+
+        // 분석 도중 닫아도 Dispose가 취소한 작업을 기다려 임시 파일이 남지 않고 폴더를 바로 지울 수 있습니다.
+        var closing = Open();
+        closing.Dispose();
+        Check(!Directory.Exists(analysisDirectory) || Directory.GetFiles(analysisDirectory, "*.tmp").Length == 0, "분석 도중 Dispose 뒤 임시 파일 없음");
+        Directory.Delete(source, recursive: true);
     }
 
     private static bool SpinUntil(Func<bool> condition, int milliseconds = 20000)

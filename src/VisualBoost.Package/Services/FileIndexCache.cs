@@ -94,6 +94,7 @@ internal sealed class FileIndexCache
             .OrderBy(path => path, StringComparer.OrdinalIgnoreCase)
             .Take(MaximumCachedFiles)
             .ToArray();
+        CacheFiles.DeleteTemporaries(cachePath);
         var temporaryPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
 
         try
@@ -146,6 +147,9 @@ internal sealed class FileIndexCache
             }
         }
     }
+
+    /// <summary>이 Solution의 저장된 파일 목록을 지웁니다(인덱스 다시 만들기). 지우지 못했으면 false입니다.</summary>
+    public bool Delete(string solutionPath) => GetCachePath(solutionPath) is not { } cachePath || CacheFiles.Delete(cachePath);
 
     private string? GetCachePath(string solutionPath)
     {

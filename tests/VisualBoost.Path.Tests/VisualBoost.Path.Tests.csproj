@@ -11,6 +11,7 @@
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionFileIndexConfiguration.cs" Link="SolutionFileIndexConfiguration.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionIndexDiscoveryResult.cs" Link="SolutionIndexDiscoveryResult.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/FileIndexCache.cs" Link="FileIndexCache.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/CacheFiles.cs" Link="CacheFiles.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/UnrealEngineSourceLocator.cs" Link="UnrealEngineSourceLocator.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/CppProjectSearchRootLocator.cs" Link="CppProjectSearchRootLocator.cs" />
     <Compile Include="../../src/VisualBoost.Package/Analysis/SolutionSourceAnalyzer.cs" Link="SolutionSourceAnalyzer.cs" />

@@ -130,6 +130,7 @@ internal sealed class ProjectMembershipCache
         var cachePath = GetCachePath(solutionPath);
         if (cachePath is null) return;
         var list = entries.Where(entry => IsCacheable(entry.ProjectPath) && !HasWildcardItems(entry.ProjectPath)).Take(MaximumEntries).ToArray();
+        CacheFiles.DeleteTemporaries(cachePath);
         var temporaryPath = cachePath + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
@@ -169,6 +170,9 @@ internal sealed class ProjectMembershipCache
             }
         }
     }
+
+    /// <summary>이 Solution의 저장된 프로젝트 항목 목록을 지웁니다(인덱스 다시 만들기). 지우지 못했으면 false입니다.</summary>
+    public bool Delete(string solutionPath) => GetCachePath(solutionPath) is not { } cachePath || CacheFiles.Delete(cachePath);
 
     private string? GetCachePath(string solutionPath)
     {

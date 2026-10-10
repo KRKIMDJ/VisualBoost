@@ -441,6 +441,13 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         }
     }
 
+    /// <summary>이 Solution의 저장된 분석을 지우고 메모리에 둔 지난 분석도 놓습니다(인덱스 다시 만들기). 파일을 지우지 못했으면 false입니다.</summary>
+    public bool DeleteCache(string solutionPath)
+    {
+        ReleasePreviousAnalysis();
+        return cache.Delete(solutionPath);
+    }
+
     public void Dispose() => symbols.Dispose();
 
     /// <summary>

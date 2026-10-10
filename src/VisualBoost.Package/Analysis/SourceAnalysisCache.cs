@@ -7,6 +7,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Threading;
 using VisualBoost.Core.Analysis;
+using VisualBoost.Services;
 
 namespace VisualBoost.Analysis;
 
@@ -102,6 +103,9 @@ internal sealed class SourceAnalysisCache
         }
     }
 
+    /// <summary>이 Solution의 저장된 분석을 지웁니다(인덱스 다시 만들기). 지우지 못했으면 false입니다.</summary>
+    public bool Delete(string solutionPath) => GetPath(solutionPath) is not { } path || CacheFiles.Delete(path);
+
     public void Save(string solutionPath, IEnumerable<KeyValuePair<string, CachedSourceAnalysis>> entries, CancellationToken cancellationToken = default)
     {
         cancellationToken.ThrowIfCancellationRequested();
@@ -111,6 +115,7 @@ internal sealed class SourceAnalysisCache
             return;
         }
 
+        CacheFiles.DeleteTemporaries(path);
         var values = entries.Take(MaximumFiles).ToArray();
         var temporaryPath = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
@@ -130,17 +135,15 @@ internal sealed class SourceAnalysisCache
                     writer.Write(entry.Revision);
                     writer.Write(entry.Length);
                     writer.Write(entry.LastWriteUtcTicks);
-                    writer.Write(entry.Analysis.Includes.Count);
-                    foreach (var include in entry.Analysis.Includes)
-                    {
-                        cancellationToken.ThrowIfCancellationRequested();
-                        writer.Write(include.Value);
-                        writer.Write(include.IsSystem);
-                        writer.Write(include.Line);
-                    }
+                    // include 목록은 보관하지 않으므로(SolutionSourceAnalyzer.Entry) 형식의 자리만 채웁니다.
+                    writer.Write(0);
 
-                    writer.Write(entry.Analysis.Symbols.Count);
-                    foreach (var symbol in entry.Analysis.Symbols)
+                    // 읽기는 파일당 항목이 MaximumItemsPerFile을 넘으면 손상으로 보고 캐시 전체를 버리므로 저장도 같은 상한에서 자릅니다. 예전에는
+                    // 아주 큰 생성 헤더 하나가 다음 열기마다 Solution 전체를 다시 분석하게 했습니다. 넘는 이름은 다음 세션부터 빠집니다.
+                    var symbols = entry.Analysis.Symbols;
+                    var symbolCount = Math.Min(symbols.Count, MaximumItemsPerFile);
+                    writer.Write(symbolCount);
+                    foreach (var symbol in symbols.Take(symbolCount))
                     {
                         cancellationToken.ThrowIfCancellationRequested();
                         writer.Write(symbol.Name);

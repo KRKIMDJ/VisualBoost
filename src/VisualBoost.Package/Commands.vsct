@@ -144,6 +144,13 @@
           <CanonicalName>VisualBoost.ShowIndexStatus</CanonicalName>
         </Strings>
       </Button>
+      <Button guid="guidVisualBoostCommandSet" id="RebuildIndexCommand" priority="0x0310" type="Button">
+        <Parent guid="guidVisualBoostCommandSet" id="VisualBoostSettingsGroup" />
+        <Strings>
+          <ButtonText>인덱스 다시 만들기...</ButtonText>
+          <CanonicalName>VisualBoost.RebuildIndex</CanonicalName>
+        </Strings>
+      </Button>
     </Buttons>
   </Commands>
 
@@ -205,6 +212,7 @@
       <IDSymbol name="GoToDefinitionCommand" value="0x0109" />
       <IDSymbol name="FindReferencesCommand" value="0x010A" />
       <IDSymbol name="ShowReferencesWindowCommand" value="0x010B" />
+      <IDSymbol name="RebuildIndexCommand" value="0x010C" />
     </GuidSymbol>
   </Symbols>
 </CommandTable>

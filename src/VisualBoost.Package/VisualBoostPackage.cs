@@ -113,6 +113,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         await SwitchHeaderSourceCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenOptionsCommand.InitializeAsync(this, cancellationToken);
         await ShowIndexStatusCommand.InitializeAsync(this, fileIndex, cancellationToken);
+        await RebuildIndexCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenFileSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenSymbolSearchCommand.InitializeAsync(this, fileIndex, cancellationToken);
         await OpenDocumentMembersCommand.InitializeAsync(this, cancellationToken);
@@ -313,6 +314,25 @@ public sealed class VisualBoostPackage : AsyncPackage
                 cancellation.Dispose();
             }
         }).FileAndForget("VisualBoost/CollectProjectFiles");
+    }
+
+    /// <summary>
+    /// 인덱스 다시 만들기: 현재 Solution의 저장된 프로젝트 항목·파일 목록·이름 분석을 지우고 처음 열 때처럼 다시 수집·분석합니다. clangd 색인은
+    /// clangd가 파일 내용으로 직접 검증하므로 지우지 않습니다. 지우지 못한 저장 파일이 있으면 false입니다(다시 수집은 그대로 시작).
+    /// </summary>
+    internal async Task<bool> RebuildFileIndexAsync()
+    {
+        await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+        var dte = await GetServiceAsync(typeof(SDTE)) as DTE2;
+        var solution = dte?.Solution?.FullName;
+        if (dte is null || string.IsNullOrEmpty(solution)) return true;
+        discoveryCancellation?.Cancel();
+        await TaskScheduler.Default;
+        var deleted = await fileIndex.ResetAsync().ConfigureAwait(false);
+        deleted = projectMembership.Delete(solution!) && deleted;
+        await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
+        StartFileIndex(dte);
+        return deleted;
     }
 
     private void OnProjectItemChanged(ProjectItem item)
