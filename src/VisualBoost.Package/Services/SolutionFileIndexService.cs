@@ -28,6 +28,9 @@ internal sealed class SolutionFileIndexService : IDisposable
     private Task outstandingWork = Task.CompletedTask;
     private long generation;
     private CancellationTokenSource rebuildCancellation = new();
+    // BeginDiscovery의 저장된 분석 복원입니다. 수집을 마친 같은 Solution의 Start는 이것을 취소하지 않습니다. 취소하면 거의 다 만든 이름
+    // 인덱스를 버리고 BuildIndex가 처음부터 다시 만듭니다(엔진 규모 다시 열기에서 전체 이름 검색이 약 6초 늦어짐).
+    private CancellationTokenSource restoreCancellation = new();
     private IReadOnlyList<string> roots = Array.Empty<string>();
     private IReadOnlyList<string> explicitFiles = Array.Empty<string>();
     private IReadOnlyList<string> requestedRoots = Array.Empty<string>();
@@ -79,6 +82,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             Interlocked.Increment(ref generation);
             CancelBuildNoLock();
             rebuildCancellation = new CancellationTokenSource();
+            CancelRestoreNoLock();
             DisposeWatchersNoLock();
             refreshTimer?.Dispose();
             refreshTimer = null;
@@ -101,15 +105,15 @@ internal sealed class SolutionFileIndexService : IDisposable
             isAnalyzing = configuration.EnableSourceAnalysis;
             if (configuration.EnableSourceAnalysis)
             {
-                var token = rebuildCancellation.Token;
+                var token = restoreCancellation.Token;
                 var restore = Task.Run(async () =>
                 {
                     var entered = false;
                     try
                     {
                         await workerGate.WaitAsync(token).ConfigureAwait(false); entered = true;
-                        sourceAnalyzer.PrepareCachedDiscovery(path, token);
-                        sourceAnalyzer.PublishCachedDiscovery(path, index.GetPathsSnapshot(), token);
+                        // 저장된 분석 전체를 수집 결과를 기다리지 않고 한 번에 공개합니다. 수집이 끝나면 BuildIndex가 목록 밖 파일만 뺍니다.
+                        sourceAnalyzer.LoadCachedSymbols(path, token);
                     }
                     catch (OperationCanceledException) when (token.IsCancellationRequested) { }
                     catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException)
@@ -127,18 +131,11 @@ internal sealed class SolutionFileIndexService : IDisposable
     {
         // 디스크 확인은 호출자가 백그라운드에서 수행하며, 수집 취소와 공개를 같은 잠금으로 보호합니다.
         var existing = files.Where(File.Exists).ToArray();
-        string currentSolution;
-        CancellationToken discoveryToken;
         lock (gate)
         {
             if (disposed || token.IsCancellationRequested) return;
             foreach (var file in existing) index.Add(file);
-            currentSolution = solutionPath;
-            discoveryToken = rebuildCancellation.Token;
         }
-        // 다른 Solution 또는 본 분석으로 전환된 뒤 이전 수집 결과를 덧붙이지 않습니다.
-        using var publication = CancellationTokenSource.CreateLinkedTokenSource(token, discoveryToken);
-        sourceAnalyzer.PublishCachedDiscovery(currentSolution, existing, publication.Token);
     }
 
     public void FailDiscovery(string message, CancellationToken token)
@@ -206,6 +203,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             requestedFiles = candidateFiles;
             if (!string.Equals(solutionPath, discovery.SolutionPath, StringComparison.OrdinalIgnoreCase))
             {
+                CancelRestoreNoLock();
                 index.Clear();
                 sourceAnalyzer.Clear();
                 symbolScopes = new[] { SymbolSearchScope.All };
@@ -596,6 +594,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             Interlocked.Increment(ref generation);
             CancelBuildNoLock();
             rebuildCancellation = new CancellationTokenSource();
+            CancelRestoreNoLock();
             refreshTimer?.Dispose();
             refreshTimer = null;
             refreshEpoch++;
@@ -630,6 +629,7 @@ internal sealed class SolutionFileIndexService : IDisposable
 
             disposed = true;
             CancelBuildNoLock();
+            CancelRestoreNoLock();
             refreshTimer?.Dispose();
             refreshEpoch++;
             DisposeWatchersNoLock();
@@ -679,7 +679,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             index.ReplaceAll(cachedFiles.Where(IsInScope).Where(File.Exists).Concat(effectiveProjectFiles), cancellationToken);
             if (currentConfiguration.EnableSourceAnalysis)
             {
-                // 보충 파일 순회를 마치기 전 등록 범위의 저장된 심볼을 먼저 검색 가능하게 합니다.
+                // 수집 전에 공개한 저장 심볼에서 이번 파일 목록 밖의 파일을 뺍니다(복원이 공개하지 못했으면 목록 안의 것만 공개).
                 sourceAnalyzer.LoadCachedSymbols(currentSolutionPath, cancellationToken, index.GetPathsSnapshot());
             }
             lock (gate)
@@ -1019,6 +1019,13 @@ internal sealed class SolutionFileIndexService : IDisposable
     {
         rebuildCancellation.Cancel();
         rebuildCancellation.Dispose();
+    }
+
+    private void CancelRestoreNoLock()
+    {
+        // 복원 작업이 이 토큰을 분석기 작업에 연결해 쓰는 중일 수 있어 Dispose하지 않습니다(타이머가 없어 정리할 자원도 없음).
+        restoreCancellation.Cancel();
+        restoreCancellation = new CancellationTokenSource();
     }
 
     private void DisposeWatchersNoLock()

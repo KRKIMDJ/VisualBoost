@@ -6,6 +6,7 @@ using System.Text;
 using System.Threading;
 using VisualBoost.Analysis;
 using VisualBoost.Core.Analysis;
+using VisualBoost.Services;
 
 internal static class RestartCacheTests
 {
@@ -13,7 +14,7 @@ internal static class RestartCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost-Restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); }
+        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); VerifyServiceReopen(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -28,41 +29,37 @@ internal static class RestartCacheTests
         var phases = new List<SourceAnalysisProgress>();
         using (var reopened = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
         {
-            reopened.PublishCachedDiscovery(solution, new[] { file }, default);
-            Check(reopened.SymbolCount == 0, "캐시 준비 전에는 수집 파일을 임의 심볼로 공개하지 않음");
-            reopened.PrepareCachedDiscovery(solution, default);
-            reopened.PublishCachedDiscovery(solution + ".other", new[] { file }, default);
-            Check(reopened.SymbolCount == 0, "다른 Solution의 발견 묶음 제외");
-            reopened.PublishCachedDiscovery(solution, new[] { Path.Combine(root, "Unrelated.h") }, default);
-            Check(reopened.SymbolCount == 0, "발견되지 않은 캐시 파일은 선공개하지 않음");
-            reopened.PublishCachedDiscovery(solution, new[] { file }, default);
-            reopened.PublishCachedDiscovery(solution, new[] { file }, default);
-            Check(reopened.FindSymbol("A").Count == 1, "수집 도중 확인된 파일의 저장 심볼을 중복 없이 공개");
-            Check(!reopened.CachedSymbolsPublished, "수집 도중 공개한 일부 저장 심볼은 전체 공개로 보지 않음");
-            reopened.Clear();
-            reopened.PublishCachedDiscovery(solution, new[] { file }, default);
-            Check(reopened.SymbolCount == 0, "Clear 뒤 늦은 수집 결과 제외");
-            using (var stale = new CancellationTokenSource())
-            {
-                reopened.PrepareCachedDiscovery(solution, default); stale.Cancel();
-                Throws<OperationCanceledException>(() => reopened.PublishCachedDiscovery(solution, new[] { file }, stale.Token));
-                Check(reopened.SymbolCount == 0, "취소된 수집 세대의 저장 심볼 제외");
-            }
-            reopened.LoadCachedSymbols(solution, default, new[] { file });
-            Check(reopened.FindSymbol("A").Count == 1 && reopened.CachedSymbolsPublished, "새 인스턴스에서 저장된 심볼 즉시 복원(전체 공개 표시)");
-            reopened.LoadCachedSymbols(solution + ".none", default);
-            Check(!reopened.CachedSymbolsPublished, "저장된 분석이 없으면 전체 공개로 보지 않음");
-            reopened.LoadCachedSymbols(solution, default, new[] { file });
+            var unrelated = Path.Combine(root, "Unrelated.h");
+            var start = reopened.SymbolRevision;
+            reopened.LoadCachedSymbols(solution, default);
+            Check(reopened.FindSymbol("A").Count == 1 && reopened.CachedSymbolsPublished && reopened.SymbolRevision == start + 1,
+                "다시 열 때 저장된 분석 전체를 수집 전에 한 번 공개(전체 공개 표시)");
+            reopened.LoadCachedSymbols(solution, default, new[] { file, unrelated });
+            Check(reopened.SymbolRevision == start + 1, "수집 목록이 저장된 분석을 모두 담으면 이름 인덱스를 다시 만들지 않음");
+            reopened.Analyze(solution, new[] { file }, default, phases.Add);
+            Check(!phases.Any(p => p.Stage == SourceAnalysisStage.Parsing || p.Stage == SourceAnalysisStage.Saving) && reopened.SymbolRevision == start + 1,
+                "재실행 무변경 파일 재파싱·재저장·이름 인덱스 재공개 0회");
+            Check(File.GetLastWriteTimeUtc(stored) == sentinel, "무변경 캐시 파일 실제 쓰기 없음");
+            reopened.LoadCachedSymbols(solution, default, new[] { unrelated });
+            Check(reopened.FindSymbol("A").Count == 0 && reopened.SymbolCount == 0, "수집 목록에서 빠진 파일의 저장 심볼만 뺌");
             reopened.Clear();
             Check(!reopened.CachedSymbolsPublished, "Clear 뒤 전체 공개 표시 해제");
+            using (var stale = new CancellationTokenSource())
+            {
+                stale.Cancel();
+                Throws<OperationCanceledException>(() => reopened.LoadCachedSymbols(solution, stale.Token));
+                Check(reopened.SymbolCount == 0 && !reopened.CachedSymbolsPublished, "취소된 복원은 공개하지 않음");
+            }
+            reopened.LoadCachedSymbols(solution + ".none", default);
+            Check(!reopened.CachedSymbolsPublished && reopened.SymbolCount == 0, "저장된 분석이 없으면 전체 공개로 보지 않음");
             reopened.LoadCachedSymbols(solution, default, new[] { file });
-            reopened.Analyze(solution, new[] { file }, default, phases.Add);
-            Check(!phases.Any(p => p.Stage == SourceAnalysisStage.Parsing || p.Stage == SourceAnalysisStage.Saving), "재실행 무변경 파일 재파싱·재저장 0회");
-            Check(File.GetLastWriteTimeUtc(stored) == sentinel, "무변경 캐시 파일 실제 쓰기 없음");
+            Check(reopened.FindSymbol("A").Count == 1, "다른 Solution을 본 뒤 저장된 분석을 다시 읽어 공개");
             File.WriteAllText(file, "struct Changed {};\n"); phases.Clear();
+            var beforeChange = reopened.SymbolRevision;
             reopened.Analyze(solution, new[] { file }, default, phases.Add);
-            Check(phases.Count(p => p.Stage == SourceAnalysisStage.Parsing) == 1 && reopened.FindSymbol("Changed").Count == 1 && reopened.FindSymbol("A").Count == 0,
-                "변경 파일만 재파싱하고 이전 심볼 제거");
+            Check(phases.Count(p => p.Stage == SourceAnalysisStage.Parsing) == 1 && reopened.FindSymbol("Changed").Count == 1 && reopened.FindSymbol("A").Count == 0 &&
+                  reopened.SymbolRevision == beforeChange + 1,
+                "변경 파일만 재파싱하고 이전 심볼을 한 번의 부분 갱신으로 교체");
             File.Delete(file); reopened.Analyze(solution, new[] { file }, default);
             Check(reopened.FindSymbol("Changed").Count == 0, "삭제 파일의 저장 심볼 제거");
         }
@@ -112,6 +109,36 @@ internal static class RestartCacheTests
             reopened.LoadCachedSymbols(solution, default, files);
             Check(Pooled(reopened), "저장된 분석을 읽을 때도 같은 문자열은 한 인스턴스");
         }
+    }
+
+    /// <summary>
+    /// 서비스의 다시 열기(수집 시작 → 수집 공개 → Start → 분석)에서 이름 인덱스를 비우기와 저장된 분석 공개 한 번으로만 바꿉니다. 수집 완료(Start)가
+    /// 복원을 취소하거나, 수집 묶음·수집 완료·분석 끝마다 다시 만들면 공개 번호가 더 늘어납니다.
+    /// </summary>
+    private static void VerifyServiceReopen(string root)
+    {
+        var source = Path.Combine(root, "ServiceSource");
+        Directory.CreateDirectory(source);
+        var header = Path.Combine(source, "Service.h");
+        File.WriteAllText(header, "struct ServiceName {};\n");
+        var solution = Path.Combine(root, "Service.sln");
+        SolutionFileIndexService Open() => new(new SolutionSourceAnalyzer(new SourceAnalysisCache(Path.Combine(root, "service-analysis"))),
+            new FileIndexCache(Path.Combine(root, "service-files")));
+        void Reopen(SolutionFileIndexService service)
+        {
+            service.Configure(new SolutionFileIndexConfiguration(true, true, TimeSpan.Zero));
+            service.BeginDiscovery(solution);
+            service.PublishDiscoveredFiles(new[] { header }, default);
+            service.Start(new SolutionIndexDiscoveryResult(solution, new[] { source }, new[] { header }));
+            service.WaitUntilReadyAsync().GetAwaiter().GetResult();
+            service.WaitUntilAnalysisReadyAsync().GetAwaiter().GetResult();
+        }
+        using (var first = Open()) Reopen(first);
+        using var second = Open();
+        var start = second.SymbolRevision;
+        Reopen(second);
+        Check(second.FindSymbol("ServiceName").Count == 1 && second.SymbolRevision - start == 2,
+            "다시 열기는 비우기와 저장된 분석 공개 한 번으로 이름 인덱스 완성: 공개 " + (second.SymbolRevision - start) + "회");
     }
 
     private static void VerifyPartialUpdate(string root)

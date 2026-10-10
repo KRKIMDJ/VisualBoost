@@ -24,43 +24,20 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     private readonly object gate = new();
     private string? cachedSolution;
     private IReadOnlyDictionary<string, CachedSourceAnalysis>? loadedCache;
-    // 끝까지 마친 분석 패스가 이름 인덱스에 공개된 Solution입니다. 이때만 이름 인덱스가 loadedCache와 같은 위치 객체를 담아 부분 갱신할 수 있습니다.
+    // 이름 인덱스에 지금 공개된 파일별 분석입니다(위치 객체까지 같음). 이것과 비교해 바뀐 파일의 위치만 숨기고 더하므로, 다시 열 때 이름
+    // 인덱스는 저장된 분석을 읽은 직후 한 번만 만듭니다. null이면 공개 내용을 파일 단위로 모릅니다(비운 뒤, 처음 분석의 묶음 공개 중).
+    private IReadOnlyDictionary<string, CachedSourceAnalysis>? published;
+    private string? publishedSolution;
+    // Clear가 취소합니다. 잠금 밖에서 만든 공개가 Solution을 닫거나 바꾼 뒤의 이름 인덱스에 들어가지 않게 합니다.
+    private CancellationTokenSource clearing = new();
+    // 끝까지 마친 분석 패스가 이름 인덱스에 공개된 Solution입니다. 이때만 공개된 분석이 디스크 기준이라 부분 갱신할 수 있습니다.
     private string? completedSolution;
     // 부분 갱신한 결과를 아직 분석 캐시 파일에 쓰지 않았습니다. 다음 분석 패스가 바뀐 파일이 없어도 저장합니다.
     private bool unsavedUpdates;
     // 지난 세션에 마친 분석을 불러와 이름 인덱스에 공개했는지입니다(CachedSymbolsPublished).
     private volatile bool cachedSymbolsPublished;
-    private string? discoverySolution;
-    private readonly HashSet<string> discoveredCacheFiles = new(StringComparer.OrdinalIgnoreCase);
     // 진행 중인 분석 패스의 대기열입니다. 사용자가 연 파일을 앞으로 옮길 때만 다른 스레드에서 읽습니다.
     private volatile SourceAnalysisQueue? activeQueue;
-
-    internal void PrepareCachedDiscovery(string solutionPath, CancellationToken token)
-    {
-        LoadPrevious(solutionPath, token);
-        lock (gate)
-        {
-            token.ThrowIfCancellationRequested();
-            discoverySolution = solutionPath;
-            discoveredCacheFiles.Clear();
-        }
-    }
-
-    internal void PublishCachedDiscovery(string solutionPath, IReadOnlyList<string> files, CancellationToken token)
-    {
-        lock (gate)
-        {
-            token.ThrowIfCancellationRequested();
-            if (discoverySolution != solutionPath || loadedCache is null) return;
-            var batch = new List<SourceSymbolLocation>();
-            foreach (var file in files)
-            {
-                token.ThrowIfCancellationRequested();
-                if (discoveredCacheFiles.Add(file) && loadedCache.TryGetValue(file, out var entry)) batch.AddRange(entry.Analysis.Symbols);
-            }
-            if (batch.Count > 0) symbols.AppendBatch(batch, token);
-        }
-    }
 
     internal SolutionSourceAnalyzer(SourceAnalysisCache? cache = null)
     {
@@ -95,8 +72,15 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         IReadOnlyList<string>? focus = null)
     {
         LastWarning = null;
+        CancellationToken cleared;
+        lock (gate)
+        {
+            completedSolution = null;
+            cleared = clearing.Token;
+        }
+        using var link = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleared);
+        cancellationToken = link.Token;
         cancellationToken.ThrowIfCancellationRequested();
-        lock (gate) completedSolution = null;
         var sourceFiles = files.Where(IsCppFile).ToArray();
         // 열린 파일 → 같은 프로젝트 → 다른 프로젝트 → 보충 파일 → 엔진 순서로 분석하고, 도중에 연 파일은 앞으로 옮깁니다.
         // 캐시를 읽는 동안 연 파일도 반영되게 대기열을 먼저 공개합니다.
@@ -104,7 +88,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         activeQueue = queue;
         try
         {
-            AnalyzeQueued(solutionPath, sourceFiles, queue, cancellationToken, reportProgress);
+            AnalyzeQueued(solutionPath, sourceFiles, queue, cleared, cancellationToken, reportProgress);
         }
         finally
         {
@@ -117,6 +101,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         string solutionPath,
         string[] sourceFiles,
         SourceAnalysisQueue queue,
+        CancellationToken cleared,
         CancellationToken cancellationToken,
         Action<SourceAnalysisProgress>? reportProgress)
     {
@@ -145,7 +130,12 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 reportProgress?.Invoke(new SourceAnalysisProgress(stage, completedFiles, progressTotal, path, refreshing));
             }
         }
-        if (previous.Count == 0) symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>(), cancellationToken);
+        if (previous.Count == 0)
+        {
+            // 처음 분석은 파일 묶음을 덧붙여 공개하므로 끝날 때까지 공개 내용을 파일 단위로 추적하지 않습니다.
+            lock (gate) published = null;
+            symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>(), cancellationToken);
+        }
         var current = new ConcurrentDictionary<string, CachedSourceAnalysis>(StringComparer.OrdinalIgnoreCase);
         // 이 패스에서 새로 분석한 결과의 문자열을 모으는 풀입니다. 패스가 끝나면 버립니다(저장된 분석은 읽을 때 따로 모음).
         var pool = new StringPool();
@@ -272,8 +262,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         LastWarning = timedOutFiles == 0 ? null : $"복잡한 구문으로 {timedOutFiles:N0}개 파일 분석을 건너뛰었습니다. 일부 심볼이 누락될 수 있습니다.";
         Report(SourceAnalysisStage.Indexing);
-        // 캐시 저장이 끝나기 전에 심볼을 공개합니다.
-        symbols.ReplaceAll(current.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
+        // 캐시 저장이 끝나기 전에 심볼을 공개합니다. 다시 열기는 바뀐 파일의 차이만 공개하고, 바뀐 파일이 없으면 이름 인덱스를 건드리지 않습니다.
+        PublishEntries(solutionPath, current, cleared, cancellationToken);
         if (unsavedUpdates || cache.NeedsUpgrade || current.Count != previous.Count || current.Any(pair =>
             !previous.TryGetValue(pair.Key, out var old) || !ReferenceEquals(old, pair.Value)))
         {
@@ -302,16 +292,19 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     public bool UpdateFiles(string solutionPath, IReadOnlyCollection<string> paths, CancellationToken cancellationToken)
     {
         IReadOnlyDictionary<string, CachedSourceAnalysis> previous;
+        CancellationToken cleared;
         lock (gate)
         {
-            if (loadedCache is null || !string.Equals(completedSolution, solutionPath, StringComparison.OrdinalIgnoreCase)) return false;
-            previous = loadedCache;
+            if (published is null || !string.Equals(completedSolution, solutionPath, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(publishedSolution, solutionPath, StringComparison.OrdinalIgnoreCase)) return false;
+            previous = published;
+            cleared = clearing.Token;
         }
+        using var link = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleared);
+        cancellationToken = link.Token;
 
         var pool = new StringPool();
         var changes = new Dictionary<string, CachedSourceAnalysis?>(StringComparer.OrdinalIgnoreCase);
-        var removed = new List<SourceSymbolLocation>();
-        var added = new List<SourceSymbolLocation>();
         foreach (var path in paths)
         {
             cancellationToken.ThrowIfCancellationRequested();
@@ -343,42 +336,72 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             }
             if (old is null && updated is null) continue;
             changes[path] = updated;
-            if (old is not null) removed.AddRange(old.Analysis.Symbols);
-            if (updated is not null) added.AddRange(updated.Analysis.Symbols);
         }
         if (changes.Count == 0) return true;
 
+        var next = new Dictionary<string, CachedSourceAnalysis>(previous.Count + changes.Count, StringComparer.OrdinalIgnoreCase);
+        foreach (var pair in previous) next[pair.Key] = pair.Value;
+        foreach (var change in changes)
+        {
+            if (change.Value is null) next.Remove(change.Key);
+            else next[change.Key] = change.Value;
+        }
         lock (gate)
         {
             cancellationToken.ThrowIfCancellationRequested();
-            // 그 사이 분석 패스가 돌았으면 옛 위치가 이미 공개 목록에 없으므로 전체 다시 수집에 맡깁니다.
-            if (!ReferenceEquals(loadedCache, previous) || !string.Equals(completedSolution, solutionPath, StringComparison.OrdinalIgnoreCase)) return false;
-            var next = new Dictionary<string, CachedSourceAnalysis>(previous.Count + changes.Count, StringComparer.OrdinalIgnoreCase);
-            foreach (var pair in previous) next[pair.Key] = pair.Value;
-            foreach (var change in changes)
-            {
-                if (change.Value is null) next.Remove(change.Key);
-                else next[change.Key] = change.Value;
-            }
+            // 그 사이 분석 패스가 돌았으면 공개 내용이 바뀌었으므로 전체 다시 수집에 맡깁니다.
+            if (!ReferenceEquals(published, previous) || !string.Equals(completedSolution, solutionPath, StringComparison.OrdinalIgnoreCase)) return false;
+        }
+        PublishEntries(solutionPath, next, cleared, cancellationToken);
+        lock (gate)
+        {
+            // Clear가 비웠으면 다음 수집이 다시 시작합니다.
+            if (!ReferenceEquals(published, next)) return true;
+            cachedSolution = solutionPath;
             loadedCache = next;
             unsavedUpdates = true;
         }
-        // 숨긴 위치가 쌓이면 이름 인덱스를 다시 만들므로(엔진 규모 약 10초) 이 잠금 밖에서 합니다. Solution을 닫는 Clear가 이 잠금을 기다리지
-        // 않고, 닫기는 공개 전에 확인하는 취소로 막습니다.
-        symbols.Update(removed, added, cancellationToken);
         return true;
     }
 
+    /// <summary>
+    /// 저장된 분석을 이름 인덱스에 공개합니다. 다시 열 때는 수집을 시작하자마자 전체를 한 번 공개하고(<paramref name="allowedFiles"/> 없음),
+    /// 수집이 끝나면 그 파일 목록으로 다시 불러 목록 밖 파일의 위치만 뺍니다. 이미 공개한 분석은 다시 만들지 않습니다.
+    /// </summary>
+    /// <remarks>
+    /// 0.46.3까지는 수집 묶음마다 확인된 파일의 저장 심볼을 덧붙이고(묶음 병합), 수집이 끝나면 전체를 다시 만들고, 분석 패스 끝에 또 다시
+    /// 만들었습니다. 엔진 규모 다시 열기에서 공개 10회·전체 재구성 2회(각 5~7초)였습니다. 저장된 분석은 끝까지 마친 패스의 결과이므로 목록
+    /// 확인 전에 공개해도 지난 세션의 Solution 전체이고, 그 뒤 빠진 파일은 수집이 끝나면 뺍니다.
+    /// </remarks>
     public void LoadCachedSymbols(string solutionPath, CancellationToken cancellationToken, IReadOnlyList<string>? allowedFiles = null)
     {
+        CancellationToken cleared;
+        lock (gate) cleared = clearing.Token;
+        using var link = CancellationTokenSource.CreateLinkedTokenSource(cancellationToken, cleared);
+        cancellationToken = link.Token;
         cancellationToken.ThrowIfCancellationRequested();
         var cached = LoadPrevious(solutionPath, cancellationToken);
-        cancellationToken.ThrowIfCancellationRequested();
-        var allowed = allowedFiles is null ? null : new HashSet<string>(allowedFiles, StringComparer.OrdinalIgnoreCase);
-        lock (gate) completedSolution = null;
-        symbols.ReplaceAll(cached.Where(entry => allowed is null || allowed.Contains(entry.Key))
-            .SelectMany(entry => entry.Value.Analysis.Symbols), cancellationToken);
-        cachedSymbolsPublished = cached.Count > 0;
+        IReadOnlyDictionary<string, CachedSourceAnalysis>? before;
+        lock (gate)
+        {
+            completedSolution = null;
+            before = string.Equals(publishedSolution, solutionPath, StringComparison.OrdinalIgnoreCase) ? published : null;
+        }
+        var source = before ?? cached;
+        var target = source;
+        if (allowedFiles is not null)
+        {
+            var allowed = new HashSet<string>(allowedFiles, StringComparer.OrdinalIgnoreCase);
+            var kept = new Dictionary<string, CachedSourceAnalysis>(StringComparer.OrdinalIgnoreCase);
+            foreach (var pair in source)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (allowed.Contains(pair.Key)) kept[pair.Key] = pair.Value;
+            }
+            if (kept.Count != source.Count) target = kept;
+        }
+        if (before is null || !ReferenceEquals(target, before)) PublishEntries(solutionPath, target, cleared, cancellationToken);
+        lock (gate) if (!cleared.IsCancellationRequested) cachedSymbolsPublished = cached.Count > 0;
     }
 
     public IReadOnlyList<SourceSymbolLocation> FindSymbol(string name) => symbols.Find(name);
@@ -393,8 +416,11 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     {
         lock (gate)
         {
-            discoverySolution = null;
-            discoveredCacheFiles.Clear();
+            // 잠금 밖에서 만들던 공개를 막습니다. 취소한 토큰은 진행 중인 작업이 아직 쥐고 있을 수 있어 Dispose하지 않습니다.
+            clearing.Cancel();
+            clearing = new CancellationTokenSource();
+            published = null;
+            publishedSolution = null;
             cachedSymbolsPublished = false;
             completedSolution = null;
             symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>());
@@ -415,6 +441,43 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     }
 
     public void Dispose() => symbols.Dispose();
+
+    /// <summary>
+    /// 이름 인덱스를 <paramref name="target"/>의 위치로 맞춥니다. 같은 Solution의 공개 내용을 알면 바뀐 파일의 위치만 숨기고 더하고(차이가 크면
+    /// <see cref="SourceSymbolIndex.Update"/>가 다시 만듦), 모르면 다시 만듭니다. 호출자들은 서비스가 한 번에 하나씩 돌립니다.
+    /// </summary>
+    private void PublishEntries(string solutionPath, IReadOnlyDictionary<string, CachedSourceAnalysis> target, CancellationToken cleared,
+        CancellationToken cancellationToken)
+    {
+        IReadOnlyDictionary<string, CachedSourceAnalysis>? before;
+        lock (gate) before = string.Equals(publishedSolution, solutionPath, StringComparison.OrdinalIgnoreCase) ? published : null;
+        if (before is null) symbols.ReplaceAll(target.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
+        else
+        {
+            var removed = new List<SourceSymbolLocation>();
+            var added = new List<SourceSymbolLocation>();
+            foreach (var pair in before)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!target.TryGetValue(pair.Key, out var now) || !ReferenceEquals(now, pair.Value)) removed.AddRange(pair.Value.Analysis.Symbols);
+            }
+            foreach (var pair in target)
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                if (!before.TryGetValue(pair.Key, out var old) || !ReferenceEquals(old, pair.Value)) added.AddRange(pair.Value.Analysis.Symbols);
+            }
+            // 다시 만들 수도 있으므로(엔진 규모 약 6초) 잠금 밖에서 합니다. Solution을 닫는 Clear는 이 잠금을 기다리지 않고 취소로 막습니다.
+            symbols.Update(removed, added, cancellationToken);
+        }
+        // 이름 인덱스를 바꾼 뒤에는 호출자가 취소돼도 공개 내용을 기록해야 다음 비교가 맞습니다(이름 인덱스는 취소하면 아무것도 바꾸지 않음).
+        // 그 사이 Clear가 비웠으면 기록하지 않습니다.
+        lock (gate)
+        {
+            if (cleared.IsCancellationRequested) return;
+            published = target;
+            publishedSolution = solutionPath;
+        }
+    }
 
     private IReadOnlyDictionary<string, CachedSourceAnalysis> LoadPrevious(string solutionPath, CancellationToken cancellationToken)
     {

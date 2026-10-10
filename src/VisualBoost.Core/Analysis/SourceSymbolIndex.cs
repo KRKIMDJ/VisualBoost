@@ -3,6 +3,7 @@ using System.Collections.Generic;
 using System.Linq;
 using System.Runtime.CompilerServices;
 using System.Threading;
+using System.Threading.Tasks;
 using VisualBoost.Core.Searching;
 
 namespace VisualBoost.Core.Analysis;
@@ -12,6 +13,7 @@ public sealed class SourceSymbolIndex : IDisposable
     // 부분 갱신으로 숨긴 위치와 추가 묶음이 이만큼(최소값 또는 전체의 1/8 중 큰 값)을 넘으면 한 번 다시 만듭니다. 숨긴 옛 위치는 다시 만들
     // 때까지 메모리에 남고, 조회는 묶음마다 따로 찾으므로 끝없이 쌓아 두지 않습니다.
     private const int CompactionMinimum = 50_000;
+    private const int ParallelBuildMinimum = 100_000;
     private readonly ReaderWriterLockSlim gate = new();
     private Dictionary<string, SourceSymbolLocation[]> locationsByName =
         new(StringComparer.OrdinalIgnoreCase);
@@ -81,8 +83,21 @@ public sealed class SourceSymbolIndex : IDisposable
                     .ToArray(),
                 StringComparer.OrdinalIgnoreCase);
         var count = replacement.Values.Sum(items => items.Length);
-        var snapshot = new SymbolSearchSnapshot(replacement.Values.SelectMany(items => items));
-        var completion = new SymbolCompletionSnapshot(replacement.Values.SelectMany(items => items));
+        // 입력 추천과 검색 스냅샷은 서로 독립이라 큰 목록은 함께 만듭니다(엔진 규모 위치 225만 개에서 각각 약 1.5·1.9초). 다시 열 때 저장된
+        // 분석 전체가 검색되는 시점이 그만큼 당겨집니다. 작은 목록은 작업을 나누는 비용이 더 커서 한 스레드에서 만듭니다.
+        SymbolSearchSnapshot snapshot;
+        SymbolCompletionSnapshot completion;
+        if (count >= ParallelBuildMinimum)
+        {
+            var completionTask = Task.Run(() => new SymbolCompletionSnapshot(replacement.Values.SelectMany(items => items)));
+            snapshot = new SymbolSearchSnapshot(replacement.Values.SelectMany(items => items));
+            completion = completionTask.GetAwaiter().GetResult();
+        }
+        else
+        {
+            snapshot = new SymbolSearchSnapshot(replacement.Values.SelectMany(items => items));
+            completion = new SymbolCompletionSnapshot(replacement.Values.SelectMany(items => items));
+        }
 
         gate.EnterWriteLock();
         try
@@ -112,7 +127,8 @@ public sealed class SourceSymbolIndex : IDisposable
 
     /// <summary>
     /// 몇 파일이 바뀌었을 때 전체를 다시 만들지 않고 고칩니다. <paramref name="removed"/>는 지금 공개된 위치 객체여야 하며(참조로 비교) 숨기고,
-    /// <paramref name="added"/>는 추가 묶음으로 공개합니다. 숨긴 위치가 쌓이면 남은 위치로 다시 만듭니다.
+    /// <paramref name="added"/>는 추가 묶음으로 공개합니다. 숨긴 위치와 추가 묶음이 이번 변경까지 합쳐 전체의 1/8(최소 5만)을 넘으면 변경을
+    /// 반영한 남은 위치로 바로 다시 만듭니다. 취소되면 아무것도 바꾸지 않습니다.
     /// </summary>
     /// <remarks>
     /// 전체 교체는 엔진 규모(위치 약 400만)에서 10초 넘게 걸리고 옛 인덱스와 새 인덱스가 함께 있는 동안 메모리를 더 씁니다. 파일 하나를 저장할
@@ -124,15 +140,16 @@ public sealed class SourceSymbolIndex : IDisposable
         if (removed is null) throw new ArgumentNullException(nameof(removed));
         if (added is null) throw new ArgumentNullException(nameof(added));
         if (removed.Count == 0 && added.Count == 0) return;
-        Publish(added.ToArray(), removed, refreshCompletion: true, token);
-        bool compact;
+        bool rebuild;
         gate.EnterReadLock();
-        try { compact = hidden.Count + additions.Sum(part => part.Items.Length) > Math.Max(CompactionMinimum, baseCount / 8); }
+        try { rebuild = hidden.Count + additions.Sum(part => part.Items.Length) + removed.Count + added.Count > Math.Max(CompactionMinimum, baseCount / 8); }
         finally { gate.ExitReadLock(); }
-        if (compact) Compact(token);
+        // 변경을 추가 묶음으로 공개한 뒤 다시 만들면 큰 변경(다시 열 때 바뀐 파일이 많음)에서 같은 위치를 두 번 정리합니다.
+        if (rebuild) Rebuild(removed, added, token);
+        else Publish(added.ToArray(), removed, refreshCompletion: true, token);
     }
 
-    private void Compact(CancellationToken token)
+    private void Rebuild(IReadOnlyCollection<SourceSymbolLocation> removed, IReadOnlyCollection<SourceSymbolLocation> added, CancellationToken token)
     {
         // 다시 만드는 동안 들어온 부분 갱신을 잃지 않게 추가 묶음 공개와 같은 잠금 안에서 바꿉니다.
         lock (appendGate)
@@ -141,9 +158,10 @@ public sealed class SourceSymbolIndex : IDisposable
             gate.EnterReadLock();
             try
             {
-                var current = hidden;
+                var excluded = new HashSet<SourceSymbolLocation>(hidden, ReferenceComparer.Instance);
+                excluded.UnionWith(removed);
                 visible = locationsByName.Values.SelectMany(items => items).Concat(additions.SelectMany(part => part.Items))
-                    .Where(location => !current.Contains(location)).ToArray();
+                    .Where(location => !excluded.Contains(location)).Concat(added).ToArray();
             }
             finally { gate.ExitReadLock(); }
             ReplaceAll(visible, token);
