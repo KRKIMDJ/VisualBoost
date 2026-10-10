@@ -98,10 +98,10 @@ public sealed class VisualBoostPackage : AsyncPackage
         navigation = new SemanticNavigationService(fileIndex, ((CodeNavigationOptionsPage)GetDialogPage(typeof(CodeNavigationOptionsPage))).CreateSettings(),
             token => VcProjectCollector.CollectAsync(dte, token));
         SemanticNavigationRuntime.Service = navigation;
-        navigation.NavigatorStarted += () => JoinableTaskFactory.RunAsync(async () =>
+        navigation.NavigatorStarted += focusOnly => JoinableTaskFactory.RunAsync(async () =>
         {
             await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);
-            SemanticDocumentTracker.WarmRecent();
+            SemanticDocumentTracker.WarmRecent(focusOnly);
         }).FileAndForget("VisualBoost/SemanticNavigation/Warm");
         var currentNavigation = navigation;
         if (statusBar is not null) analysisStatus = new AnalysisStatusBar(fileIndex, statusBar, () => currentNavigation.StatusText);

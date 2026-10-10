@@ -2281,8 +2281,9 @@ internal static class SemanticNavigationTests
         var warm = new ClangdDocumentSet(3, (_, _, _) => { }, (_, _, _) => { }, _ => { });
         warm.Acquire(new DocumentText("focused", "f"));
         warm.Release("focused");
-        Check(warm.TryOpenSpare(new DocumentText("second", "2")) && warm.TryOpenSpare(new DocumentText("third", "3")), "빈자리에 미리 열기");
-        Check(!warm.TryOpenSpare(new DocumentText("fourth", "4")) && !warm.TryOpenSpare(new DocumentText("focused", "f")) && warm.OpenPaths.Count == 3,
+        Check(warm.TryOpenSpare(new DocumentText("second", "2")) && warm.HasSpareSlot && warm.TryOpenSpare(new DocumentText("third", "3")), "빈자리에 미리 열기");
+        Check(!warm.HasSpareSlot && !warm.TryOpenSpare(new DocumentText("fourth", "4")) && !warm.TryOpenSpare(new DocumentText("focused", "f")) &&
+              warm.OpenPaths.Count == 3,
             "정원이 찼거나 이미 열린 문서는 미리 열지 않음");
         warm.Acquire(new DocumentText("request", "r"));
         warm.Release("request");
@@ -2662,14 +2663,16 @@ internal static class SemanticNavigationTests
                 ClangdPath = clangd, CacheRoot = cacheRoot, SolutionPath = Path.Combine(project, "Game.sln"), EngineRoot = engineRoot, WorkerCount = 1
             }, CancellationToken.None).Result;
             Check(SpinUntil(() => restarted.Progress.Completed, 60000), "다시 시작한 색인 완료");
-            // 다시 시작하면 최근 문서를 정원까지 차례로 미리 엽니다.
+            // 다시 시작하면 최근 문서를 정원까지 차례로 미리 엽니다. 앞 문서의 분석을 기다리는 사이 편집기에서 닫은 문서는 열지 않고 다음 문서가
+            // 그 자리를 씁니다(2026-10-10 검토 81).
             restarted.WarmRecent(new[]
             {
                 new DocumentText(use, useText, 1), new DocumentText(caller, callerText, 1), new DocumentText(spare, spareText, 1),
                 new DocumentText(otherImpl, File.ReadAllText(otherImpl), 1)
             });
-            Check(SpinUntil(() => restarted.IsOpen(use) && restarted.IsOpen(caller) && restarted.IsOpen(spare), 60000) && !SpinUntil(() => restarted.IsOpen(otherImpl), 2000),
-                "다시 시작한 뒤 최근 문서를 정원까지 미리 엶");
+            restarted.Closed(spare);
+            Check(SpinUntil(() => restarted.IsOpen(use) && restarted.IsOpen(caller) && restarted.IsOpen(otherImpl), 60000) && !restarted.IsOpen(spare),
+                "다시 시작한 뒤 최근 문서를 정원까지 미리 열되 기다리는 사이 닫은 문서는 열지 않음");
             using var restartTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
             var restartReports = new List<string>();
             var again = restarted.DefinitionAsync(query, new SyncProgress(restartReports.Add), restartTimeout.Token).Result;

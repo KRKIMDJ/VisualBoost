@@ -106,12 +106,13 @@ internal static class SemanticDocumentTracker
     /// 분석이 없어 다음 요청이 그 분석부터 기다리므로 탐색기 준비 직후 부릅니다. 몇 개를 열지는 탐색기가 정원으로 정합니다. UI thread에서
     /// 호출합니다.
     /// </summary>
-    public static void WarmRecent()
+    /// <param name="focusOnly">초점 문서 하나만 예열합니다. 유휴 상태에서 메모리를 돌려받으려고 다시 시작했을 때입니다.</param>
+    public static void WarmRecent(bool focusOnly = false)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         var service = SemanticNavigationRuntime.Service;
         if (service is null) return;
-        var items = Recent.Concat(Buffers.Values.Where(i => !Recent.Contains(i))).Where(i => i.Views > 0).Take(MaxRecentWarm).ToArray();
+        var items = Recent.Concat(Buffers.Values.Where(i => !Recent.Contains(i))).Where(i => i.Views > 0).Take(focusOnly ? 1 : MaxRecentWarm).ToArray();
         if (items.Length == 0) return;
         // 초점 예열이 대기 중이면 같은 문서를 이 목록이 먼저 엽니다.
         if (pendingWarm is not null && items.Contains(pendingWarm)) pendingWarm = null;

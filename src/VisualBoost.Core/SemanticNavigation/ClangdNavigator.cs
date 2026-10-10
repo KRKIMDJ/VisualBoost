@@ -274,6 +274,10 @@ public sealed class ClangdNavigator : IDisposable
     // unitReports 잠금으로 보호합니다.
     private readonly Dictionary<string, DateTime> unitReports = new(StringComparer.OrdinalIgnoreCase);
     private bool touchRunning;
+    // 미리 열기(WarmSparesAsync)가 진행 중인 수와, 그동안 편집기에서 닫은 문서입니다. 닫은 문서는 미리 열지 않습니다. 둘 다 이 집합의
+    // 잠금으로 보호합니다.
+    private readonly HashSet<string> closedWhileWarming = new(StringComparer.OrdinalIgnoreCase);
+    private int sparesWarming;
     private int activeRequests;
     private long lastRequestTicks = DateTime.UtcNow.Ticks;
     private int disposed;
@@ -1298,42 +1302,70 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     /// <remarks>
     /// 함께 열면 초점 문서의 분석과 CPU를 나눠 초점 문서가 늦어지므로 차례로 엽니다. 빈자리에만 열고 가장 먼저 닫힐 순서에 두므로 그 사이
-    /// 사용자가 찾은 문서를 밀어내지 않습니다.
+    /// 사용자가 찾은 문서를 밀어내지 않습니다. 기다리는 사이 편집기에서 닫은 문서는 열지 않고, 탐색 요청이 진행 중이면 그 요청의 분석과
+    /// CPU를 나누지 않도록 끝날 때까지 미룹니다(2026-10-10 검토 81·82).
     /// </remarks>
     public void WarmRecent(IReadOnlyList<DocumentText> recent)
     {
         if (recent.Count == 0 || HasExited) return;
         Warm(recent[0]);
-        if (recent.Count > 1 && documents.Capacity > 1) Observe(Task.Run(() => WarmSparesAsync(recent.Take(documents.Capacity).ToArray())));
+        if (recent.Count <= 1 || documents.Capacity <= 1) return;
+        lock (closedWhileWarming) sparesWarming++;
+        // 닫은 문서를 건너뛰면 다음 문서가 그 자리를 쓰도록 정원으로 자르지 않고 넘깁니다. 정원이 차면 거기서 멈춥니다.
+        Observe(Task.Run(() => WarmSparesAsync(recent.ToArray())));
     }
+
+    /// <summary>미리 열기가 진행 중인 탐색 요청이 끝났는지 다시 보는 간격입니다.</summary>
+    private static readonly TimeSpan SpareRequestPoll = TimeSpan.FromMilliseconds(250);
 
     /// <summary>미리 열 다음 문서가 앞 문서의 분석을 기다리는 상한입니다.</summary>
     private static readonly TimeSpan SpareWarmWait = TimeSpan.FromSeconds(60);
 
     private async Task WarmSparesAsync(IReadOnlyList<DocumentText> recent)
     {
-        var previous = recent[0].Path;
-        foreach (var document in recent.Skip(1))
+        try
         {
-            if (documents.AcquireIfOpen(previous, out var version, touch: false) is not null)
+            var previous = recent[0].Path;
+            foreach (var document in recent.Skip(1))
             {
-                documents.Release(previous, touch: false);
-                await WaitForAnalysisAsync(previous, version, SpareWarmWait, CancellationToken.None).ConfigureAwait(false);
-            }
+                if (!documents.HasSpareSlot) return;
+                if (documents.AcquireIfOpen(previous, out var version, touch: false) is not null)
+                {
+                    documents.Release(previous, touch: false);
+                    await WaitForAnalysisAsync(previous, version, SpareWarmWait, CancellationToken.None).ConfigureAwait(false);
+                }
 
-            if (HasExited || lifetime.IsCancellationRequested) return;
-            try
-            {
-                if (!documents.TryOpenSpare(document)) continue;
-            }
-            catch (LspConnectionClosedException)
-            {
-                // 종료는 Changed로 알려집니다.
-                return;
-            }
+                while (Volatile.Read(ref activeRequests) > 0 && !HasExited && !lifetime.IsCancellationRequested)
+                {
+                    await Task.Delay(SpareRequestPoll).ConfigureAwait(false);
+                }
 
-            PrioritizeEditorDocument(document);
-            previous = document.Path;
+                if (HasExited || lifetime.IsCancellationRequested) return;
+                lock (closedWhileWarming)
+                {
+                    if (closedWhileWarming.Contains(document.Path)) continue;
+                }
+
+                try
+                {
+                    if (!documents.TryOpenSpare(document)) continue;
+                }
+                catch (LspConnectionClosedException)
+                {
+                    // 종료는 Changed로 알려집니다.
+                    return;
+                }
+
+                PrioritizeEditorDocument(document);
+                previous = document.Path;
+            }
+        }
+        finally
+        {
+            lock (closedWhileWarming)
+            {
+                if (--sparesWarming == 0) closedWhileWarming.Clear();
+            }
         }
     }
 
@@ -1420,6 +1452,11 @@ public sealed class ClangdNavigator : IDisposable
     public void Closed(string path)
     {
         if (HasExited) return;
+        lock (closedWhileWarming)
+        {
+            if (sparesWarming > 0) closedWhileWarming.Add(path);
+        }
+
         try
         {
             documents.CloseWhenReleased(path);

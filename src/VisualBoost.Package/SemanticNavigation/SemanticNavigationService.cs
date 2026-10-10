@@ -116,6 +116,10 @@ internal sealed class SemanticNavigationService : IDisposable
     private int reloads;
     // 이 Solution을 연 뒤 색인 뒤 메모리를 돌려받으려고 다시 시작한 횟수입니다(ClangdMemoryPolicy.ShouldReclaimAfterIndex). 다시 읽기와 따로 셉니다.
     private int reclaims;
+    // 다음 시작은 유휴 메모리 정리(색인 뒤 회수·정리 기준 초과) 재시작입니다. 최근 문서를 정원까지 다시 열면 돌려받은 메모리를 곧바로 다시
+    // 채우고, 정리 뒤 기준 사용량(ClangdMemoryPolicy)도 초점 문서 하나만 연 값이 아니게 되므로 초점 문서만 예열합니다(2026-10-10 검토 79).
+    // 사용자가 돌아와 문서를 활성화하면 그 문서는 활성화 예열로 열립니다. gate로 보호합니다.
+    private bool focusOnlyWarm;
     // 마지막으로 떼어 낸 탐색기의 종료입니다. 새 탐색기는 이 종료를 기다린 뒤 캐시 폴더를 준비해, 이전 세션의 늦은 판단 기록과 겹치지 않습니다.
     private Task previousShutdown = Task.CompletedTask;
     // 색인 로그를 읽지 못한다고 이미 알린 탐색기입니다.
@@ -140,8 +144,11 @@ internal sealed class SemanticNavigationService : IDisposable
     /// <summary>시작·종료·색인 진행이 바뀌었습니다. 임의 스레드에서 호출됩니다.</summary>
     public event Action? StateChanged;
 
-    /// <summary>새 clangd 탐색기가 준비되었습니다. 최근 문서를 다시 예열할 때 씁니다. 임의 스레드에서 호출됩니다.</summary>
-    public event Action? NavigatorStarted;
+    /// <summary>
+    /// 새 clangd 탐색기가 준비되었습니다. 최근 문서를 다시 예열할 때 씁니다. 인자가 참이면 초점 문서만 예열합니다(유휴 상태에서 메모리를
+    /// 돌려받으려고 다시 시작한 경우). 임의 스레드에서 호출됩니다.
+    /// </summary>
+    public event Action<bool>? NavigatorStarted;
 
     public SemanticNavigationSettings Settings
     {
@@ -427,15 +434,18 @@ internal sealed class SemanticNavigationService : IDisposable
         var observed = generation;
         var path = solutionPath!;
         var options = settings;
+        var focusOnly = focusOnlyWarm;
+        focusOnlyWarm = false;
         startCancellation?.Dispose();
         var cancellation = new CancellationTokenSource();
         startCancellation = cancellation;
-        var task = Task.Run(() => StartCoreAsync(observed, path, options, cancellation.Token));
+        var task = Task.Run(() => StartCoreAsync(observed, path, options, focusOnly, cancellation.Token));
         starting = task;
         return task;
     }
 
-    private async Task<ClangdNavigator?> StartCoreAsync(int observed, string solution, SemanticNavigationSettings options, CancellationToken cancellationToken)
+    private async Task<ClangdNavigator?> StartCoreAsync(int observed, string solution, SemanticNavigationSettings options, bool focusOnly,
+        CancellationToken cancellationToken)
     {
         try
         {
@@ -489,7 +499,7 @@ internal sealed class SemanticNavigationService : IDisposable
             if (created.HasExited) OnNavigatorChanged(created);
             RaiseStateChanged();
             // 시작 전에 들어온 활성 문서 예열은 탐색기가 없어 버려졌고, 다시 시작하면 열린 문서의 분석이 사라지므로 다시 예열합니다.
-            if (!created.HasExited) NavigatorStarted?.Invoke();
+            if (!created.HasExited) NavigatorStarted?.Invoke(focusOnly);
             return created;
         }
         catch (SemanticNavigationUnavailableException exception)
@@ -703,6 +713,7 @@ internal sealed class SemanticNavigationService : IDisposable
         }
 
         string message;
+        var reclaiming = true;
         ClangdNavigator? stopped;
         SourceChangeMonitor? watcher;
         lock (gate)
@@ -719,6 +730,7 @@ internal sealed class SemanticNavigationService : IDisposable
             if (ClangdMemoryPolicy.ShouldReload(needsReload, sample, reloads))
             {
                 reloads++;
+                reclaiming = false;
                 message = "공유 PCH를 넣어 다시 색인한 결과를 읽도록 clangd를 다시 시작합니다.";
             }
             else if (ClangdMemoryPolicy.ShouldReclaimAfterIndex(indexedUnits, sample, reclaims))
@@ -736,6 +748,7 @@ internal sealed class SemanticNavigationService : IDisposable
             }
 
             (stopped, watcher) = DetachLocked(null);
+            focusOnlyWarm = reclaiming;
         }
 
         ActivityLog.LogInformation("VisualBoost/SemanticNavigation", message);
@@ -755,6 +768,7 @@ internal sealed class SemanticNavigationService : IDisposable
     private (ClangdNavigator? Navigator, SourceChangeMonitor? Monitor) DetachLocked(string? reason)
     {
         generation++;
+        focusOnlyWarm = false;
         startCancellation?.Cancel();
         starting = null;
         var current = navigator;

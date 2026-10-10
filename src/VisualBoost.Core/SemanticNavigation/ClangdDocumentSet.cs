@@ -70,6 +70,15 @@ public sealed class ClangdDocumentSet
         }
     }
 
+    /// <summary>정원에 빈자리가 있습니다(<see cref="TryOpenSpare"/>가 열 수 있는 자리).</summary>
+    public bool HasSpareSlot
+    {
+        get
+        {
+            lock (gate) return entries.Values.Count(e => !e.Transient) < Capacity;
+        }
+    }
+
     public bool Contains(string path)
     {
         lock (gate) return entries.ContainsKey(path);
