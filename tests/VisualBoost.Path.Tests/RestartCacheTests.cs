@@ -13,7 +13,7 @@ internal static class RestartCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost-Restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        try { VerifySymbols(root); VerifyRoots(root); VerifyPooling(root); VerifyPartialUpdate(root); }
+        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -22,12 +22,7 @@ internal static class RestartCacheTests
         var dir = Path.Combine(root, "symbols"); var solution = Path.Combine(root, "Fixture.sln"); var file = Path.Combine(root, "A.h");
         File.WriteAllText(file, "struct A {};\n");
         using (var first = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
-        using (var cancel = new CancellationTokenSource())
-        {
-            try { first.Analyze(solution, new[] { file }, Array.Empty<string>(), cancel.Token,
-                p => { if (p.Stage == SourceAnalysisStage.Linking) cancel.Cancel(); }); }
-            catch (OperationCanceledException) { }
-        }
+            first.Analyze(solution, new[] { file }, default);
         var stored = Directory.GetFiles(dir, "*.bin").Single();
         var sentinel = new DateTime(2020, 1, 1, 0, 0, 0, DateTimeKind.Utc); File.SetLastWriteTimeUtc(stored, sentinel);
         var phases = new List<SourceAnalysisProgress>();
@@ -54,21 +49,21 @@ internal static class RestartCacheTests
                 Check(reopened.SymbolCount == 0, "취소된 수집 세대의 저장 심볼 제외");
             }
             reopened.LoadCachedSymbols(solution, default, new[] { file });
-            Check(reopened.FindSymbol("A").Count == 1 && reopened.CachedSymbolsPublished, "후처리 취소 후 새 인스턴스에서 저장된 심볼 즉시 복원(전체 공개 표시)");
+            Check(reopened.FindSymbol("A").Count == 1 && reopened.CachedSymbolsPublished, "새 인스턴스에서 저장된 심볼 즉시 복원(전체 공개 표시)");
             reopened.LoadCachedSymbols(solution + ".none", default);
             Check(!reopened.CachedSymbolsPublished, "저장된 분석이 없으면 전체 공개로 보지 않음");
             reopened.LoadCachedSymbols(solution, default, new[] { file });
             reopened.Clear();
             Check(!reopened.CachedSymbolsPublished, "Clear 뒤 전체 공개 표시 해제");
             reopened.LoadCachedSymbols(solution, default, new[] { file });
-            reopened.Analyze(solution, new[] { file }, Array.Empty<string>(), default, phases.Add);
+            reopened.Analyze(solution, new[] { file }, default, phases.Add);
             Check(!phases.Any(p => p.Stage == SourceAnalysisStage.Parsing || p.Stage == SourceAnalysisStage.Saving), "재실행 무변경 파일 재파싱·재저장 0회");
             Check(File.GetLastWriteTimeUtc(stored) == sentinel, "무변경 캐시 파일 실제 쓰기 없음");
             File.WriteAllText(file, "struct Changed {};\n"); phases.Clear();
-            reopened.Analyze(solution, new[] { file }, Array.Empty<string>(), default, phases.Add);
+            reopened.Analyze(solution, new[] { file }, default, phases.Add);
             Check(phases.Count(p => p.Stage == SourceAnalysisStage.Parsing) == 1 && reopened.FindSymbol("Changed").Count == 1 && reopened.FindSymbol("A").Count == 0,
                 "변경 파일만 재파싱하고 이전 심볼 제거");
-            File.Delete(file); reopened.Analyze(solution, new[] { file }, Array.Empty<string>(), default);
+            File.Delete(file); reopened.Analyze(solution, new[] { file }, default);
             Check(reopened.FindSymbol("Changed").Count == 0, "삭제 파일의 저장 심볼 제거");
         }
         using (var stream = File.Create(stored))
@@ -88,29 +83,6 @@ internal static class RestartCacheTests
         Throws<OperationCanceledException>(() => old.Save(solution, entries, canceled.Token));
     }
 
-    private static void VerifyRoots(string root)
-    {
-        var paths = Enumerable.Range(0, 80).Select(i => Path.Combine(root, "includes", "Root" + i)).ToArray();
-        foreach (var path in paths) Directory.CreateDirectory(path);
-        Directory.CreateDirectory(Path.Combine(paths[5], "Nested"));
-        File.WriteAllText(Path.Combine(paths[5], "Nested", "Found.h"), "");
-        File.WriteAllText(Path.Combine(paths[3], "Shared.h"), ""); File.WriteAllText(Path.Combine(paths[9], "Shared.h"), "");
-        var lookup = new IncludeRootLookup(paths);
-        var invalidSource = Path.Combine(root, "InvalidInclude.cpp");
-        File.WriteAllText(invalidSource, "#include <bad<path>\n#include \"Shared.h\"\nstruct Survives {};\n");
-        using (var analyzer = new SolutionSourceAnalyzer(new SourceAnalysisCache(Path.Combine(root, "invalid-cache"))))
-        {
-            analyzer.Analyze(Path.Combine(root, "Invalid.sln"), new[] { invalidSource }, paths, default);
-            Check(analyzer.FindSymbol("Survives").Count == 1 && analyzer.IncludeEdgeCount == 1 &&
-                analyzer.LastWarning?.Contains("include 1개") == true, "잘못된 include만 진단하고 정상 연결·이름 결과 유지");
-        }
-        for (var i = 0; i < 500; i++) CheckSilent(lookup.Find("Missing" + i + ".h", default) is null, "missing include");
-        Check(lookup.FileProbeCount == 0, "80개 루트·없는 include 500개에서 40,000회 파일 확인 제거");
-        Check(lookup.Find("Shared.h", default) == Path.Combine(paths[3], "Shared.h"), "공통 루트 원래 우선순위 보존");
-        Check(lookup.Find(Path.Combine("Nested", "Found.h"), default) == Path.Combine(paths[5], "Nested", "Found.h"), "하위 폴더 include 연결");
-        File.WriteAllText(Path.Combine(paths[0], "New.h"), "");
-        Check(new IncludeRootLookup(paths).Find("New.h", default) == Path.Combine(paths[0], "New.h"), "다음 분석 패스의 새 파일 반영");
-    }
     private static void VerifyPooling(string root)
     {
         var dir = Path.Combine(root, "pool"); var solution = Path.Combine(root, "Pool.sln");
@@ -127,11 +99,11 @@ internal static class RestartCacheTests
 
         using (var analyzer = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
         {
-            analyzer.Analyze(solution, files, Array.Empty<string>(), default);
+            analyzer.Analyze(solution, files, default);
             Check(Pooled(analyzer), "새로 분석한 파일들의 같은 이름·소속·시그니처는 한 문자열");
             var phases = new List<SourceAnalysisProgress>();
             analyzer.ReleasePreviousAnalysis();
-            analyzer.Analyze(solution, files, Array.Empty<string>(), default, phases.Add);
+            analyzer.Analyze(solution, files, default, phases.Add);
             Check(!phases.Any(p => p.Stage == SourceAnalysisStage.Parsing), "지난 분석을 놓은 뒤에도 저장된 분석을 다시 읽어 재파싱 없음");
         }
 
@@ -152,14 +124,14 @@ internal static class RestartCacheTests
         using (var analyzer = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
         {
             Check(!analyzer.UpdateFiles(solution, new[] { second }, default), "마친 분석 패스 전에는 부분 갱신하지 않음");
-            analyzer.Analyze(solution, files, Array.Empty<string>(), default);
+            analyzer.Analyze(solution, files, default);
             File.WriteAllText(second, "void NewPartName();\n");
             Check(analyzer.UpdateFiles(solution, new[] { second }, default) && analyzer.FindSymbol("NewPartName").Count == 1 &&
                 analyzer.FindSymbol("OldPart").Count == 0 && analyzer.FindSymbol("KeepPart").Count == 1, "저장한 파일만 다시 분석해 이름 인덱스 갱신");
             File.Delete(first);
             Check(analyzer.UpdateFiles(solution, new[] { first }, default) && analyzer.FindSymbol("KeepPart").Count == 0, "지운 파일의 이름 제거");
             // 부분 갱신은 분석 캐시 파일에 쓰지 않으므로, 다음 패스는 바뀐 파일이 없어도 저장해야 합니다.
-            analyzer.Analyze(solution, new[] { second }, Array.Empty<string>(), default);
+            analyzer.Analyze(solution, new[] { second }, default);
         }
         using (var reopened = new SolutionSourceAnalyzer(new SourceAnalysisCache(dir)))
         {

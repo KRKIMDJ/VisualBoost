@@ -19,7 +19,6 @@ internal sealed class SolutionFileIndexSnapshot
         int rootCount,
         bool isAnalyzing,
         int symbolCount,
-        int includeEdgeCount,
         TimeSpan lastBuildDuration,
         string? lastError,
         string? analysisError,
@@ -32,7 +31,6 @@ internal sealed class SolutionFileIndexSnapshot
         RootCount = rootCount;
         IsAnalyzing = isAnalyzing;
         SymbolCount = symbolCount;
-        IncludeEdgeCount = includeEdgeCount;
         LastBuildDuration = lastBuildDuration;
         LastError = lastError;
         AnalysisError = analysisError;
@@ -51,7 +49,6 @@ internal sealed class SolutionFileIndexSnapshot
 
     public int SymbolCount { get; }
 
-    public int IncludeEdgeCount { get; }
 
     public TimeSpan LastBuildDuration { get; }
 

@@ -2,7 +2,7 @@ using System;
 
 namespace VisualBoost.Core.Analysis;
 
-public enum SourceAnalysisStage { CacheLoading, Waiting, CacheChecking, Parsing, Indexing, Linking, Saving }
+public enum SourceAnalysisStage { CacheLoading, Waiting, CacheChecking, Parsing, Indexing, Saving }
 
 /// <summary>백그라운드 분석의 최신 상태입니다. 완료 수는 읽기 실패·상한 제외 파일도 포함합니다.</summary>
 public sealed class SourceAnalysisProgress

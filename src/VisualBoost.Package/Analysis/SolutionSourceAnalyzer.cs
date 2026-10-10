@@ -22,8 +22,6 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     private readonly SourceAnalysisCache cache;
     private readonly SourceSymbolIndex symbols = new();
     private readonly object gate = new();
-    // include 연결은 개수만 보여 주므로 그래프는 패스 안에서만 만들고 보관하지 않습니다(엔진 규모 연결 약 78만 개의 경로 문자열).
-    private int includeEdgeCount;
     private string? cachedSolution;
     private IReadOnlyDictionary<string, CachedSourceAnalysis>? loadedCache;
     // 끝까지 마친 분석 패스가 이름 인덱스에 공개된 Solution입니다. 이때만 이름 인덱스가 loadedCache와 같은 위치 객체를 담아 부분 갱신할 수 있습니다.
@@ -83,24 +81,14 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     public SymbolCompletionSnapshot CompletionSnapshot => symbols.CompletionSnapshot;
     internal event Action<int>? SymbolsPublished;
 
-    public int IncludeEdgeCount
-    {
-        get
-        {
-            // 캐시 게시는 이 잠금을 쥔 채 이름 묶음을 병합하므로, UI thread의 상태 조회(GetSnapshot)가 기다리지 않게 잠금 없이 읽습니다.
-            return Volatile.Read(ref includeEdgeCount);
-        }
-    }
-
     /// <summary>진행 중인 분석에서 이 파일과 같은 프로젝트의 파일을 먼저 분석하게 합니다. 분석 중이 아니면 아무것도 하지 않습니다.</summary>
     public void Focus(string path) => activeQueue?.Focus(path);
 
     /// <param name="priority">프로젝트 소속·엔진 위치로 정하는 기본 분석 순서입니다.</param>
     /// <param name="focus">먼저 분석할 파일(열린 문서, 최근에 연 순서)입니다.</param>
-    public IReadOnlyList<string> Analyze(
+    public void Analyze(
         string solutionPath,
         IReadOnlyList<string> files,
-        IReadOnlyList<string> includeRoots,
         CancellationToken cancellationToken,
         Action<SourceAnalysisProgress>? reportProgress = null,
         SourceAnalysisPriority? priority = null,
@@ -116,7 +104,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         activeQueue = queue;
         try
         {
-            return AnalyzeQueued(solutionPath, files, includeRoots, sourceFiles, queue, cancellationToken, reportProgress);
+            AnalyzeQueued(solutionPath, sourceFiles, queue, cancellationToken, reportProgress);
         }
         finally
         {
@@ -125,10 +113,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         }
     }
 
-    private IReadOnlyList<string> AnalyzeQueued(
+    private void AnalyzeQueued(
         string solutionPath,
-        IReadOnlyList<string> files,
-        IReadOnlyList<string> includeRoots,
         string[] sourceFiles,
         SourceAnalysisQueue queue,
         CancellationToken cancellationToken,
@@ -268,7 +254,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                 var analysis = CppSourceAnalyzer.Analyze(file, File.ReadAllText(file), cancellationToken, pool.Intern);
                 var after = TryGetInfo(file);
                 if (after is null || after.Length != info.Length || after.LastWriteTimeUtc != info.LastWriteTimeUtc) return;
-                current[file] = new CachedSourceAnalysis(info.Length, info.LastWriteTimeUtc.Ticks, analysis);
+                current[file] = Entry(info, analysis);
                 PublishProgress(current[file], rank);
             }
             catch (RegexMatchTimeoutException)
@@ -286,9 +272,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         cancellationToken.ThrowIfCancellationRequested();
         LastWarning = timedOutFiles == 0 ? null : $"복잡한 구문으로 {timedOutFiles:N0}개 파일 분석을 건너뛰었습니다. 일부 심볼이 누락될 수 있습니다.";
         Report(SourceAnalysisStage.Indexing);
-        // 검색에 필요하지 않은 include 경로 확인 및 캐시 저장이 완료되기 전에 심볼을 공개합니다.
+        // 캐시 저장이 끝나기 전에 심볼을 공개합니다.
         symbols.ReplaceAll(current.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
-        // include 후처리 도중 종료되어도 이미 완료한 소스 분석을 다음 실행에서 다시 파싱하지 않습니다.
         if (unsavedUpdates || cache.NeedsUpgrade || current.Count != previous.Count || current.Any(pair =>
             !previous.TryGetValue(pair.Key, out var old) || !ReferenceEquals(old, pair.Value)))
         {
@@ -300,59 +285,9 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             cachedSolution = solutionPath;
             loadedCache = current;
             unsavedUpdates = false;
-        }
-        var knownFiles = new HashSet<string>(files, StringComparer.OrdinalIgnoreCase);
-        var filesByName = knownFiles
-            .GroupBy(Path.GetFileName, StringComparer.OrdinalIgnoreCase)
-            .ToDictionary(group => group.Key, group => group.ToArray(), StringComparer.OrdinalIgnoreCase);
-        var graph = new Dictionary<string, string[]>(StringComparer.OrdinalIgnoreCase);
-        var externalFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-        // 공통 roots는 한 패스 안에서 불변입니다. 로컬 상대 include는 먼저 확인하고,
-        // 그 밖의 같은 경로 검색은 실패도 재사용해 반복 디스크 조회를 줄입니다.
-        var sharedIncludes = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
-        var rootLookup = new IncludeRootLookup(includeRoots);
-        var linkedFiles = 0;
-        var invalidIncludes = 0;
-        string? ResolveSafe(string path, SourceIncludeReference include)
-        {
-            try { return ResolveInclude(path, include, rootLookup, filesByName, sharedIncludes, cancellationToken); }
-            catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException || exception is PathTooLongException)
-            {
-                // 구문 분석 중 추출된 include가 운영체제 경로가 아닐 수 있습니다. 해당 항목만 건너뛰고 진단을 남깁니다.
-                invalidIncludes++;
-                return null;
-            }
-        }
-        foreach (var entry in current.Values)
-        {
             cancellationToken.ThrowIfCancellationRequested();
-            reportProgress?.Invoke(new SourceAnalysisProgress(SourceAnalysisStage.Linking, linkedFiles, current.Count, entry.Analysis.Path, refreshing));
-            var resolved = entry.Analysis.Includes
-                .Select(include => ResolveSafe(entry.Analysis.Path, include))
-                .Where(path => path is not null)
-                .Cast<string>()
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-                .ToArray();
-            graph[entry.Analysis.Path] = resolved;
-            foreach (var path in resolved)
-            {
-                if (!knownFiles.Contains(path)) externalFiles.Add(path);
-            }
-            linkedFiles++;
-        }
-
-        if (invalidIncludes > 0)
-            LastWarning = (LastWarning is null ? string.Empty : LastWarning + " ") +
-                $"파일 경로로 해석할 수 없는 include {invalidIncludes:N0}개를 건너뛰었습니다. 일부 연결이 누락될 수 있습니다.";
-
-        lock (gate)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            includeEdgeCount = graph.Values.Sum(paths => paths.Length);
             completedSolution = solutionPath;
         }
-        cancellationToken.ThrowIfCancellationRequested();
-        return externalFiles.ToArray();
     }
 
     /// <summary>
@@ -360,7 +295,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     /// false를 돌려주므로 호출자가 전체 다시 수집합니다. 분석 패스와 동시에 부르지 않습니다(호출자가 작업을 하나씩 돌림).
     /// </summary>
     /// <remarks>
-    /// 전체 다시 수집은 파일 열거·모든 파일 확인·이름 인덱스 두 번 재구성·include 연결·분석 캐시 저장을 하므로 엔진 규모에서 파일 하나 저장에
+    /// 전체 다시 수집은 파일 열거·모든 파일 확인·이름 인덱스 재구성·분석 캐시 저장을 하므로 엔진 규모에서 파일 하나 저장에
     /// 수십 초와 1 GB 넘는 일시 메모리가 들었습니다. 분석 캐시 파일은 여기서 쓰지 않습니다. 쓰지 못한 채 끝나도 다음 패스가 바뀐 파일을 수정
     /// 시각으로 알아보고 다시 분석합니다.
     /// </remarks>
@@ -394,7 +329,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
                     var after = TryGetInfo(path);
                     // 읽는 사이 또 바뀌었으면 옛 결과를 두고, 그 변경 알림의 다음 갱신에서 다시 분석합니다.
                     if (after is null || after.Length != info.Length || after.LastWriteTimeUtc != info.LastWriteTimeUtc) continue;
-                    updated = new CachedSourceAnalysis(info.Length, info.LastWriteTimeUtc.Ticks, analysis);
+                    updated = Entry(info, analysis);
                 }
                 catch (RegexMatchTimeoutException)
                 {
@@ -463,7 +398,6 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             cachedSymbolsPublished = false;
             completedSolution = null;
             symbols.ReplaceAll(Array.Empty<SourceSymbolLocation>());
-            includeEdgeCount = 0;
         }
     }
 
@@ -492,39 +426,14 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         return loadedCache;
     }
 
-    private static string? ResolveInclude(
-        string sourcePath,
-        SourceIncludeReference include,
-        IncludeRootLookup rootLookup,
-        IReadOnlyDictionary<string, string[]> filesByName,
-        Dictionary<string, string?> sharedIncludes,
-        CancellationToken cancellationToken)
-    {
-        cancellationToken.ThrowIfCancellationRequested();
-        var relative = include.Value.Replace('/', Path.DirectorySeparatorChar);
-        if (!include.IsSystem)
-        {
-            var local = Path.GetFullPath(Path.Combine(Path.GetDirectoryName(sourcePath) ?? string.Empty, relative));
-            if (File.Exists(local)) return local;
-        }
-
-        if (sharedIncludes.TryGetValue(relative, out var shared)) return shared;
-
-        var name = Path.GetFileName(relative);
-        if (filesByName.TryGetValue(name, out var candidates))
-        {
-            var suffix = relative.Replace(Path.AltDirectorySeparatorChar, Path.DirectorySeparatorChar);
-            var match = candidates
-                .Where(path => path.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-                .OrderBy(path => path.Length)
-                .FirstOrDefault();
-            if (match is not null) { sharedIncludes[relative] = match; return match; }
-        }
-
-        var resolved = rootLookup.Find(relative, cancellationToken);
-        sharedIncludes[relative] = resolved;
-        return resolved;
-    }
+    /// <summary>
+    /// 파일 하나의 분석 결과를 보관용으로 만듭니다. include 목록은 버립니다. 이름 인덱스는 쓰지 않고, 정의·참조 탐색은 clangd 색인 파일의
+    /// include 기록을 씁니다. 예전에는 분석 패스마다 모든 include를 경로로 풀어(엔진 규모 약 35만 개, 다시 열 때마다 약 6초) 인덱스 상태 창의
+    /// 개수 표시에만 썼습니다.
+    /// </summary>
+    private static CachedSourceAnalysis Entry(FileInfo info, SourceFileAnalysis analysis) =>
+        new(info.Length, info.LastWriteTimeUtc.Ticks,
+            new SourceFileAnalysis(analysis.Path, Array.Empty<SourceIncludeReference>(), analysis.Symbols));
 
     private static bool IsCppFile(string path) => CppExtensions.Contains(Path.GetExtension(path));
 

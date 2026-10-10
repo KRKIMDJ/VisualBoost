@@ -244,7 +244,6 @@ internal sealed class SolutionFileIndexService : IDisposable
                 roots.Count,
                 isAnalyzing,
                 sourceAnalyzer.SymbolCount,
-                sourceAnalyzer.IncludeEdgeCount,
                 lastBuildDuration,
                 lastError,
                 analysisError,
@@ -732,7 +731,6 @@ internal sealed class SolutionFileIndexService : IDisposable
                             () => AnalyzeSourcesAsync(
                                     currentSolutionPath,
                                     files,
-                                    effectiveRoots,
                                     currentConfiguration.SourceAnalysisDelay,
                                     priority,
                                     cancellationToken),
@@ -770,7 +768,6 @@ internal sealed class SolutionFileIndexService : IDisposable
     private async Task AnalyzeSourcesAsync(
         string currentSolutionPath,
         IReadOnlyList<string> files,
-        IReadOnlyList<string> includeRoots,
         TimeSpan delay,
         SourceAnalysisPriority priority,
         CancellationToken cancellationToken)
@@ -791,7 +788,6 @@ internal sealed class SolutionFileIndexService : IDisposable
             sourceAnalyzer.Analyze(
                 currentSolutionPath,
                 files,
-                includeRoots,
                 cancellationToken,
                 ReportProgress,
                 priority,

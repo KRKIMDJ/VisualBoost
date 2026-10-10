@@ -78,7 +78,7 @@ internal static class ProjectScopeTests
             {
                 if (count < many.Length && analyzer.FindSymbol("BatchSymbol").Count > 0) partialSeen = true;
             };
-            analyzer.Analyze(batchSolution, many, Array.Empty<string>(), CancellationToken.None);
+            analyzer.Analyze(batchSolution, many, CancellationToken.None);
             Check(partialSeen && analyzer.FindSymbol("BatchSymbol").Count == many.Length, "전체 분석 완료 전 부분 검색 결과 공개");
             analyzer.LoadCachedSymbols(batchSolution, CancellationToken.None, new[] { many[0] });
             Check(analyzer.FindSymbol("BatchSymbol").Count == 1, "캐시 복원 시 현재 프로젝트 파일만 공개");

@@ -48,7 +48,7 @@ internal sealed class SourceAnalysisCache
 
             var count = ReadCount(reader, MaximumFiles);
             var entries = new Dictionary<string, CachedSourceAnalysis>(count, StringComparer.OrdinalIgnoreCase);
-            // 읽는 동안만 쓰는 풀입니다. 같은 이름·소속·시그니처·include를 한 인스턴스로 모읍니다.
+            // 읽는 동안만 쓰는 풀입니다. 같은 이름·소속·시그니처를 한 인스턴스로 모읍니다.
             var pool = new StringPool();
             for (var fileIndex = 0; fileIndex < count; fileIndex++)
             {
@@ -58,12 +58,14 @@ internal sealed class SourceAnalysisCache
                 var revision = version >= 5 ? reader.ReadInt32() : 1;
                 var length = reader.ReadInt64();
                 var ticks = reader.ReadInt64();
+                // include 목록은 더 보관하지 않습니다(SolutionSourceAnalyzer.Entry). 예전에 저장한 목록은 읽고 버리며 다음 저장에서 빠집니다.
                 var includeCount = ReadCount(reader, MaximumItemsPerFile);
-                var includes = new List<SourceIncludeReference>(includeCount);
                 for (var includeIndex = 0; includeIndex < includeCount; includeIndex++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
-                    includes.Add(new SourceIncludeReference(pool.Intern(reader.ReadString()), reader.ReadBoolean(), reader.ReadInt32()));
+                    reader.ReadString();
+                    reader.ReadBoolean();
+                    reader.ReadInt32();
                 }
 
                 var symbolCount = ReadCount(reader, MaximumItemsPerFile);
@@ -84,7 +86,7 @@ internal sealed class SourceAnalysisCache
                 // 구형 캐시의 상세 종류 이전 항목만 갱신하고, 이후에는 명시적 분석 버전으로 판정합니다.
                 if (version <= 4 && symbols.Any(s => s.Kind == SourceSymbolKind.Type)) revision = 0;
                 entries[file] = new CachedSourceAnalysis(
-                    length, ticks, new SourceFileAnalysis(file, includes, symbols), revision);
+                    length, ticks, new SourceFileAnalysis(file, Array.Empty<SourceIncludeReference>(), symbols), revision);
             }
 
             cancellationToken.ThrowIfCancellationRequested();

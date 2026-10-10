@@ -42,12 +42,12 @@ internal static class SymbolCacheTests
             using var analyzer = new SolutionSourceAnalyzer(cache);
             analyzer.LoadCachedSymbols(solution, CancellationToken.None);
             if (analyzer.FindSymbol("Actor").Count != 1) throw new InvalidOperationException("구 타입 캐시 선공개 실패");
-            analyzer.Analyze(solution, new[] { path }, Array.Empty<string>(), CancellationToken.None);
+            analyzer.Analyze(solution, new[] { path }, CancellationToken.None);
             var updated = cache.Load(solution)[path].Analysis.Symbols;
             if (updated.Single(s => s.Name == "Actor").Kind != SourceSymbolKind.Class ||
                 updated.Single(s => s.Name == "Mode").Kind != SourceSymbolKind.Enum)
                 throw new InvalidOperationException("기존 타입 캐시의 상세 종류 보강 실패");
-            analyzer.Analyze(solution, new[] { path }, Array.Empty<string>(), CancellationToken.None);
+            analyzer.Analyze(solution, new[] { path }, CancellationToken.None);
             if (analyzer.FindSymbol("Actor").Single().Kind != SourceSymbolKind.Class)
                 throw new InvalidOperationException("상세 종류 캐시 재사용 실패");
             Console.WriteLine("PASS: 기존 타입 캐시 선공개·상세 종류 보강·저장 및 재사용");
@@ -81,7 +81,7 @@ internal static class SymbolCacheTests
             var loaded = cache.Load(solution);
             if (!cache.NeedsUpgrade || loaded.Count != 2 || loaded.Any(pair =>
                 pair.Value.Revision != (version >= 5 ? CachedSourceAnalysis.CurrentRevision : 1) ||
-                pair.Value.Analysis.Includes.Single().Value != "Base.h" ||
+                pair.Value.Analysis.Includes.Count != 0 ||
                 !pair.Value.Analysis.Symbols.Select(s => s.Name).SequenceEqual(new[] { "Move", "Stop" }) ||
                 pair.Value.Analysis.Symbols.Any(s => s.Scope != "Game::Actor" || s.Signature != "(float distance)")))
                 throw new InvalidOperationException("구형 심볼 캐시 이관 실패: " + version);
@@ -92,7 +92,7 @@ internal static class SymbolCacheTests
             using var reader = new BinaryReader(File.OpenRead(file), Encoding.UTF8);
             reader.ReadString();
             if (reader.ReadInt32() != 6) throw new InvalidOperationException("v6 저장 형식 누락");
-            Console.WriteLine("PASS: v" + version + " 심볼·include 캐시를 v6으로 이관하고 새 인스턴스에서 복원");
+            Console.WriteLine("PASS: v" + version + " 심볼 캐시를 v6으로 이관하고(include 목록은 읽고 버림) 새 인스턴스에서 복원");
         }
     }
 }

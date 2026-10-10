@@ -60,16 +60,16 @@ internal static class DiscoveryReuseTests
     private static void VerifyStatusText()
     {
         static SolutionFileIndexSnapshot Snapshot(SolutionFileIndexState state, bool analyzing, SourceAnalysisProgress? progress, bool refreshing) =>
-            new(state, 1234, 1, analyzing, 0, 0, TimeSpan.Zero, null, null, progress, refreshing);
+            new(state, 1234, 1, analyzing, 0, TimeSpan.Zero, null, null, progress, refreshing);
         Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Building, true, null, false)) == "VisualBoost: 소스 파일 수집 중 · 1,234개" &&
               AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Building, true, null, true)) is null,
             "처음 열 때만 파일 수집을 표시");
-        var cold = new SourceAnalysisProgress(SourceAnalysisStage.Linking, 5, 10, @"C:\p\A.cpp");
-        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, cold, false)) == "VisualBoost: include 정리 중 · 5/10 · A.cpp",
+        var cold = new SourceAnalysisProgress(SourceAnalysisStage.CacheChecking, 5, 10, @"C:\p\A.cpp");
+        Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, cold, false)) == "VisualBoost: 파일 캐시 확인 중 · 5/10 · A.cpp",
             "처음 분석은 모든 단계를 표시");
         // 분석 패스가 진행 값을 낸 뒤에는 분석이 저장된 결과를 재사용하는지로 정합니다. 파일 목록 캐시만 있고 분석 캐시를 쓰지 못한 첫 분석은
         // 모든 단계를 보입니다.
-        foreach (var stage in new[] { SourceAnalysisStage.CacheChecking, SourceAnalysisStage.Indexing, SourceAnalysisStage.Linking, SourceAnalysisStage.Saving })
+        foreach (var stage in new[] { SourceAnalysisStage.CacheChecking, SourceAnalysisStage.Indexing, SourceAnalysisStage.Saving })
         {
             Check(AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, new SourceAnalysisProgress(stage, 1, 2, null, refreshing: true), false)) is null &&
                   AnalysisStatusText.Format(Snapshot(SolutionFileIndexState.Ready, true, new SourceAnalysisProgress(stage, 1, 2), true)) is not null,

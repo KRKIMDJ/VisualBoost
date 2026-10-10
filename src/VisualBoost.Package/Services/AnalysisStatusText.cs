@@ -14,7 +14,7 @@ internal static class AnalysisStatusText
 
     /// <param name="refreshing">다시 연 Solution의 문구이면 true입니다. 표시 지연(<see cref="Delay"/>)에 씁니다.</param>
     /// <remarks>
-    /// 다시 연 Solution(저장된 파일 목록·분석이 있음)에서는 저장된 결과로 검색이 이미 동작하므로 수집·캐시 확인·인덱스 준비·include 정리를
+    /// 다시 연 Solution(저장된 파일 목록·분석이 있음)에서는 저장된 결과로 검색이 이미 동작하므로 수집·캐시 확인·인덱스 준비·저장을
     /// 띄우지 않고, 바뀐 파일을 실제로 분석하는 동안만 그 수를 보입니다(2026-10-07 사용자 피드백: VS를 열 때마다 색인·파싱이 반복되어 보임).
     /// 처음 열 때와 같은 "파싱 중"을 쓰면 다시 파싱한다는 인상이 남으므로 증분 작업임을 드러내는 문구를 씁니다(2026-10-07 검토).
     /// 분석 패스가 진행 값을 내기 전(수집·대기)에는 파일 목록 캐시가 있는지로 짐작하고, 그 뒤에는 분석이 저장된 결과를 실제로 재사용하는지로
@@ -40,7 +40,6 @@ internal static class AnalysisStatusText
             SourceAnalysisStage.CacheChecking => "파일 캐시 확인 중",
             SourceAnalysisStage.Parsing => "파싱 중",
             SourceAnalysisStage.Indexing => "심볼 검색 준비 중",
-            SourceAnalysisStage.Linking => "include 정리 중",
             SourceAnalysisStage.Saving => "분석 캐시 저장 중",
             _ => "분석 준비 중",
         };

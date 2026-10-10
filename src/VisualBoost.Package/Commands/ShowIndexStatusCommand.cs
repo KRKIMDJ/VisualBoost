@@ -51,7 +51,6 @@ internal sealed class ShowIndexStatusCommand
             $"파일: {snapshot.FileCount:N0}개\n" +
             $"검색 루트: {snapshot.RootCount:N0}개\n" +
             $"심볼 후보: {snapshot.SymbolCount:N0}개\n" +
-            $"include 연결: {snapshot.IncludeEdgeCount:N0}개\n" +
             $"소스 분석: {(snapshot.IsAnalyzing ? "진행 중" : "대기/완료")}\n" +
             $"최근 인덱싱: {duration}";
 
