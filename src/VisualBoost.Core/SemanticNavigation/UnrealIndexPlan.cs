@@ -318,6 +318,18 @@ public sealed class UnrealIndexPlan
     }
 
     /// <summary>
+    /// 문서 명령의 도장입니다: 문서가 쓰는 빌드 명령(헤더는 소속 모듈의 명령)에서 공유 PCH를 뺀 인자의 해시입니다. 모듈 의존을 더하거나 구성을
+    /// 바꾸면 달라지므로, 지난 세션에 공유 PCH가 필요했던 문서 기억이 지금 명령에도 맞는지 볼 때 씁니다. 명령이 없으면 null입니다.
+    /// </summary>
+    public string? DocumentStamp(string path)
+    {
+        var source = DefinitionCandidates.IsHeader(path) ? HeaderSource(path) : IsMember(path) ? FullPath(path) : null;
+        if (source is null || !commandOfFile.TryGetValue(source, out var command)) return null;
+        var head = command.Arguments.Take(command.Arguments.Count - 1).ToArray();
+        return Hash(string.Join("\n", UnrealCompileCommands.RemovePrecompiledHeaders(head)), 8);
+    }
+
+    /// <summary>
     /// 문서로 열 때 덮어쓰기로 줄 명령입니다. 구성원 cpp는 자기 명령을, 프로젝트 헤더는 소속 모듈의 cpp 명령(같은 이름 cpp 우선)을 헤더로
     /// 옮겨 씁니다. database의 명령이 모두 캐시 폴더의 합성 TU라 clangd가 가까운 파일로 고른 추정 명령은 다른 모듈의 것일 수 있기 때문입니다.
     /// 해당 없으면 null입니다.

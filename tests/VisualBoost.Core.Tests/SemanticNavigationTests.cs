@@ -1770,8 +1770,9 @@ internal static class SemanticNavigationTests
             Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중"),
                 "PCH가 정의하는 조건 매크로에 기대는 문서는 PCH로 다시 분석: " + string.Join(",", twice.Locations) + " / " + string.Join("|", flagReports));
             var store = new DocumentSupplementStore(navigator.Context.Directory);
-            Check(SpinUntil(() => store.LoadPch().Contains(Path.GetFullPath(u5)) && store.LoadPch().Contains(Path.GetFullPath(flag)), 10000),
-                "PCH로 돌아간 문서를 기억: " + string.Join(",", store.LoadPch().Select(Path.GetFileName)));
+            Check(SpinUntil(() => store.LoadPch().TryGetValue(Path.GetFullPath(u5), out var u5Stamp) && u5Stamp == navigator.Context.Plan!.DocumentStamp(u5) &&
+                                  store.LoadPch().ContainsKey(Path.GetFullPath(flag)), 10000),
+                "PCH로 돌아간 문서를 문서 명령 도장과 함께 기억: " + string.Join(",", store.LoadPch().Keys.Select(Path.GetFileName)));
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
 
             // 다음 세션은 기억한 문서를 처음부터 PCH로 엽니다(문서를 열어 분석하도록 색인 파일 정의 경로는 끔).
@@ -1922,6 +1923,16 @@ internal static class SemanticNavigationTests
                     new CollectProgress(reports), timeout.Token).Result;
                 Check(definition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") && navigator.ErrorsOf(u5) is null &&
                       reports.All(r => !r.Contains("다시 분석")), "기억한 보충 헤더로 연 문서는 다시 분석 없이 답함: " + string.Join("|", reports));
+                // 기억한 헤더로 오류 없이 끝나면 다시 기억해 최근 순서를 갱신합니다. 기록은 역슬래시 경로라 세션 안의 표기(슬래시)와 맞추지 않으면
+                // 비교가 늘 어긋나 갱신하지 않았습니다(2026-10-10 검토 77). 지난 세션 끝에 Flag.h를 나중에 기록했으므로 U5.cpp가 맨 앞으로 와야 합니다.
+                var recordFile = Path.Combine(navigator.Context.Directory, DocumentSupplementStore.FileName);
+                string? FirstRecorded()
+                {
+                    try { return JsonValue.Parse(File.ReadAllText(recordFile))["documents"].Items.First()["path"].AsString(); }
+                    catch (Exception exception) when (exception is IOException || exception is FormatException || exception is InvalidOperationException) { return null; }
+                }
+                Check(SpinUntil(() => FirstRecorded() is { } first && string.Equals(first, Path.GetFullPath(u5), StringComparison.OrdinalIgnoreCase), 10000),
+                    "기억한 헤더로 오류 없이 끝난 문서는 다시 기억해 최근 순서 갱신: " + FirstRecorded());
                 var flagText = File.ReadAllText(flag);
                 var flagReports = new List<string>();
                 navigator.DefinitionAsync(new NavigationQuery(new DocumentText(flag, flagText, 1), 3, flagText.Split('\n')[3].IndexOf("Twice", StringComparison.Ordinal)),
@@ -2093,8 +2104,10 @@ internal static class SemanticNavigationTests
             File.WriteAllText(Path.Combine(storeDirectory, DocumentSupplementStore.FileName), "{broken");
             Check(supplementStore.Load().Count == 0 && supplementStore.Record(doc, new[] { header }) && supplementStore.Load().Count == 1,
                 "깨진 기록은 버리고 새로 기억");
-            Check(supplementStore.RecordPch(doc) && supplementStore.LoadPch().Contains(Path.GetFullPath(doc)) && supplementStore.Load().Count == 0,
-                "공유 PCH가 필요한 문서 기억(보충 헤더 기억을 대신함)");
+            Check(supplementStore.RecordPch(doc, "stamp1") && supplementStore.LoadPch().TryGetValue(Path.GetFullPath(doc), out var pchStamp) && pchStamp == "stamp1" &&
+                  supplementStore.Load().Count == 0, "공유 PCH가 필요한 문서를 명령 도장과 함께 기억(보충 헤더 기억을 대신함)");
+            Check(supplementStore.RecordPch(doc) && supplementStore.LoadPch().TryGetValue(Path.GetFullPath(doc), out var oldStamp) && oldStamp is null,
+                "도장 없는 기억(예전 기록)은 도장 null로 읽음");
             File.SetLastWriteTimeUtc(doc, File.GetLastWriteTimeUtc(doc).AddSeconds(5));
             Check(supplementStore.LoadPch().Count == 0, "기억한 뒤 수정한 문서는 PCH 기억을 쓰지 않음");
             Check(supplementStore.RecordPch(doc) && supplementStore.Record(doc, new[] { header }) && supplementStore.LoadPch().Count == 0 &&

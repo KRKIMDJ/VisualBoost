@@ -245,8 +245,9 @@ public sealed class ClangdNavigator : IDisposable
     // 시작값이며, 기록은 처음 쓸 때 한 번 읽고 바꾸지 않습니다.
     private readonly DocumentSupplementStore? supplementStore;
     private readonly Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>? storedSupplements;
-    // 지난 세션에 공유 PCH가 필요했고 그 뒤 수정되지 않은 문서입니다(DocumentSupplementStore.LoadPch). 처음부터 PCH로 엽니다.
-    private readonly Lazy<IReadOnlyCollection<string>>? storedPchDocuments;
+    // 지난 세션에 공유 PCH가 필요했고 그 뒤 수정되지 않은 문서와 그때의 문서 명령 도장입니다(DocumentSupplementStore.LoadPch). 도장이 지금
+    // 명령과 같으면 처음부터 PCH로 엽니다.
+    private readonly Lazy<IReadOnlyDictionary<string, string?>>? storedPchDocuments;
     // 색인 실패를 알린 TU 중 아직 PCH 전환을 하지 않은 것입니다.
     private readonly HashSet<string> failedUnits = new(StringComparer.OrdinalIgnoreCase);
     private bool pchFlushScheduled;
@@ -292,7 +293,7 @@ public sealed class ClangdNavigator : IDisposable
             var supplements = new DocumentSupplementStore(context.Directory);
             supplementStore = supplements;
             storedSupplements = autoPlan.SupplementsEnabled ? new Lazy<IReadOnlyDictionary<string, IReadOnlyList<string>>>(supplements.Load) : null;
-            storedPchDocuments = new Lazy<IReadOnlyCollection<string>>(supplements.LoadPch);
+            storedPchDocuments = new Lazy<IReadOnlyDictionary<string, string?>>(supplements.LoadPch);
             // 첫 문서를 여는 콜백(문서 집합 잠금 안)이 파일을 읽지 않게 미리 읽습니다.
             var preload = storedSupplements;
             var preloadPch = storedPchDocuments;
@@ -525,7 +526,7 @@ public sealed class ClangdNavigator : IDisposable
                     {
                         locations = found;
                     }
-                    else if (await ResolveDefinitionFileAsync(query, symbol, locations[0].Path, progress, cancellationToken).ConfigureAwait(false) is { } confirmed)
+                    else if (await ResolveDefinitionFileAsync(query, symbol, locations[0].Path, progress, cancellationToken, definitionOnly: true).ConfigureAwait(false) is { } confirmed)
                     {
                         locations = confirmed.Locations;
                         resolved = confirmed.Analyzed;
@@ -1467,6 +1468,22 @@ public sealed class ClangdNavigator : IDisposable
         }
     }
 
+    /// <summary>
+    /// 후보 소스의 저장된 색인 파일에서 심볼의 정의 기록을 찾습니다. 기록이 하나이고 그 자리에 이름이 그대로 있으면 위치를, 기록이 없으면
+    /// <c>Found</c>가 거짓을 돌려줍니다. 심볼 ID를 모르거나 색인 파일을 읽지 못하면 null입니다(지금처럼 clangd에 물음).
+    /// </summary>
+    private (bool Found, NavigationLocation? Location)? StoredDefinition(string candidate, SemanticSymbol symbol)
+    {
+        if (symbol.Id.Length == 0 || shards.CurrentFile(Context.Paths.ToReal(candidate)) is not { } file) return null;
+        var (definitions, _) = IndexedDefinitions.Occurrences(symbol.Id, new[] { file.References });
+        // 분석 오류가 있던 색인은 정의를 덜 기록했을 수 있어, 기록이 없다고 단정하지 않습니다.
+        if (definitions.Count == 0) return file.HadErrors == false ? (false, null) : null;
+        if (definitions.Count != 1 || !definitions[0].Spelled) return (true, null);
+        var found = definitions[0];
+        var at = new NavigationLocation(Context.Paths.ToGiven(found.Path), found.Line, found.Character, found.EndLine, found.EndCharacter);
+        return (true, SpelledAt(at, symbol.Name) ? at : null);
+    }
+
     /// <summary>저장된 색인을 읽힌 뒤 정의가 색인에 나타나는지 다시 묻는 간격과 상한입니다(<see cref="DefinitionFromStoredIndexAsync"/>).</summary>
     private static readonly TimeSpan StoredIndexPollInterval = TimeSpan.FromMilliseconds(200);
     private static readonly TimeSpan StoredIndexTimeout = TimeSpan.FromSeconds(5);
@@ -1511,15 +1528,18 @@ public sealed class ClangdNavigator : IDisposable
             IReadOnlyList<string>? own;
             var stored = storedSupplements?.Value;
             // 지난 세션에 보충으로도 풀지 못해 공유 PCH로 분석한 문서는 PCH 없이 → 보충 → PCH 세 번의 분석을 건너뛰고 처음부터 PCH로 엽니다.
-            var rememberedPch = storedPchDocuments?.Value.Contains(Path.GetFullPath(path)) == true;
+            // 그때와 문서 명령(모듈 의존·구성)이 다르면 다시 판단합니다(2026-10-10 검토 76).
+            var rememberedPch = storedPchDocuments?.Value.TryGetValue(Path.GetFullPath(path), out var pchStamp) == true && pchStamp is not null &&
+                                pchStamp == plan.DocumentStamp(path);
             lock (pchGate)
             {
                 if (!documentOwnSupplements.TryGetValue(path, out own) && stored is not null && stored.TryGetValue(path, out var remembered))
                 {
                     // 지난 세션에 이 문서를 오류 없이 분석한 보충 헤더를 처음부터 넣어 보충 재분석을 건너뜁니다. 그래도 오류가 나면 이 세션의
-                    // 보충 단계가 그 위에 더하고, 공유 PCH로 돌아가면 기억을 지웁니다.
-                    own = remembered;
-                    documentOwnSupplements[path] = remembered;
+                    // 보충 단계가 그 위에 더하고, 공유 PCH로 돌아가면 기억을 지웁니다. 기록은 역슬래시 경로라 이 세션의 보충 헤더 표기(슬래시)로
+                    // 바꿔, 오류 없이 끝났을 때 다시 기억하는 비교가 맞게 합니다(2026-10-10 검토 77).
+                    own = remembered.Select(SupplementPath).ToArray();
+                    documentOwnSupplements[path] = own;
                 }
             }
 
@@ -1759,6 +1779,11 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     private bool SwitchDocument(UnrealIndexPlan plan, string path)
     {
+        // 보충을 할 수 있으면 다 찬 이름 인덱스로 해 보고도 풀지 못했을 때만 다음 세션에 기억합니다. 처음 연 Solution·인덱스 다시 만들기
+        // 직후(이름을 아직 못 찾음)와 닫는 중의 예외·취소는 이번 세션의 일시적인 판단이라, 기억하면 파일이 바뀔 때까지 세션마다 처음부터 공유
+        // PCH(문서당 약 2 GB)로 열었습니다(2026-10-10 검토 76). 보충을 할 수 없는 구성은 판단이 이름 인덱스와 무관하므로 그대로 기억합니다.
+        // 소스 분석을 끈 상태는 이름 인덱스가 늘 빈 채로 준비된 것으로 보여 기억이 남습니다(분석을 다시 켜도 파일이 바뀔 때까지 PCH로 엶).
+        var conclusive = !plan.SupplementsEnabled || options.FindSymbols is null || (options.SymbolsReady?.Invoke() ?? true);
         try
         {
             if (TrySupplementDocument(plan, path)) return true;
@@ -1768,10 +1793,11 @@ public sealed class ClangdNavigator : IDisposable
             // 보충 헤더를 고르지 못해도(후보 헤더 읽기, 솔루션을 닫는 중의 이름 인덱스) PCH로 다시 분석합니다. 그대로 새면 요청이 실패하고
             // 문서가 오류 난 분석에 남았습니다(피드백 검토 66).
             if (AuxiliaryFailed is { } handler) handler($"필요한 헤더를 고르지 못해 공유 PCH로 분석합니다({Path.GetFileName(path)}): {exception.Message}");
+            conclusive = false;
         }
 
         // 보충으로 풀지 못한 문서는 다음 세션에 처음부터 PCH로 엽니다.
-        if (supplementStore is { } store) RememberPch(store, path);
+        if (supplementStore is { } store && conclusive && !lifetime.IsCancellationRequested) RememberPch(store, plan, path);
         if (plan.DocumentCommand(path, pch: true) is { } choice)
         {
             SendSwitched(new[] { choice.Command });
@@ -1796,12 +1822,15 @@ public sealed class ClangdNavigator : IDisposable
     /// 공유 PCH로 돌아가는 문서를 기억합니다. 저장하지 않은 편집이 낸 오류일 수 있으면(보낸 내용이 디스크와 다름) 기억하지 않고 이전 기억(보충
     /// 헤더 포함)만 지웁니다. 작업 스레드에서 부릅니다.
     /// </summary>
-    private void RememberPch(DocumentSupplementStore store, string path)
+    private void RememberPch(DocumentSupplementStore store, UnrealIndexPlan plan, string path)
     {
         var sent = documents.SentText(path);
-        if (sent is not null && string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) store.RecordPch(path);
+        if (sent is not null && string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) store.RecordPch(path, plan.DocumentStamp(path));
         else store.Forget(path);
     }
+
+    /// <summary>보충 헤더 경로 표기입니다(<see cref="IncludeSupplements"/>·<see cref="UnrealIndexPlan"/>과 같은 전체 경로·슬래시).</summary>
+    private static string SupplementPath(string path) => Path.GetFullPath(path).Replace('\\', '/');
 
     /// <remarks>
     /// 이 문서의 이름 위치는 clangd에 보낸 내용(저장하지 않은 편집 포함)으로, include한 헤더의 위치는 디스크 내용으로 읽습니다. 고른 헤더는
@@ -2414,8 +2443,11 @@ public sealed class ClangdNavigator : IDisposable
     /// 차례로 clangd에 열어 정의를 확정합니다. 결과는 clangd가 다시 돌려준 위치만 씁니다. 이전 clangd가 색인한 후보는 열지 않고 저장된 색인을
     /// 먼저 읽힙니다(<see cref="DefinitionFromStoredIndexAsync"/>). <c>Analyzed</c>는 후보를 문서로 열어 분석했는지입니다.
     /// </summary>
+    /// <param name="definitionOnly">
+    /// 정의 위치만 필요합니다(정의 이동). 참조 탐색은 clangd가 정의 파일의 색인을 읽어야 그 파일의 참조까지 돌려주므로 거짓입니다.
+    /// </param>
     private async Task<(IReadOnlyList<NavigationLocation> Locations, bool Analyzed)?> ResolveDefinitionFileAsync(NavigationQuery query, SemanticSymbol symbol,
-        string header, IProgress<string>? progress, CancellationToken cancellationToken)
+        string header, IProgress<string>? progress, CancellationToken cancellationToken, bool definitionOnly = false)
     {
         var symbols = options.FindSymbols?.Invoke(symbol.Name) ?? Array.Empty<SourceSymbolLocation>();
         // 이름 인덱스는 Solution을 연 직후 비어 있을 수 있으므로 소속 모듈 폴더의 같은 이름 cpp를 함께 봅니다.
@@ -2454,6 +2486,20 @@ public sealed class ClangdNavigator : IDisposable
             var sent = false;
             if (command is not null && rememberedSources?.Value.Contains(candidate) == true && shards.HasCurrentShard(Context.Paths.ToReal(candidate)))
             {
+                // 저장된 색인 파일에 이 심볼의 정의 기록이 있는지 먼저 봅니다. 없으면(기억했지만 이번 정의가 없는 같은 이름 파일·같은 이름 cpp 후보)
+                // 기다려도, 문서로 열어도 나오지 않으므로 건너뜁니다. 있으면 정의 이동은 그 위치를 바로 씁니다. 전에는 후보마다 5초를 기다린 뒤 문서로
+                // 다시 분석해 최악이면 후보 3개에 15초와 분석 시간이 들었습니다(2026-10-10 검토 78).
+                var recorded = StoredDefinition(candidate, symbol);
+                if (recorded is { Found: false }) continue;
+                if (definitionOnly && recorded is { Location: { } at })
+                {
+                    // 명령은 그대로 줘 clangd가 이 후보의 저장된 색인을 읽게 합니다(기다리지 않음). 이 후보는 이번 세션에 다시 시도하지 않으므로,
+                    // 주지 않으면 이어지는 참조 탐색에서 정의 파일의 참조가 빠집니다.
+                    session.UpdateCompileCommands(new[] { command });
+                    definitionSources?.Record(candidate);
+                    return (new[] { at }, false);
+                }
+
                 if (await DefinitionFromStoredIndexAsync(query, command, cancellationToken).ConfigureAwait(false) is { } stored)
                 {
                     definitionSources?.Record(candidate);

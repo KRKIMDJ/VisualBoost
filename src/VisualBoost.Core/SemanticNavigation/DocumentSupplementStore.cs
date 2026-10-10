@@ -15,8 +15,8 @@ namespace VisualBoost.Core.SemanticNavigation;
 /// 문서 보충은 첫 분석(대형 TU 4~10초)에서 오류를 본 뒤 헤더를 골라 다시 분석하므로, 세션마다 그 문서의 첫 탐색이 분석 한 번을 더 기다렸습니다.
 /// 디스크 내용 그대로인 문서가 보충 헤더로 오류 없이 분석된 경우만 기억해, 다음 세션에서 그 문서를 열 때 처음부터 넣습니다. 그 문서에만 넣고
 /// 모듈에는 배우지 않습니다(편집 중 코드로 고른 헤더가 다른 파일에 퍼지지 않게, 피드백 검토 65). 공유 PCH가 필요했던 문서는 PCH 없이 → 보충 →
-/// PCH 세 번을 분석했으므로, 기억할 때의 파일 수정 시각이 그대로면 다음 세션에서 처음부터 PCH로 엽니다(바뀌었으면 다시 판단). 최근에 쓴 순서로
-/// <see cref="Capacity"/>개 문서까지 둡니다.
+/// PCH 세 번을 분석했으므로, 기억할 때의 파일 수정 시각과 문서 명령 도장(PCH를 뺀 빌드 명령의 해시, 모듈 의존·구성 변경을 반영)이 그대로면
+/// 다음 세션에서 처음부터 PCH로 엽니다(바뀌었으면 다시 판단, 2026-10-10 검토 76). 최근에 쓴 순서로 <see cref="Capacity"/>개 문서까지 둡니다.
 /// </remarks>
 public sealed class DocumentSupplementStore
 {
@@ -53,15 +53,18 @@ public sealed class DocumentSupplementStore
         return result;
     }
 
-    /// <summary>공유 PCH로 분석할 문서입니다. 기억한 뒤 수정된 문서와 없는 문서는 뺍니다.</summary>
-    public IReadOnlyCollection<string> LoadPch()
+    /// <summary>
+    /// 공유 PCH로 분석할 문서와 기억할 때의 문서 명령 도장(없던 예전 기록은 null)입니다. 기억한 뒤 수정된 문서와 없는 문서는 뺍니다. 도장은
+    /// 호출자가 지금 명령과 비교합니다.
+    /// </summary>
+    public IReadOnlyDictionary<string, string?> LoadPch()
     {
-        var result = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+        var result = new Dictionary<string, string?>(StringComparer.OrdinalIgnoreCase);
         List<Entry>? entries;
         lock (gate) entries = Read();
         foreach (var entry in entries ?? new List<Entry>())
         {
-            if (entry.PchWritten is { } written && WriteTicks(entry.Document) == written) result.Add(entry.Document);
+            if (entry.PchWritten is { } written && WriteTicks(entry.Document) == written && !result.ContainsKey(entry.Document)) result[entry.Document] = entry.Stamp;
         }
 
         return result;
@@ -79,12 +82,12 @@ public sealed class DocumentSupplementStore
     }
 
     /// <summary>
-    /// 문서를 공유 PCH로 분석할 문서로 맨 앞에 기억합니다(지금 파일 수정 시각과 함께). 문서를 읽지 못하면 기억하지 않고 false입니다.
+    /// 문서를 공유 PCH로 분석할 문서로 맨 앞에 기억합니다(지금 파일 수정 시각, 문서 명령 도장과 함께). 문서를 읽지 못하면 기억하지 않고 false입니다.
     /// </summary>
-    public bool RecordPch(string document)
+    public bool RecordPch(string document, string? stamp = null)
     {
         var full = Path.GetFullPath(document);
-        return WriteTicks(full) is { } written && Put(new Entry(full, Array.Empty<string>(), written));
+        return WriteTicks(full) is { } written && Put(new Entry(full, Array.Empty<string>(), written, stamp));
     }
 
     /// <summary>문서의 기억을 지웁니다. 기억이 없으면 쓰지 않습니다. 기록 파일을 읽거나 쓰지 못하면 false입니다.</summary>
@@ -106,7 +109,8 @@ public sealed class DocumentSupplementStore
             var entries = Read();
             if (entries is null) return false;
             if (entries.Count > 0 && string.Equals(entries[0].Document, entry.Document, StringComparison.OrdinalIgnoreCase) &&
-                entries[0].PchWritten == entry.PchWritten && entries[0].Headers.SequenceEqual(entry.Headers, StringComparer.OrdinalIgnoreCase))
+                entries[0].PchWritten == entry.PchWritten && entries[0].Stamp == entry.Stamp &&
+                entries[0].Headers.SequenceEqual(entry.Headers, StringComparer.OrdinalIgnoreCase))
             {
                 return true;
             }
@@ -139,7 +143,9 @@ public sealed class DocumentSupplementStore
             var temporary = path + ".tmp";
             // 수정 시각(tick)은 double로 정확히 담을 수 없어 문자열로 씁니다.
             var json = JsonValue.Object(("documents", JsonValue.Array(entries.Select(e => e.PchWritten is { } written
-                ? JsonValue.Object(("path", e.Document), ("pchWritten", written.ToString(CultureInfo.InvariantCulture)))
+                ? e.Stamp is { } stamp
+                    ? JsonValue.Object(("path", e.Document), ("pchWritten", written.ToString(CultureInfo.InvariantCulture)), ("stamp", stamp))
+                    : JsonValue.Object(("path", e.Document), ("pchWritten", written.ToString(CultureInfo.InvariantCulture)))
                 : JsonValue.Object(("path", e.Document), ("headers", JsonValue.Array(e.Headers.Select(h => (JsonValue)h))))))));
             File.WriteAllText(temporary, json.ToJson());
             if (File.Exists(path)) File.Replace(temporary, path, null);
@@ -176,7 +182,7 @@ public sealed class DocumentSupplementStore
                 {
                     if (long.TryParse(stamp, NumberStyles.Integer, CultureInfo.InvariantCulture, out var written))
                     {
-                        entries.Add(new Entry(document, Array.Empty<string>(), written));
+                        entries.Add(new Entry(document, Array.Empty<string>(), written, item["stamp"].AsString()));
                     }
 
                     continue;
@@ -197,11 +203,12 @@ public sealed class DocumentSupplementStore
 
     private sealed class Entry
     {
-        public Entry(string document, IReadOnlyList<string> headers, long? pchWritten)
+        public Entry(string document, IReadOnlyList<string> headers, long? pchWritten, string? stamp = null)
         {
             Document = document;
             Headers = headers;
             PchWritten = pchWritten;
+            Stamp = stamp;
         }
 
         public string Document { get; }
@@ -210,5 +217,8 @@ public sealed class DocumentSupplementStore
 
         /// <summary>공유 PCH로 분석할 문서면 기억할 때의 파일 수정 시각(UTC tick)입니다. 보충 헤더 기억이면 null입니다.</summary>
         public long? PchWritten { get; }
+
+        /// <summary>공유 PCH 기억의 문서 명령 도장입니다(<see cref="UnrealIndexPlan.DocumentStamp"/>). 예전 기록이나 보충 헤더 기억이면 null입니다.</summary>
+        public string? Stamp { get; }
     }
 }
