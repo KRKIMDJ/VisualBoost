@@ -907,6 +907,9 @@ internal sealed class SolutionFileIndexService : IDisposable
                     isAnalyzing = false;
                     analysisProgress = null;
                     analysisError = exception.Message;
+                    // 패스 중에 바뀐 파일은 실패해도 반영합니다. 타이머는 패스 중에 왔던 알림을 건너뛰었으므로 다시 걸지 않으면 다음 파일 알림까지
+                    // 남습니다(2026-10-10 검토 92).
+                    if (changedFiles.Count > 0) ArmRefreshTimerNoLock();
                 }
             }
         }

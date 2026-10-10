@@ -675,6 +675,9 @@ internal static class Program
         // 숨긴 위치·추가 묶음이 쌓이면 남은 위치로 다시 만듭니다. 결과와 입력 추천이 같아야 합니다.
         var bulk = Enumerable.Range(0, 60_000)
             .Select(i => new SourceSymbolLocation("Bulk" + i, "C.h", i + 1, 1, SourceSymbolKind.Function)).ToArray();
+        // 호출자가 변경 목록을 만들기 전에 다시 만들지를 물을 수 있습니다(바뀐 뒤 전체를 알면 ReplaceAll로 바로 만듦).
+        Equal(false, index.UpdateRebuilds(1, 1));
+        Equal(true, index.UpdateRebuilds(0, bulk.Length));
         index.Update(Array.Empty<SourceSymbolLocation>(), bulk);
         Equal(60_002, index.Count);
         Equal(1, index.Find("Bulk7").Count);

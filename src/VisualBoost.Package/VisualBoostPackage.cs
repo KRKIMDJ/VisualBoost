@@ -57,6 +57,8 @@ public sealed class VisualBoostPackage : AsyncPackage
     private DocumentEvents? documentEvents;
     private ProjectItemsEvents? projectItemsEvents;
     private CancellationTokenSource? discoveryCancellation;
+    // 마지막으로 시작한 프로젝트 항목 수집입니다. 인덱스 다시 만들기가 취소한 수집의 끝(프로젝트 소속 저장)을 기다릴 때 씁니다. UI thread에서만 씁니다.
+    private JoinableTask? discoveryWork;
     private AnalysisStatusBar? analysisStatus;
 
     protected override async Task InitializeAsync(
@@ -288,7 +290,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         var cancellation = new CancellationTokenSource();
         discoveryCancellation = cancellation;
         if (!refresh) fileIndex.BeginDiscovery(dte.Solution.FullName ?? string.Empty);
-        JoinableTaskFactory.RunAsync(async () =>
+        var work = JoinableTaskFactory.RunAsync(async () =>
         {
             try
             {
@@ -313,8 +315,13 @@ public sealed class VisualBoostPackage : AsyncPackage
                 if (ReferenceEquals(discoveryCancellation, cancellation)) discoveryCancellation = null;
                 cancellation.Dispose();
             }
-        }).FileAndForget("VisualBoost/CollectProjectFiles");
+        });
+        discoveryWork = work;
+        work.FileAndForget("VisualBoost/CollectProjectFiles");
     }
+
+    // 다시 만들기가 취소한 수집이 끝나기를 기다리는 상한입니다. 수집은 프로젝트·묶음마다 취소를 확인하므로 보통 곧 끝납니다.
+    private static readonly TimeSpan DiscoveryStopTimeout = TimeSpan.FromSeconds(5);
 
     /// <summary>
     /// 인덱스 다시 만들기: 현재 Solution의 저장된 프로젝트 항목·파일 목록·이름 분석을 지우고 처음 열 때처럼 다시 수집·분석합니다. clangd 색인은
@@ -327,7 +334,11 @@ public sealed class VisualBoostPackage : AsyncPackage
         var solution = dte?.Solution?.FullName;
         if (dte is null || string.IsNullOrEmpty(solution)) return true;
         discoveryCancellation?.Cancel();
+        var collecting = discoveryWork;
         await TaskScheduler.Default;
+        // 취소한 수집이 마지막 묶음에서 프로젝트 소속을 저장하는 중이면 아래에서 지운 파일을 되살리므로 끝나기를 기다립니다(2026-10-10 검토 91).
+        // 수집의 끝은 UI thread로 돌아가므로 join해 기다립니다.
+        if (collecting is not null) await Task.WhenAny(collecting.JoinAsync(), Task.Delay(DiscoveryStopTimeout)).ConfigureAwait(false);
         var deleted = await fileIndex.ResetAsync().ConfigureAwait(false);
         deleted = projectMembership.Delete(solution!) && deleted;
         await JoinableTaskFactory.SwitchToMainThreadAsync(DisposalToken);

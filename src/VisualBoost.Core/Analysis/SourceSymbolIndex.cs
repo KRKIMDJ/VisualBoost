@@ -140,13 +140,20 @@ public sealed class SourceSymbolIndex : IDisposable
         if (removed is null) throw new ArgumentNullException(nameof(removed));
         if (added is null) throw new ArgumentNullException(nameof(added));
         if (removed.Count == 0 && added.Count == 0) return;
-        bool rebuild;
-        gate.EnterReadLock();
-        try { rebuild = hidden.Count + additions.Sum(part => part.Items.Length) + removed.Count + added.Count > Math.Max(CompactionMinimum, baseCount / 8); }
-        finally { gate.ExitReadLock(); }
         // 변경을 추가 묶음으로 공개한 뒤 다시 만들면 큰 변경(다시 열 때 바뀐 파일이 많음)에서 같은 위치를 두 번 정리합니다.
-        if (rebuild) Rebuild(removed, added, token);
+        if (UpdateRebuilds(removed.Count, added.Count)) Rebuild(removed, added, token);
         else Publish(added.ToArray(), removed, refreshCompletion: true, token);
+    }
+
+    /// <summary>
+    /// 이만큼 숨기고 더하면 <see cref="Update"/>가 고치지 않고 다시 만드는지입니다. 바뀐 뒤의 전체를 이미 아는 호출자는 그때 변경 목록을
+    /// 만들지 않고 <see cref="ReplaceAll"/>을 바로 부릅니다. 다시 만들기는 숨길 위치 전체를 집합으로 모아 지금 위치를 거르므로 더 듭니다.
+    /// </summary>
+    public bool UpdateRebuilds(int removedCount, int addedCount)
+    {
+        gate.EnterReadLock();
+        try { return hidden.Count + additions.Sum(part => part.Items.Length) + removedCount + addedCount > Math.Max(CompactionMinimum, baseCount / 8); }
+        finally { gate.ExitReadLock(); }
     }
 
     private void Rebuild(IReadOnlyCollection<SourceSymbolLocation> removed, IReadOnlyCollection<SourceSymbolLocation> added, CancellationToken token)

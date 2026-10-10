@@ -51,6 +51,8 @@ internal sealed class SourceAnalysisCache
             var entries = new Dictionary<string, CachedSourceAnalysis>(count, StringComparer.OrdinalIgnoreCase);
             // 읽는 동안만 쓰는 풀입니다. 같은 이름·소속·시그니처를 한 인스턴스로 모읍니다.
             var pool = new StringPool();
+            // 버린 include 목록이 있었습니다. 같은 v6 형식이라도 다시 저장해, 다음 열기부터 읽고 버리는 비용을 없앱니다(2026-10-10 검토 88).
+            var hadIncludes = false;
             for (var fileIndex = 0; fileIndex < count; fileIndex++)
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -61,6 +63,7 @@ internal sealed class SourceAnalysisCache
                 var ticks = reader.ReadInt64();
                 // include 목록은 더 보관하지 않습니다(SolutionSourceAnalyzer.Entry). 예전에 저장한 목록은 읽고 버리며 다음 저장에서 빠집니다.
                 var includeCount = ReadCount(reader, MaximumItemsPerFile);
+                hadIncludes |= includeCount > 0;
                 for (var includeIndex = 0; includeIndex < includeCount; includeIndex++)
                 {
                     cancellationToken.ThrowIfCancellationRequested();
@@ -91,7 +94,7 @@ internal sealed class SourceAnalysisCache
             }
 
             cancellationToken.ThrowIfCancellationRequested();
-            NeedsUpgrade = version != Version;
+            NeedsUpgrade = version != Version || hadIncludes;
             return entries;
         }
         catch (Exception exception) when (

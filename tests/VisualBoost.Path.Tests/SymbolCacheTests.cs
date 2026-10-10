@@ -57,8 +57,8 @@ internal static class SymbolCacheTests
 
     private static void VerifyLegacyVersions(SourceAnalysisCache cache, string solution, string path, string file)
     {
-        // 두 파일과 여러 심볼을 연속 기록하여 폐기 필드의 읽기 위치까지 검증합니다.
-        foreach (var version in new[] { 3, 4, 5 })
+        // 두 파일과 여러 심볼을 연속 기록하여 폐기 필드의 읽기 위치까지 검증합니다. include 목록을 담은 예전 v6도 다시 저장합니다.
+        foreach (var version in new[] { 3, 4, 5, 6 })
         {
             using (var writer = new BinaryWriter(File.Create(file), Encoding.UTF8))
             {
@@ -74,7 +74,7 @@ internal static class SymbolCacheTests
                     {
                         writer.Write(name); writer.Write(4); writer.Write(10);
                         writer.Write((int)SourceSymbolKind.Function); writer.Write("Game::Actor"); writer.Write("(float distance)");
-                        if (version >= 4) writer.Write(2);
+                        if (version == 4 || version == 5) writer.Write(2);
                     }
                 }
             }

@@ -272,10 +272,12 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         }
         lock (gate)
         {
+            // Solution을 닫아 지난 분석을 놓은 뒤(Clear·ReleasePreviousAnalysis)에 끝난 패스가 그 결과를 다시 붙잡지 않게 먼저 봅니다
+            // (2026-10-10 검토 90). 저장은 끝났으므로 같은 Solution이면 다음 패스가 파일에서 읽습니다.
+            cancellationToken.ThrowIfCancellationRequested();
             cachedSolution = solutionPath;
             loadedCache = current;
             unsavedUpdates = false;
-            cancellationToken.ThrowIfCancellationRequested();
             completedSolution = solutionPath;
         }
     }
@@ -462,20 +464,36 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
         if (before is null) symbols.ReplaceAll(target.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
         else
         {
-            var removed = new List<SourceSymbolLocation>();
-            var added = new List<SourceSymbolLocation>();
+            var removedFiles = new List<CachedSourceAnalysis>();
+            var addedFiles = new List<CachedSourceAnalysis>();
+            var removedCount = 0;
+            var addedCount = 0;
             foreach (var pair in before)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!target.TryGetValue(pair.Key, out var now) || !ReferenceEquals(now, pair.Value)) removed.AddRange(pair.Value.Analysis.Symbols);
+                if (target.TryGetValue(pair.Key, out var now) && ReferenceEquals(now, pair.Value)) continue;
+                removedFiles.Add(pair.Value);
+                removedCount += pair.Value.Analysis.Symbols.Count;
             }
             foreach (var pair in target)
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                if (!before.TryGetValue(pair.Key, out var old) || !ReferenceEquals(old, pair.Value)) added.AddRange(pair.Value.Analysis.Symbols);
+                if (before.TryGetValue(pair.Key, out var old) && ReferenceEquals(old, pair.Value)) continue;
+                addedFiles.Add(pair.Value);
+                addedCount += pair.Value.Analysis.Symbols.Count;
             }
             // 다시 만들 수도 있으므로(엔진 규모 약 6초) 잠금 밖에서 합니다. Solution을 닫는 Clear는 이 잠금을 기다리지 않고 취소로 막습니다.
-            symbols.Update(removed, added, cancellationToken);
+            // 이름 인덱스가 어차피 다시 만들 만큼 바뀌었으면 숨길 위치를 모아 거르지 않고 공개할 전체로 바로 만듭니다(2026-10-10 검토 89).
+            // 공개 내용은 before와 같으므로(이 메서드만 바꾸고 기록함) 결과도 같습니다.
+            if (symbols.UpdateRebuilds(removedCount, addedCount))
+            {
+                symbols.ReplaceAll(target.Values.SelectMany(entry => entry.Analysis.Symbols), cancellationToken);
+            }
+            else
+            {
+                symbols.Update(removedFiles.SelectMany(entry => entry.Analysis.Symbols).ToArray(),
+                    addedFiles.SelectMany(entry => entry.Analysis.Symbols).ToArray(), cancellationToken);
+            }
         }
         // 이름 인덱스를 바꾼 뒤에는 호출자가 취소돼도 공개 내용을 기록해야 다음 비교가 맞습니다(이름 인덱스는 취소하면 아무것도 바꾸지 않음).
         // 그 사이 Clear가 비웠으면 기록하지 않습니다.
@@ -489,12 +507,20 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
 
     private IReadOnlyDictionary<string, CachedSourceAnalysis> LoadPrevious(string solutionPath, CancellationToken cancellationToken)
     {
-        // 동일 분석 패스의 선공개와 본 분석에서 큰 캐시 파일을 두 번 역직렬화하지 않습니다.
-        if (loadedCache is not null && string.Equals(cachedSolution, solutionPath, StringComparison.OrdinalIgnoreCase))
-            return loadedCache;
-        loadedCache = cache.Load(solutionPath, cancellationToken);
-        cachedSolution = solutionPath;
-        return loadedCache;
+        // 동일 분석 패스의 선공개와 본 분석에서 큰 캐시 파일을 두 번 역직렬화하지 않습니다. Solution 닫기(ReleasePreviousAnalysis)가 다른 스레드에서
+        // 놓으므로 확인과 읽기를 한 잠금에서 하고, 닫은 뒤 끝난 읽기는 기록하지 않습니다(2026-10-10 검토 90).
+        lock (gate)
+        {
+            if (loadedCache is not null && string.Equals(cachedSolution, solutionPath, StringComparison.OrdinalIgnoreCase)) return loadedCache;
+        }
+        var loaded = cache.Load(solutionPath, cancellationToken);
+        lock (gate)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            loadedCache = loaded;
+            cachedSolution = solutionPath;
+        }
+        return loaded;
     }
 
     /// <summary>
