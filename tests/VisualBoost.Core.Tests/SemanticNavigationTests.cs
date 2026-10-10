@@ -398,6 +398,12 @@ internal static class SemanticNavigationTests
                 "파일별 색인 참조");
             File.SetLastWriteTimeUtc(source, DateTime.UtcNow.AddMinutes(5));
             Check(shards.ReferencesIn(source) is null, "원본이 더 새로우면 읽지 않음");
+            // 다른 형식 버전의 색인 파일을 읽으면 진단 기록용 표시를 남깁니다(2026-10-10 검토 85).
+            Check(!shards.FormatVersionMismatch, "같은 형식 버전만 읽었으면 표시하지 않음");
+            File.WriteAllBytes(Path.Combine(index, "Use.cpp.FEDCBA9876543210.idx"),
+                IndexShard(ClangdIndexShards.FormatVersion + 1, DocumentUri.FromPath(other), false, references[2]));
+            File.SetLastWriteTimeUtc(Path.Combine(index, "Use.cpp.FEDCBA9876543210.idx"), DateTime.UtcNow.AddMinutes(10));
+            Check(shards.ReferencesIn(other) is null && shards.FormatVersionMismatch, "다른 형식 버전을 읽으면 표시");
 
             // 색인 실패 신호: 파일 목록(srcs)의 TU·오류 플래그를 형식 버전 번호와 무관하게 구조로 읽습니다.
             var unitPath = Path.Combine(root, "units", "Module.Game.1.cpp");
@@ -2358,6 +2364,20 @@ internal static class SemanticNavigationTests
                 new NavigationLocation(Path.Combine(root, "missing.cpp"), 0, 0, 0, 1)
             }, path => path == open ? "  edited  \nx" : null, maxLength: 8);
             Check(lines.SequenceEqual(new[] { "second 한…", "edited", "", "" }), "디스크·편집기 내용, BOM, 범위 밖: " + string.Join("|", lines));
+
+            // 저장하지 않은 편집 판정은 편집기처럼 읽은 디스크 글과 비교합니다. BOM 없는 CP949 문서도 같으면 같다고 봅니다(2026-10-10 검토 84).
+            Encoding.RegisterProvider(CodePagesEncodingProvider.Instance);
+            var cp949 = Encoding.GetEncoding(949);
+            var legacy = Path.Combine(root, "legacy.cpp");
+            var legacyText = "// 한글 주석\r\nint Value;\r\n";
+            File.WriteAllBytes(legacy, cp949.GetBytes(legacyText));
+            var utf8 = Path.Combine(root, "utf8.cpp");
+            File.WriteAllText(utf8, legacyText, new UTF8Encoding(false));
+            Check(SourceLinePreview.SameAsDisk(legacyText, legacy, cp949) && !SourceLinePreview.SameAsDisk(legacyText + " ", legacy, cp949) &&
+                  SourceLinePreview.SameAsDisk(legacyText, utf8, cp949) && !SourceLinePreview.SameAsDisk("// 다른 글", utf8, cp949) &&
+                  SourceLinePreview.SameAsDisk("first\r\n\tsecond 한글\r\nthird", disk, cp949) &&
+                  !SourceLinePreview.SameAsDisk(legacyText, Path.Combine(root, "missing.cpp"), cp949),
+                "디스크 글 비교(UTF-8·BOM·BOM 없는 CP949·없는 파일)");
 
             Check(DefinitionCandidates.LooksLikeTypeOrMacro("class COREUOBJECT_API UPackage : public UObject") &&
                   DefinitionCandidates.LooksLikeTypeOrMacro("template <typename T> struct TArray") &&

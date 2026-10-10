@@ -4,6 +4,7 @@ using System.IO;
 using System.IO.Compression;
 using System.Linq;
 using System.Text;
+using System.Threading;
 
 namespace VisualBoost.Core.SemanticNavigation;
 
@@ -102,11 +103,18 @@ public sealed class ClangdIndexShards
     private readonly Dictionary<string, ShardContent> cache = new(StringComparer.OrdinalIgnoreCase);
     private Dictionary<string, List<string>>? shardsByName;
     private DateTime listedUtc;
+    private int versionMismatch;
 
     public ClangdIndexShards(string indexDirectory)
     {
         directory = indexDirectory;
     }
+
+    /// <summary>
+    /// 형식 버전이 <see cref="FormatVersion"/>과 다른 색인 파일을 읽었습니다. 그동안 색인 파일로 정의를 바로 찾거나 참조를 거르지 못하고
+    /// clangd에 묻습니다. clangd가 바뀌었을 수 있어 호출자가 진단 기록으로 알립니다(2026-10-10 검토 85).
+    /// </summary>
+    public bool FormatVersionMismatch => Volatile.Read(ref versionMismatch) != 0;
 
     /// <summary>
     /// 그 파일의 색인 파일에 있는 참조입니다. 색인 파일이 없거나, 원본보다 오래되었거나, 형식을 읽지 못하면 null입니다.
@@ -236,6 +244,7 @@ public sealed class ClangdIndexShards
             try
             {
                 references = Parse(data);
+                if (references is null) Volatile.Write(ref versionMismatch, 1);
             }
             catch (InvalidDataException)
             {

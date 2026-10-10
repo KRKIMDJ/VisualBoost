@@ -125,6 +125,8 @@ internal sealed class SemanticNavigationService : IDisposable
     // 색인 로그를 읽지 못한다고 이미 알린 탐색기입니다.
     private ClangdNavigator? warnedLogFormat;
     private ClangdNavigator? warnedShardFormat;
+    private ClangdNavigator? warnedShardVersion;
+    private ClangdNavigator? warnedLogLines;
     // 요청이 탐색기를 받아 간 마지막 시각입니다. 받아 간 뒤 탐색기에 요청을 등록하기 전의 틈에 메모리 정리가 끼지 않게 합니다.
     private DateTime lastAcquireUtc;
     private int disposed;
@@ -710,6 +712,20 @@ internal sealed class SemanticNavigationService : IDisposable
             ActivityLog.LogWarning("VisualBoost/SemanticNavigation",
                 "clangd 색인 파일의 파일 목록을 읽지 못해 색인 완료·실패를 clangd 로그 줄로만 판단합니다. clangd 색인 형식이 바뀌었을 수 있습니다. clangd: " +
                 clangdPath);
+        }
+
+        if (current.IndexShardVersionUnsupported && !ReferenceEquals(Interlocked.Exchange(ref warnedShardVersion, current), current))
+        {
+            ActivityLog.LogWarning("VisualBoost/SemanticNavigation",
+                $"clangd 색인 파일 형식 버전이 읽을 수 있는 버전({ClangdIndexShards.FormatVersion})과 달라 색인 파일로 정의를 바로 찾거나 참조를 거르지 않고 " +
+                "clangd에 묻습니다. clangd가 바뀌었을 수 있습니다. clangd: " + clangdPath);
+        }
+
+        if (current.IndexLogLinesUnreadable && !ReferenceEquals(Interlocked.Exchange(ref warnedLogLines, current), current))
+        {
+            ActivityLog.LogWarning("VisualBoost/SemanticNavigation",
+                "clangd 로그 줄에서 색인 완료를 읽지 못해 색인 파일로만 판단합니다. 헤더만 바뀌어 다시 색인한 소스의 분석 오류는 알아채지 못할 수 있습니다. " +
+                "clangd 로그 형식이 바뀌었을 수 있습니다. clangd: " + clangdPath);
         }
 
         string message;

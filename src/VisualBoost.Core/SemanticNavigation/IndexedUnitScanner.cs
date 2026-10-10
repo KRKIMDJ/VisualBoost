@@ -11,8 +11,10 @@ namespace VisualBoost.Core.SemanticNavigation;
 /// <remarks>
 /// clangd 로그 문구(<c>Indexed …</c>, <c>Failed to compile …</c>)는 버전 표시 없이 바뀔 수 있어, clangd가 TU를 색인한 뒤 쓰는 그 소스의
 /// 색인 파일을 신호로 씁니다(<see cref="ClangdIndexShards.TranslationUnitOf"/>). 색인 파일은 소스마다 하나(<c>이름.해시.idx</c>)이고 clangd는
-/// 바뀐 TU만 다시 색인해 다시 씁니다. 소스 확장자의 색인 파일만 읽어 헤더 색인 파일(수천 개)은 열지 않습니다. 폴더 열거는 실제 Unreal 프로젝트
-/// 캐시(색인 파일 6,267개)에서 1회 약 6 ms였습니다(2026-10-09).
+/// TU를 다시 색인해도 내용이 바뀐 파일의 색인 파일만 다시 씁니다. 그래서 헤더나 unity 묶음의 구성원 cpp만 바뀌어 다시 색인한 TU는 소스 색인
+/// 파일이 다시 쓰이지 않아 이 신호로 보이지 않고 로그 줄로만 알 수 있습니다(로그 줄을 읽지 못하면
+/// <see cref="ClangdNavigator.IndexLogLinesUnreadable"/>). 소스 확장자의 색인 파일만 읽어 헤더 색인 파일(수천 개)은 열지 않습니다. 폴더 열거는
+/// 실제 Unreal 프로젝트 캐시(색인 파일 6,267개)에서 1회 약 6 ms였습니다(2026-10-09).
 /// </remarks>
 public sealed class IndexedUnitScanner
 {

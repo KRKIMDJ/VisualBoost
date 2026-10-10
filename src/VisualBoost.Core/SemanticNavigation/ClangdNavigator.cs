@@ -265,6 +265,10 @@ public sealed class ClangdNavigator : IDisposable
     private int indexedSignalSeen;
     private int logFormatChecking;
     private int logFormatUnreadable;
+    // 로그 줄과 색인 파일이 알린 TU 색인 완료 수, 색인 파일로만 완료를 알고 로그 줄은 하나도 읽지 못했다고 판단했는지입니다.
+    private int logUnitSignals;
+    private int shardUnitSignals;
+    private int logLinesUnreadable;
     // 색인 파일로 TU 색인 완료·실패를 알아냅니다(clangd 로그 문구에 기대지 않는 주 신호). unitScanGate로 한 번에 하나만 훑습니다.
     private readonly IndexedUnitScanner unitScanner;
     private readonly object unitScanGate = new();
@@ -322,7 +326,14 @@ public sealed class ClangdNavigator : IDisposable
             session.DiagnosticsPublished += OnDiagnostics;
         }
 
-        if (options.IndexLogSignals) session.TranslationUnitIndexed += path => OnUnitIndexed(path, failed: false);
+        if (options.IndexLogSignals)
+        {
+            session.TranslationUnitIndexed += path =>
+            {
+                Interlocked.Increment(ref logUnitSignals);
+                OnUnitIndexed(path, failed: false);
+            };
+        }
 
         session.Exited += _ =>
         {
@@ -429,6 +440,15 @@ public sealed class ClangdNavigator : IDisposable
     /// 판단합니다(<see cref="IndexSignalsUnreadable"/>가 거짓이면 판단은 계속됨).
     /// </summary>
     public bool IndexShardFormatUnreadable => unitScanner.FormatUnreadable;
+
+    /// <summary>
+    /// 색인 파일로 이 세션의 TU 색인 완료를 여럿 알았는데 clangd 로그 줄로는 하나도 알지 못했습니다. clangd 로그 형식이 바뀌었을 수 있으며,
+    /// 헤더만 바뀌어 다시 색인한 TU의 분석 오류는 알아채지 못합니다(색인 파일을 다시 쓰지 않음).
+    /// </summary>
+    public bool IndexLogLinesUnreadable => Volatile.Read(ref logLinesUnreadable) != 0;
+
+    /// <summary>색인 파일 형식 버전이 달라 색인 파일 지름길과 참조 거르기를 쓰지 못합니다(<see cref="ClangdIndexShards.FormatVersionMismatch"/>).</summary>
+    public bool IndexShardVersionUnsupported => shards.FormatVersionMismatch;
 
     public string LogPath => Path.Combine(Context.Directory, "clangd.log");
 
@@ -1851,7 +1871,7 @@ public sealed class ClangdNavigator : IDisposable
     private void RememberSupplements(DocumentSupplementStore store, string path, IReadOnlyList<string> headers)
     {
         var sent = documents.SentText(path);
-        if (sent is null || !string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) return;
+        if (sent is null || !SourceLinePreview.SameAsDisk(sent, path)) return;
         store.Record(path, headers);
     }
 
@@ -1862,7 +1882,7 @@ public sealed class ClangdNavigator : IDisposable
     private void RememberPch(DocumentSupplementStore store, UnrealIndexPlan plan, string path)
     {
         var sent = documents.SentText(path);
-        if (sent is not null && string.Equals(sent, SourceLinePreview.ReadText(path), StringComparison.Ordinal)) store.RecordPch(path, plan.DocumentStamp(path));
+        if (sent is not null && SourceLinePreview.SameAsDisk(sent, path)) store.RecordPch(path, plan.DocumentStamp(path));
         else store.Forget(path);
     }
 
@@ -2095,9 +2115,13 @@ public sealed class ClangdNavigator : IDisposable
             var path = Context.Paths.ToGiven(unit.Path);
             // 로그와 같은 순서(실패 줄 뒤 완료 줄)로 처리합니다.
             if (unit.HadErrors) OnUnitIndexed(path, failed: true);
+            Interlocked.Increment(ref shardUnitSignals);
             OnUnitIndexed(path, failed: false);
         }
     }
+
+    /// <summary>로그 줄 판단을 내리는 데 필요한, 색인 파일로 안 이 세션의 TU 색인 완료 수입니다.</summary>
+    private const int LogLineCheckUnits = 3;
 
     private void OnIndexFailed(string translationUnit)
     {
@@ -2239,7 +2263,19 @@ public sealed class ClangdNavigator : IDisposable
             if (!IndexWrittenSince(Path.Combine(Context.Directory, ".cache", "clangd", "index"), StartedUtc)) return;
             concluded = true;
             ScanIndexedUnits();
-            if (Volatile.Read(ref indexedSignalSeen) != 0) return;
+            if (Volatile.Read(ref indexedSignalSeen) != 0)
+            {
+                // 색인 파일은 읽지만 로그 줄은 하나도 읽지 못했습니다. 헤더만 바뀌어 다시 색인한 TU는 소스 색인 파일을 다시 쓰지 않아 로그 줄로만
+                // 알 수 있으므로 그 실패는 놓칩니다. 몇 개는 우연일 수 있어 여러 TU를 본 뒤에만 판단합니다(2026-10-10 검토 86).
+                if (options.IndexLogSignals && Volatile.Read(ref shardUnitSignals) >= LogLineCheckUnits && Volatile.Read(ref logUnitSignals) == 0)
+                {
+                    Volatile.Write(ref logLinesUnreadable, 1);
+                    Changed?.Invoke();
+                }
+
+                return;
+            }
+
             Volatile.Write(ref logFormatUnreadable, 1);
             Changed?.Invoke();
         }
@@ -2411,7 +2447,7 @@ public sealed class ClangdNavigator : IDisposable
     public IReadOnlyList<NavigationLocation>? IndexFileDefinition(NavigationQuery query)
     {
         var text = query.Document.Text;
-        if (!string.Equals(SourceLinePreview.ReadText(query.Path), text, StringComparison.Ordinal)) return null;
+        if (!SourceLinePreview.SameAsDisk(text, query.Path)) return null;
         if (IndexedDefinitions.IdentifierSpanAt(SourceLinePreview.LineAt(text, query.Line), query.Character) is not { } at ||
             shards.CurrentFile(Context.Paths.ToReal(query.Path)) is not { HadErrors: false } own)
         {

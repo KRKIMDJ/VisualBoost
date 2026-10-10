@@ -58,6 +58,34 @@ public static class SourceLinePreview
         }
     }
 
+    /// <summary>
+    /// 편집기 글이 디스크 내용과 같은지(저장하지 않은 편집이 없는지) 봅니다. 디스크는 편집기처럼 BOM을 따르고, 없으면 UTF-8로 읽되 UTF-8이
+    /// 아니면 <paramref name="fallback"/>(기본은 시스템 ANSI 코드 페이지)으로 읽습니다. <see cref="ReadText"/>만으로 비교하면 BOM 없는 CP949
+    /// 문서는 디스크 글이 U+FFFD로 바뀌어 늘 달라, 그 문서의 보충·PCH 기억과 색인 파일 지름길이 꺼졌습니다(2026-10-10 검토 84).
+    /// </summary>
+    public static bool SameAsDisk(string text, string path, Encoding? fallback = null)
+    {
+        var disk = ReadText(path);
+        if (disk is null) return false;
+        if (string.Equals(disk, text, StringComparison.Ordinal)) return true;
+        // UTF-8로 읽지 못한 바이트가 없었으면 다른 해석은 없습니다. 흔한 경우는 파일을 다시 읽지 않습니다.
+        if (disk.IndexOf('\uFFFD') < 0) return false;
+        try
+        {
+            var bytes = File.ReadAllBytes(path);
+            if (HasByteOrderMark(bytes)) return false;
+            return string.Equals((fallback ?? Encoding.Default).GetString(bytes), text, StringComparison.Ordinal);
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
+
+    private static bool HasByteOrderMark(byte[] bytes) =>
+        bytes.Length >= 3 && bytes[0] == 0xEF && bytes[1] == 0xBB && bytes[2] == 0xBF ||
+        bytes.Length >= 2 && (bytes[0] == 0xFF && bytes[1] == 0xFE || bytes[0] == 0xFE && bytes[1] == 0xFF);
+
     public static string LineAt(string text, int line)
     {
         var lines = SplitLines(text);
