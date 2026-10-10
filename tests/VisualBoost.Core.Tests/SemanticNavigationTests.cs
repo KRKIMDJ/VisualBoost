@@ -2358,8 +2358,10 @@ internal static class SemanticNavigationTests
             Check(DefinitionCandidates.ParameterCount("Save(UPackage* InOuter, const TCHAR* Name = TEXT(\"a,b\"), TMap<int, FString> Map = {});") == 3 &&
                   DefinitionCandidates.ParameterCount("Tick( )") == 0 && DefinitionCandidates.ParameterCount("Tick(void) const") == 0 &&
                   DefinitionCandidates.ParameterCount("Run(TFunction<void(int, int)> Callback, int32 (&Values)[2, 3])") == 2 &&
-                  DefinitionCandidates.ParameterCount("Open(int A,") is null && DefinitionCandidates.ParameterCount("NoParen") is null,
-                "매개변수 수: 기본값·템플릿·안쪽 괄호의 쉼표 제외, 빈 목록·void, 닫히지 않은 목록");
+                  DefinitionCandidates.ParameterCount("Open(int A,") is null && DefinitionCandidates.ParameterCount("NoParen") is null &&
+                  DefinitionCandidates.ParameterCount("SetMask(uint32 Mask = 1 << 4, bool bApply = true, int32 Max = Limit <= 2)") == 3 &&
+                  DefinitionCandidates.ParameterCount("Cmp(bool bLess = A < B, int32 C)") is null,
+                "매개변수 수: 기본값·템플릿·안쪽 괄호의 쉼표 제외, 빈 목록·void, 닫히지 않은 목록, 시프트·비교 연산 기본값(짝 없는 <는 모름)");
             Check(DefinitionCandidates.SameOwner("UE::Private::FImpl", "FImpl") && DefinitionCandidates.SameOwner("FImpl", "UE::Private::FImpl::") &&
                   DefinitionCandidates.SameOwner("", "") && !DefinitionCandidates.SameOwner("A::FImpl", "B::FImpl") &&
                   !DefinitionCandidates.SameOwner("FImpl", "XFImpl") && !DefinitionCandidates.SameOwner("FImpl", ""),
@@ -2392,10 +2394,13 @@ internal static class SemanticNavigationTests
             Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta);", Read) is { Line: 2 } &&
                   DefinitionCandidates.UniqueDefinition("Tick", "UWorld::", worldHeader, definitions, null, Read) is null,
                 "소속까지 같은 소스 정의 하나만 씀(헤더·변수·다른 네임스페이스 제외), 줄여 쓴 소속이 여럿과 맞으면 쓰지 않음");
-            Check(DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(int A, int B = 0) const;", Read) is { Line: 8 } &&
+            Check(DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(int A, int B = 0);", Read) is { Line: 8 } &&
+                  DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(int A, int B = 0) const;", Read) is null &&
                   DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, null, Read) is null &&
                   DefinitionCandidates.UniqueDefinition("Load", "UWorld::", worldHeader, definitions, "Load(", Read) is null,
-                "오버로드는 매개변수 수로 좁히고, 모르면 쓰지 않음");
+                "오버로드는 매개변수 수로 좁히고 남은 하나도 형식·const가 맞아야 씀, 선언을 모르면 쓰지 않음");
+            Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta, bool bForce);", Read) is null,
+                "후보가 하나여도 정의 파일의 현재 매개변수 수가 선언과 다르면 쓰지 않음(저장된 분석 공개 직후 새로 생긴 오버로드)");
             Check(DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(const FString&Path = TEXT(\"/Game,x\"));", Read) is { Line: 17 } &&
                   DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(FStringView);", Read) is { Line: 14 } &&
                   DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(TStringView<TCHAR> InPath);", Read) is null &&
@@ -2408,9 +2413,44 @@ internal static class SemanticNavigationTests
             Check(DefinitionCandidates.UniqueDefinition("Helper", string.Empty, worldHeader, definitions, "Helper();", Read) is { Line: 11 } &&
                   DefinitionCandidates.UniqueDefinition("Stray", string.Empty, worldHeader, definitions, "Stray();", Read) is null,
                 "소속 없는 함수는 선언 헤더를 include하는 파일의 정의만 씀");
+            // 정의 파일의 현재 글로 매개변수를 읽습니다: 여러 줄 정의의 줄 주석, cpp 안의 전방 선언, include 경로 끝 비교(2026-10-10 검토 72·73).
+            var targetCpp = Path.Combine(engine, "Private", "Target.cpp");
+            var forwardCpp = Path.Combine(engine, "Private", "Forward.cpp");
+            var foreignCpp = Path.Combine(root, "Plugin", "Private", "Foreign.cpp");
+            texts[targetCpp] = "#include \"Engine/World.h\"\nvoid UWorld::SetTarget(const FString& InName, // 표시 이름, 쉼표\n    int32 InCount)\n{\n}\n" +
+                               "void UWorld::SetTarget(FName InName, int32 InCount)\n{\n}\nvoid UWorld::SetMask(FName InName)\n{\n}\n" +
+                               "void UWorld::SetMask(uint32 Mask, bool bApply)\n{\n}\n";
+            texts[forwardCpp] = "#include \"Engine/World.h\"\nvoid Bar(int);\nvoid Bar(int X)\n{\n}\nextern ENGINE_API void Baz(int);\nUWorld::UWorld() = default;\n";
+            texts[foreignCpp] = "#include \"Other/World.h\"\nvoid Qux()\n{\n}\n";
+            var current = new[]
+            {
+                new SourceSymbolLocation("SetTarget", targetCpp, 2, 14, SourceSymbolKind.Function, "UWorld", "(const FString& InName, //"),
+                new SourceSymbolLocation("SetTarget", targetCpp, 6, 14, SourceSymbolKind.Function, "UWorld", "(FName InName, int32 InCount)"),
+                new SourceSymbolLocation("SetMask", targetCpp, 9, 14, SourceSymbolKind.Function, "UWorld", "(FName InName)"),
+                new SourceSymbolLocation("SetMask", targetCpp, 12, 14, SourceSymbolKind.Function, "UWorld", "(uint32 Mask, bool bApply)"),
+                new SourceSymbolLocation("Bar", forwardCpp, 2, 6, SourceSymbolKind.Function, string.Empty, "(int);"),
+                new SourceSymbolLocation("Bar", forwardCpp, 3, 6, SourceSymbolKind.Function, string.Empty, "(int X)"),
+                new SourceSymbolLocation("Baz", forwardCpp, 6, 24, SourceSymbolKind.Function, string.Empty, "(int);"),
+                new SourceSymbolLocation("UWorld", forwardCpp, 7, 9, SourceSymbolKind.Function, "UWorld", "() = default;"),
+                new SourceSymbolLocation("Qux", foreignCpp, 2, 6, SourceSymbolKind.Function, string.Empty, "()"),
+            };
+            Check(DefinitionCandidates.UniqueDefinition("SetTarget", "UWorld::", worldHeader, current, "SetTarget(const FString& InName, int32 InCount);", Read) is { Line: 2 } &&
+                  DefinitionCandidates.UniqueDefinition("SetTarget", "UWorld::", worldHeader, current, "SetTarget(FName, int32);", Read) is { Line: 6 } &&
+                  DefinitionCandidates.UniqueDefinition("SetMask", "UWorld::", worldHeader, current, "SetMask(uint32 Mask = 1 << 4, bool bApply = true);", Read) is { Line: 12 },
+                "여러 줄 정의의 줄 주석과 시프트 기본값에서도 매개변수를 바르게 세어 오버로드를 좁힘");
+            Check(DefinitionCandidates.UniqueDefinition("Bar", string.Empty, worldHeader, current, "Bar(int);", Read) is { Line: 3 } &&
+                  DefinitionCandidates.UniqueDefinition("Baz", string.Empty, worldHeader, current, "Baz(int);", Read) is null &&
+                  DefinitionCandidates.UniqueDefinition("UWorld", "UWorld::", worldHeader, current, "UWorld();", Read) is null,
+                "cpp 안의 전방 선언·= default 선언은 정의로 보지 않음(정의가 있으면 정의, 없으면 쓰지 않음)");
+            Check(DefinitionCandidates.UniqueDefinition("Qux", string.Empty, worldHeader, current, "Qux();", Read) is null,
+                "소속 없는 함수는 include 경로 끝이 선언 헤더와 맞아야 씀(같은 이름 다른 폴더 헤더 제외)");
+            texts[targetCpp] = texts[targetCpp].Replace("void UWorld::SetTarget(FName InName, int32 InCount)", "void UWorld::SetTarget(FName InName, int32 InCount, bool bNew)");
+            Check(DefinitionCandidates.UniqueDefinition("SetTarget", "UWorld::", worldHeader, current, "SetTarget(FName, int32);", Read) is null,
+                "색인 뒤 정의의 매개변수가 바뀌었으면 옛 시그니처로 고르지 않음");
+
             texts[worldCpp] = "#include \"Engine/World.h\"\n\nvoid UWorld::Tick(float Delta)\n{\n}\n";
-            Check(DefinitionCandidates.UniqueDefinition("Tick", "UWorld::", worldHeader, definitions, null, Read) is null &&
-                  DefinitionCandidates.UniqueDefinition("Tick", "UWorld::", worldHeader, definitions, null, _ => null) is null,
+            Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta);", Read) is null &&
+                  DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta);", _ => null) is null,
                 "색인 뒤 줄이 바뀌었거나 파일을 읽지 못하면 쓰지 않음");
         }
         finally

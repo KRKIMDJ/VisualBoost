@@ -2299,9 +2299,12 @@ public sealed class ClangdNavigator : IDisposable
             return null;
         }
 
-        var text = SourceLinePreview.ReadText(declaration.Path);
+        // 열린 문서는 clangd에 보낸 글(저장하지 않은 편집 포함)로 읽습니다. clangd가 알려 준 선언 줄과 맞고, 편집기에 보이는 정의 자리를
+        // 확인합니다. 디스크 글로 읽으면 선언 위에 줄을 넣고 저장하지 않았을 때 이웃 오버로드로 좁혔습니다(2026-10-10 검토 83).
+        string? Current(string path) => documents.SentText(path) ?? SourceLinePreview.ReadText(path);
+        var text = Current(declaration.Path);
         var found = DefinitionCandidates.UniqueDefinition(name, container, declaration.Path, find(name),
-            text is null ? null : TextFrom(text, declaration.Line, declaration.Character), SourceLinePreview.ReadText);
+            text is null ? null : DefinitionCandidates.TextFrom(text, declaration.Line, declaration.Character), Current);
         if (found is null || IsEngine(found.Path) && Context.Kind != CompileContextKind.Unreal) return null;
         var line = found.Line - 1;
         var column = found.Column - 1;
@@ -2368,16 +2371,6 @@ public sealed class ClangdNavigator : IDisposable
 
         NavigationLocation LocationOf(IndexedReference reference) => new(Context.Paths.ToGiven(reference.Path), reference.Line, reference.Character,
             reference.EndLine, reference.EndCharacter);
-    }
-
-    /// <summary>줄·열부터의 글입니다(선언의 매개변수 목록을 읽을 만큼, 최대 40줄).</summary>
-    private static string TextFrom(string text, int line, int character)
-    {
-        var lines = text.Split('\n');
-        if (line < 0 || line >= lines.Length) return string.Empty;
-        var first = lines[line];
-        var rest = string.Join("\n", lines.Skip(line + 1).Take(40));
-        return (character >= 0 && character <= first.Length ? first.Substring(character) : first) + "\n" + rest;
     }
 
     /// <summary>
