@@ -289,7 +289,8 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
     /// 수십 초와 1 GB 넘는 일시 메모리가 들었습니다. 분석 캐시 파일은 여기서 쓰지 않습니다. 쓰지 못한 채 끝나도 다음 패스가 바뀐 파일을 수정
     /// 시각으로 알아보고 다시 분석합니다.
     /// </remarks>
-    public bool UpdateFiles(string solutionPath, IReadOnlyCollection<string> paths, CancellationToken cancellationToken)
+    /// <param name="excluded">디스크에 있어도 파일 목록에서 빠진 파일입니다(프로젝트에서 제거된 수집 루트 밖 항목). 지운 파일처럼 뺍니다.</param>
+    public bool UpdateFiles(string solutionPath, IReadOnlyCollection<string> paths, CancellationToken cancellationToken, ISet<string>? excluded = null)
     {
         IReadOnlyDictionary<string, CachedSourceAnalysis> previous;
         CancellationToken cleared;
@@ -311,7 +312,7 @@ internal sealed class SolutionSourceAnalyzer : IDisposable
             if (changes.ContainsKey(path)) continue;
             previous.TryGetValue(path, out var old);
             CachedSourceAnalysis? updated = null;
-            var info = IsCppFile(path) ? TryGetInfo(path) : null;
+            var info = IsCppFile(path) && excluded?.Contains(path) != true ? TryGetInfo(path) : null;
             if (info is not null && info.Length <= MaximumSourceLength)
             {
                 if (old is not null && old.Length == info.Length && old.LastWriteUtcTicks == info.LastWriteTimeUtc.Ticks &&

@@ -9,6 +9,7 @@ using Microsoft.VisualStudio.ComponentModelHost;
 using Microsoft.VisualStudio.Text.Classification;
 using Microsoft.VisualStudio.Shell;
 using Microsoft.VisualStudio.Shell.Interop;
+using Microsoft.VisualStudio.Threading;
 using VisualBoost.Commands;
 using VisualBoost.Options;
 using VisualBoost.SemanticNavigation;
@@ -267,11 +268,15 @@ public sealed class VisualBoostPackage : AsyncPackage
         var dte = GetService(typeof(SDTE)) as DTE2;
         if (dte is not null)
         {
-            StartFileIndex(dte);
+            StartFileIndex(dte, refresh: true);
         }
     }
 
-    private void StartFileIndex(DTE2 dte)
+    /// <param name="refresh">
+    /// 프로젝트·항목 변경으로 같은 Solution을 다시 수집합니다. 인덱스를 비우지 않고 수집 결과와의 차이만 반영합니다(<see cref="SolutionFileIndexService.Start"/>).
+    /// 비우면 다시 채울 때까지 이름 검색이 빠지고 저장된 분석을 다시 읽어 공개합니다.
+    /// </param>
+    private void StartFileIndex(DTE2 dte, bool refresh = false)
     {
         ThreadHelper.ThrowIfNotOnUIThread();
         Completion.CompletionRuntime.GetSnapshot = () => fileIndex.CompletionSnapshot;
@@ -281,7 +286,7 @@ public sealed class VisualBoostPackage : AsyncPackage
         discoveryCancellation?.Cancel();
         var cancellation = new CancellationTokenSource();
         discoveryCancellation = cancellation;
-        fileIndex.BeginDiscovery(dte.Solution.FullName ?? string.Empty);
+        if (!refresh) fileIndex.BeginDiscovery(dte.Solution.FullName ?? string.Empty);
         JoinableTaskFactory.RunAsync(async () =>
         {
             try
@@ -292,7 +297,9 @@ public sealed class VisualBoostPackage : AsyncPackage
                 var discovery = await SolutionSearchRootCollector.CollectAsync(dte, cancellation.Token,
                     files => fileIndex.PublishDiscoveredFiles(files, cancellation.Token), membership);
                 cancellation.Token.ThrowIfCancellationRequested();
-                fileIndex.Start(discovery);
+                // 큰 파일 목록의 정렬·비교(엔진 규모 약 0.1초)를 UI thread 밖에서 합니다. 그사이 새 수집이 시작됐으면 Start가 잠금 안에서 건너뜁니다.
+                await TaskScheduler.Default;
+                fileIndex.Start(discovery, cancellationToken: cancellation.Token);
             }
             catch (OperationCanceledException) when (cancellation.IsCancellationRequested) { }
             catch (Exception exception)

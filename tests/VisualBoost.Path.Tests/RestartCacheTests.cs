@@ -14,7 +14,7 @@ internal static class RestartCacheTests
     {
         var root = Path.Combine(Path.GetTempPath(), "VisualBoost-Restart-" + Guid.NewGuid().ToString("N"));
         Directory.CreateDirectory(root);
-        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); VerifyServiceReopen(root); }
+        try { VerifySymbols(root); VerifyPooling(root); VerifyPartialUpdate(root); VerifyServiceReopen(root); VerifyProjectItemChanges(root); }
         finally { Directory.Delete(root, true); }
     }
 
@@ -139,6 +139,57 @@ internal static class RestartCacheTests
         Reopen(second);
         Check(second.FindSymbol("ServiceName").Count == 1 && second.SymbolRevision - start == 2,
             "다시 열기는 비우기와 저장된 분석 공개 한 번으로 이름 인덱스 완성: 공개 " + (second.SymbolRevision - start) + "회");
+    }
+
+    /// <summary>
+    /// 수집 루트가 그대로인 프로젝트 항목 변경은 인덱스를 비우거나 파일 목록을 다시 만들지 않고 바뀐 파일만 반영합니다. 디스크에 남은 파일도
+    /// 프로젝트에서 빠지고 수집 루트 밖이면 목록과 이름 인덱스에서 뺍니다.
+    /// </summary>
+    private static void VerifyProjectItemChanges(string root)
+    {
+        var source = Path.Combine(root, "ItemSource");
+        var outside = Path.Combine(root, "ItemOutside");
+        Directory.CreateDirectory(source);
+        Directory.CreateDirectory(outside);
+        var kept = Path.Combine(source, "Kept.h");
+        var linked = Path.Combine(outside, "Linked.h");
+        File.WriteAllText(kept, "struct KeptItem {};\n");
+        File.WriteAllText(linked, "struct LinkedItem {};\n");
+        var solution = Path.Combine(root, "Items.sln");
+        SolutionIndexDiscoveryResult Discovery(params string[] files) => new(solution, new[] { source }, files);
+        bool Listed(SolutionFileIndexService index, string path) => index.GetFilePathsSnapshot().Contains(path, StringComparer.OrdinalIgnoreCase);
+        using var service = new SolutionFileIndexService(new SolutionSourceAnalyzer(new SourceAnalysisCache(Path.Combine(root, "items-analysis"))),
+            new FileIndexCache(Path.Combine(root, "items-files")));
+        service.Configure(new SolutionFileIndexConfiguration(true, true, TimeSpan.Zero));
+        service.BeginDiscovery(solution);
+        service.Start(Discovery(kept));
+        service.WaitUntilReadyAsync().GetAwaiter().GetResult();
+        service.WaitUntilAnalysisReadyAsync().GetAwaiter().GetResult();
+        var generation = service.Generation;
+
+        service.Start(Discovery(kept, linked));
+        Check(service.GetSnapshot().State == SolutionFileIndexState.Ready && service.FindSymbol("KeptItem").Count == 1 && service.Generation == generation,
+            "항목 추가는 인덱스를 비우거나 파일 목록을 다시 만들지 않음");
+        Check(SpinUntil(() => service.FindSymbol("LinkedItem").Count == 1 && Listed(service, linked)), "추가한 항목 파일만 분석해 목록·이름 인덱스에 반영");
+
+        service.Start(Discovery(kept));
+        Check(SpinUntil(() => service.FindSymbol("LinkedItem").Count == 0 && !Listed(service, linked)) && File.Exists(linked),
+            "디스크에 남아도 프로젝트에서 뺀 수집 루트 밖 파일은 목록·이름 인덱스에서 뺌");
+
+        service.Start(Discovery());
+        Check(SpinUntil(() => !service.GetSnapshot().IsAnalyzing) && !SpinUntil(() => service.FindSymbol("KeptItem").Count == 0 || !Listed(service, kept), 1500) &&
+              service.Generation == generation, "수집 루트 안 파일은 항목에서 빠져도 보충 코드로 남고, 항목 변경 내내 다시 수집하지 않음");
+    }
+
+    private static bool SpinUntil(Func<bool> condition, int milliseconds = 20000)
+    {
+        var deadline = DateTime.UtcNow.AddMilliseconds(milliseconds);
+        while (!condition())
+        {
+            if (DateTime.UtcNow > deadline) return false;
+            Thread.Sleep(25);
+        }
+        return true;
     }
 
     private static void VerifyPartialUpdate(string root)

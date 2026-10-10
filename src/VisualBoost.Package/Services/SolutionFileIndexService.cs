@@ -32,7 +32,8 @@ internal sealed class SolutionFileIndexService : IDisposable
     // 인덱스를 버리고 BuildIndex가 처음부터 다시 만듭니다(엔진 규모 다시 열기에서 전체 이름 검색이 약 6초 늦어짐).
     private CancellationTokenSource restoreCancellation = new();
     private IReadOnlyList<string> roots = Array.Empty<string>();
-    private IReadOnlyList<string> explicitFiles = Array.Empty<string>();
+    // 프로젝트 항목 파일입니다(존재 확인·정규화한 경로). 파일 감시와 항목 변경 반영이 파일마다 찾으므로 집합으로 둡니다.
+    private HashSet<string> explicitFiles = new(StringComparer.OrdinalIgnoreCase);
     private IReadOnlyList<string> requestedRoots = Array.Empty<string>();
     private IReadOnlyList<string> requestedFiles = Array.Empty<string>();
     private string solutionPath = string.Empty;
@@ -92,7 +93,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             requestedRoots = Array.Empty<string>();
             requestedFiles = Array.Empty<string>();
             roots = Array.Empty<string>();
-            explicitFiles = Array.Empty<string>();
+            explicitFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             solutionPath = path;
             refreshing = stored;
             symbolScopes = new[] { SymbolSearchScope.All };
@@ -164,7 +165,10 @@ internal sealed class SolutionFileIndexService : IDisposable
         }
     }
 
-    public void Start(SolutionIndexDiscoveryResult discovery, bool force = false)
+    /// <param name="cancellationToken">
+    /// 이 수집 결과를 버릴 때 취소합니다. 잠금 안에서 확인하므로, 배경에서 부른 늦은 Start가 그 뒤에 시작한 수집의 결과를 덮지 않습니다.
+    /// </param>
+    public void Start(SolutionIndexDiscoveryResult discovery, bool force = false, CancellationToken cancellationToken = default)
     {
         if (discovery is null)
         {
@@ -185,13 +189,14 @@ internal sealed class SolutionFileIndexService : IDisposable
         lock (gate)
         {
             ThrowIfDisposed();
+            if (cancellationToken.IsCancellationRequested) return;
             if (!force && string.Equals(solutionPath, discovery.SolutionPath, StringComparison.OrdinalIgnoreCase) &&
-                requestedRoots.SequenceEqual(candidateRoots, StringComparer.OrdinalIgnoreCase) &&
-                requestedFiles.SequenceEqual(candidateFiles, StringComparer.OrdinalIgnoreCase) &&
-                state == SolutionFileIndexState.Ready)
+                state == SolutionFileIndexState.Ready && SameRoots(requestedRoots, candidateRoots))
             {
                 if (discovery.SymbolScopes is not null) symbolScopes = discovery.SymbolScopes;
                 if (discovery.AnalysisPriority is not null) analysisPriority = discovery.AnalysisPriority;
+                requestedRoots = candidateRoots;
+                if (!requestedFiles.SequenceEqual(candidateFiles, StringComparer.OrdinalIgnoreCase)) ApplyProjectFilesNoLock(candidateFiles);
                 return;
             }
 
@@ -215,7 +220,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             analysisProgress = null;
             CancelBuildNoLock();
             rebuildCancellation = new CancellationTokenSource();
-            var cancellationToken = rebuildCancellation.Token;
+            var buildToken = rebuildCancellation.Token;
             state = candidateRoots.Length == 0 && candidateFiles.Length == 0
                 ? SolutionFileIndexState.Empty
                 : SolutionFileIndexState.Building;
@@ -223,13 +228,63 @@ internal sealed class SolutionFileIndexService : IDisposable
             DisposeWatchersNoLock();
             activeBuild = Task.Run(async () =>
             {
-                await workerGate.WaitAsync(cancellationToken).ConfigureAwait(false);
-                try { BuildIndex(discovery.SolutionPath, candidateRoots, candidateFiles, cancellationToken); }
+                await workerGate.WaitAsync(buildToken).ConfigureAwait(false);
+                try { BuildIndex(discovery.SolutionPath, candidateRoots, candidateFiles, buildToken); }
                 finally { workerGate.Release(); }
-            }, cancellationToken);
+            }, buildToken);
             outstandingWork = Task.WhenAll(outstandingWork, activeBuild);
         }
     }
+
+    /// <summary>
+    /// 같은 수집 루트에서 프로젝트 항목만 바뀌었을 때(항목 추가·제거·이름 변경) 바뀐 파일만 파일 목록과 이름 인덱스에 반영합니다. 파일 감시와
+    /// 같은 경로(<see cref="UpdateSourcesAsync"/>)로 처리하므로 분석 패스 중이면 패스가 끝난 뒤 반영합니다.
+    /// </summary>
+    /// <remarks>
+    /// 0.46.3까지는 항목 하나만 바뀌어도 인덱스를 비우고 처음부터 다시 수집했습니다. 엔진 규모에서 이름 검색이 다시 채워질 때까지 빠지고 배경
+    /// 작업이 약 30초 돌았습니다. 수집 루트가 바뀌면(프로젝트 추가·제거 등) 비우지 않고 파일 목록부터 다시 만듭니다.
+    /// </remarks>
+    private void ApplyProjectFilesNoLock(string[] candidateFiles)
+    {
+        var previous = new HashSet<string>(requestedFiles, StringComparer.OrdinalIgnoreCase);
+        var next = new HashSet<string>(candidateFiles, StringComparer.OrdinalIgnoreCase);
+        requestedFiles = candidateFiles;
+        var changed = new List<string>();
+        foreach (var path in previous.Where(path => !next.Contains(path)).Concat(next.Where(path => !previous.Contains(path))))
+        {
+            string full;
+            try { full = Path.GetFullPath(path); }
+            catch (Exception exception) when (exception is ArgumentException || exception is NotSupportedException || exception is PathTooLongException)
+            {
+                // 파일 경로가 아닌 항목(가상 항목 등)은 BuildIndex에서도 파일 목록에 넣지 않습니다.
+                continue;
+            }
+            if (next.Contains(path)) explicitFiles.Add(full);
+            else explicitFiles.Remove(full);
+            changed.Add(full);
+        }
+        if (changed.Count > 0) ScheduleUpdateNoLock(changed);
+    }
+
+    /// <summary>중첩을 접은 수집 루트가 같으면 파일 목록을 다시 만들 필요가 없습니다(BuildIndex의 루트 정리와 같은 규칙, 디스크 확인 없음).</summary>
+    private static bool SameRoots(IReadOnlyList<string> current, IReadOnlyList<string> candidate)
+    {
+        static string[] Collapse(IEnumerable<string> roots)
+        {
+            var kept = new List<string>();
+            foreach (var root in roots.Select(path => path.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar))
+                .Distinct(StringComparer.OrdinalIgnoreCase).OrderBy(path => path.Length))
+            {
+                if (!kept.Any(parent => IsInside(root, parent))) kept.Add(root);
+            }
+            return kept.OrderBy(path => path, StringComparer.OrdinalIgnoreCase).ToArray();
+        }
+        return Collapse(current).SequenceEqual(Collapse(candidate), StringComparer.OrdinalIgnoreCase);
+    }
+
+    // 파일 목록에 둘 파일입니다: 프로젝트 항목이거나 수집 루트 안의 코드 파일입니다(BuildIndex의 범위와 같음).
+    private bool IsIndexedNoLock(string path) =>
+        explicitFiles.Contains(path) || (ProjectSourceScope.IsSupplementalCode(path) && roots.Any(root => IsInside(path, root)));
 
     public SolutionFileIndexSnapshot GetSnapshot()
     {
@@ -586,7 +641,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             }
 
             roots = Array.Empty<string>();
-            explicitFiles = Array.Empty<string>();
+            explicitFiles = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             requestedRoots = Array.Empty<string>();
             requestedFiles = Array.Empty<string>();
             solutionPath = string.Empty;
@@ -686,7 +741,7 @@ internal sealed class SolutionFileIndexService : IDisposable
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 roots = effectiveRoots;
-                explicitFiles = effectiveProjectFiles;
+                explicitFiles = new HashSet<string>(effectiveProjectFiles, StringComparer.OrdinalIgnoreCase);
                 // 순회 중 추가·삭제된 파일도 놓치지 않게 먼저 감시를 시작합니다.
                 ReplaceWatchersNoLock(effectiveRoots);
             }
@@ -718,7 +773,7 @@ internal sealed class SolutionFileIndexService : IDisposable
                 {
                     lastBuildDuration = stopwatch.Elapsed;
                     roots = effectiveRoots;
-                    explicitFiles = effectiveProjectFiles;
+                    explicitFiles = new HashSet<string>(effectiveProjectFiles, StringComparer.OrdinalIgnoreCase);
                     state = effectiveRoots.Count == 0 && effectiveProjectFiles.Length == 0
                         ? SolutionFileIndexState.Empty
                         : SolutionFileIndexState.Ready;
@@ -869,8 +924,7 @@ internal sealed class SolutionFileIndexService : IDisposable
         lock (gate)
         {
             if (disposed || !watchers.Contains(sender)) return;
-            if (fileExists && (explicitFiles.Contains(eventArgs.FullPath, StringComparer.OrdinalIgnoreCase) ||
-                ProjectSourceScope.IsSupplementalCode(eventArgs.FullPath)))
+            if (fileExists && IsIndexedNoLock(eventArgs.FullPath))
             {
                 index.Add(eventArgs.FullPath);
                 ScheduleUpdateNoLock(new[] { eventArgs.FullPath });
@@ -984,18 +1038,22 @@ internal sealed class SolutionFileIndexService : IDisposable
             entered = true;
             // 저장은 임시 파일 이름 바꾸기로 지움·생성 알림이 섞여 오므로, 알림 순서가 아니라 지금 디스크 상태로 파일 목록을 맞춥니다.
             var present = new HashSet<string>(paths.Where(File.Exists), StringComparer.OrdinalIgnoreCase);
+            // 디스크에 남았어도 프로젝트에서 빠지고 수집 루트 밖인 파일은 이름 인덱스에서도 뺍니다.
+            var excluded = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             lock (gate)
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 foreach (var path in paths)
                 {
-                    if (present.Contains(path) && (explicitFiles.Contains(path, StringComparer.OrdinalIgnoreCase) ||
-                        ProjectSourceScope.IsSupplementalCode(path)))
-                        index.Add(path);
-                    else index.Remove(path);
+                    if (present.Contains(path) && IsIndexedNoLock(path)) index.Add(path);
+                    else
+                    {
+                        index.Remove(path);
+                        excluded.Add(path);
+                    }
                 }
             }
-            if (analyze && !sourceAnalyzer.UpdateFiles(currentSolutionPath, paths, cancellationToken))
+            if (analyze && !sourceAnalyzer.UpdateFiles(currentSolutionPath, paths, cancellationToken, excluded))
             {
                 lock (gate)
                 {
