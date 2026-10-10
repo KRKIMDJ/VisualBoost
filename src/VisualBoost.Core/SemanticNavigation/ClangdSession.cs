@@ -320,6 +320,10 @@ public sealed class ClangdSession : IDisposable
             RedirectStandardInput = true,
             RedirectStandardOutput = true,
             RedirectStandardError = true,
+            // clangd는 로그를 UTF-8로 씁니다. 지정하지 않으면 콘솔 코드 페이지(devenv는 ANSI, 한국어 Windows는 CP949)로 읽어 비 ASCII 경로가
+            // 깨지고, 색인 완료·실패 신호의 경로가 색인 파일 신호·표식 헤더·요청 때 색인한 파일과 맞지 않게 됩니다(2026-10-10 검토 75).
+            // stdout(LSP)은 BaseStream을 직접 읽으므로 영향이 없습니다.
+            StandardErrorEncoding = Encoding.UTF8,
             CreateNoWindow = true,
             WorkingDirectory = options.CompileCommandsDirectory
         };
