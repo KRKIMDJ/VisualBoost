@@ -79,13 +79,14 @@
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="GenerateFunctionCommand" priority="0x01C0" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostEditGroup" />
-        <Strings><ButtonText>현재 코드 도구...</ButtonText><CanonicalName>VisualBoost.GenerateFunction</CanonicalName></Strings>
+        <Strings><ButtonText>현재 코드 도구...</ButtonText><CanonicalName>VisualBoost.GenerateFunction</CanonicalName><LocCanonicalName>VisualBoost.현재코드도구</LocCanonicalName></Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenDocumentMembersCommand" priority="0x0195" type="Button">
         <Parent guid="guidVisualBoostCommandSet" id="VisualBoostCommandGroup" />
         <Strings>
           <ButtonText>문서 함수 탐색...</ButtonText>
           <CanonicalName>VisualBoost.OpenDocumentMembers</CanonicalName>
+          <LocCanonicalName>VisualBoost.문서함수탐색</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="GoToDefinitionCommand" priority="0x0110" type="Button">
@@ -93,6 +94,7 @@
         <Strings>
           <ButtonText>정의로 이동</ButtonText>
           <CanonicalName>VisualBoost.GoToDefinition</CanonicalName>
+          <LocCanonicalName>VisualBoost.정의로이동</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="FindReferencesCommand" priority="0x0120" type="Button">
@@ -100,6 +102,7 @@
         <Strings>
           <ButtonText>참조 찾기</ButtonText>
           <CanonicalName>VisualBoost.FindReferences</CanonicalName>
+          <LocCanonicalName>VisualBoost.참조찾기</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="ShowReferencesWindowCommand" priority="0x0125" type="Button">
@@ -107,6 +110,7 @@
         <Strings>
           <ButtonText>참조 결과 창</ButtonText>
           <CanonicalName>VisualBoost.ShowReferencesWindow</CanonicalName>
+          <LocCanonicalName>VisualBoost.참조결과창</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="SwitchHeaderSourceCommand" priority="0x0130" type="Button">
@@ -114,6 +118,7 @@
         <Strings>
           <ButtonText>헤더/구현 파일 전환</ButtonText>
           <CanonicalName>VisualBoost.SwitchHeaderSource</CanonicalName>
+          <LocCanonicalName>VisualBoost.헤더구현파일전환</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenOptionsCommand" priority="0x0200" type="Button">
@@ -121,6 +126,7 @@
         <Strings>
           <ButtonText>옵션...</ButtonText>
           <CanonicalName>VisualBoost.OpenOptions</CanonicalName>
+          <LocCanonicalName>VisualBoost.옵션</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenFileSearchCommand" priority="0x0180" type="Button">
@@ -128,6 +134,7 @@
         <Strings>
           <ButtonText>파일 탐색...</ButtonText>
           <CanonicalName>VisualBoost.OpenFileSearch</CanonicalName>
+          <LocCanonicalName>VisualBoost.파일탐색</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="OpenSymbolSearchCommand" priority="0x0190" type="Button">
@@ -135,6 +142,7 @@
         <Strings>
           <ButtonText>심볼 탐색...</ButtonText>
           <CanonicalName>VisualBoost.OpenSymbolSearch</CanonicalName>
+          <LocCanonicalName>VisualBoost.심볼탐색</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="ShowIndexStatusCommand" priority="0x0300" type="Button">
@@ -142,6 +150,7 @@
         <Strings>
           <ButtonText>인덱스 상태...</ButtonText>
           <CanonicalName>VisualBoost.ShowIndexStatus</CanonicalName>
+          <LocCanonicalName>VisualBoost.인덱스상태</LocCanonicalName>
         </Strings>
       </Button>
       <Button guid="guidVisualBoostCommandSet" id="RebuildIndexCommand" priority="0x0310" type="Button">
@@ -149,6 +158,7 @@
         <Strings>
           <ButtonText>인덱스 다시 만들기...</ButtonText>
           <CanonicalName>VisualBoost.RebuildIndex</CanonicalName>
+          <LocCanonicalName>VisualBoost.인덱스다시만들기</LocCanonicalName>
         </Strings>
       </Button>
     </Buttons>

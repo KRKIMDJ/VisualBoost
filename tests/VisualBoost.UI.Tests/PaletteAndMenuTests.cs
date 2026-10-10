@@ -42,6 +42,11 @@ internal static class PaletteAndMenuTests
             if ((string?)group.Attribute("id") is "VisualBoostActionPopupGroup" or "VisualBoostDeclarationPopupGroup") continue;
             Assert((string?)group.Element(ns + "Parent")!.Attribute("id") == "VisualBoostSubmenu", "모든 명령은 하위 메뉴 안에 배치");
             Assert(((string?)button.Element(ns + "Strings")!.Element(ns + "CanonicalName"))?.StartsWith("VisualBoost.", StringComparison.Ordinal) == true, "정규 명령 이름 유지");
+            // 한국어 VS의 키보드 옵션은 지역화 이름을 보여 주고, 없으면 메뉴 위치로 "도구.정의로이동"처럼 만듭니다. 메뉴 문구에서 공백·"..."·"/"를 뺀 이름에
+            // VisualBoost 접두를 붙여 다른 명령과 구분합니다.
+            var buttonText = (string)button.Element(ns + "Strings")!.Element(ns + "ButtonText")!;
+            Assert((string?)button.Element(ns + "Strings")!.Element(ns + "LocCanonicalName") ==
+                   "VisualBoost." + System.Text.RegularExpressions.Regex.Replace(buttonText, @"[\s./]", string.Empty), "키보드 옵션 지역화 이름은 VisualBoost.메뉴문구");
         }
         var expected = new[] { "GenerateFunctionCommand|GUID_TextEditorFactory|Shift Alt|Q", "OpenDocumentMembersCommand|GUID_TextEditorFactory|ALT|M", "SwitchHeaderSourceCommand|guidVSStd97|ALT|O", "OpenFileSearchCommand|GUID_TextEditorFactory|Shift Alt|O",
             "OpenSymbolSearchCommand|GUID_TextEditorFactory|Shift Alt|S", "GoToDefinitionCommand|GUID_TextEditorFactory|ALT|G",
