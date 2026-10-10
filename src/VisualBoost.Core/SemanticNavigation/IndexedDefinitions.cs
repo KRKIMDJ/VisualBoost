@@ -27,7 +27,10 @@ public static class IndexedDefinitions
     private const byte DefinitionKind = 2;
 
     /// <summary>줄의 커서 위치(바로 뒤 포함)에 있는 식별자입니다. 없으면 null입니다.</summary>
-    public static string? IdentifierAt(string line, int character)
+    public static string? IdentifierAt(string line, int character) => IdentifierSpanAt(line, character)?.Name;
+
+    /// <summary>줄의 커서 위치(바로 뒤 포함)에 있는 식별자와 그 시작 문자 위치입니다. 없으면 null입니다.</summary>
+    public static (string Name, int Start)? IdentifierSpanAt(string line, int character)
     {
         if (character < 0 || character > line.Length) return null;
         var start = character;
@@ -35,21 +38,27 @@ public static class IndexedDefinitions
         var end = character;
         while (end < line.Length && IsIdentifierChar(line[end])) end++;
         if (end == start || char.IsDigit(line[start])) return null;
-        return line.Substring(start, end - start);
+        return (line.Substring(start, end - start), start);
     }
 
     /// <summary>
-    /// 커서 위치(0기반 줄·LSP 문자)에 걸친, 소스에 그 이름으로 쓰인 참조의 심볼 ID입니다. 심볼이 하나가 아니거나 그 자리가 정의면 null입니다.
+    /// 커서의 식별자(0기반 줄, 시작 LSP 문자)와 범위가 정확히 같은, 소스에 그 이름으로 쓰인 참조의 심볼 ID입니다. 심볼이 하나가 아니거나 그
+    /// 자리가 정의면 null입니다.
     /// </summary>
+    /// <remarks>
+    /// 커서를 덮기만 하면 받던 때는, 색인 뒤 내용이 바뀌었는데 수정 시각이 보존된 파일(압축 해제, 수정 시각을 지키는 동기화)에서 같은 길이의
+    /// 다른 자리 참조를 받을 수 있었습니다. 시작 열까지 같아야 씁니다(2026-10-10 검토 80).
+    /// </remarks>
     /// <param name="references">문서 파일 안의 참조입니다(<see cref="ClangdIndexShards.CurrentFile"/>).</param>
-    public static string? SymbolAt(IReadOnlyList<IndexedReference> references, int line, int character, string name)
+    /// <param name="start">커서 식별자의 시작 문자 위치입니다(<see cref="IdentifierSpanAt"/>).</param>
+    public static string? SymbolAt(IReadOnlyList<IndexedReference> references, int line, int start, string name)
     {
         string? found = null;
         foreach (var reference in references)
         {
             // 매크로 펼침 안의 참조는 매크로 이름 자리에 기록되고 소스에 쓰인 이름이 아니므로 뺍니다.
             if (!reference.Spelled || reference.Line != line || reference.EndLine != line ||
-                character < reference.Character || character > reference.EndCharacter || reference.EndCharacter - reference.Character != name.Length)
+                reference.Character != start || reference.EndCharacter != start + name.Length)
             {
                 continue;
             }

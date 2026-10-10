@@ -59,11 +59,12 @@ public readonly struct IndexedTranslationUnit
 /// <summary>색인 파일에서 읽은 파일 하나의 참조와 분석 오류 표시입니다(<see cref="ClangdIndexShards.CurrentFile"/>).</summary>
 public sealed class IndexedFile
 {
-    public IndexedFile(IReadOnlyList<IndexedReference> references, bool? hadErrors, IReadOnlyList<string>? includes = null)
+    public IndexedFile(IReadOnlyList<IndexedReference> references, bool? hadErrors, IReadOnlyList<string>? includes = null, DateTime indexedAt = default)
     {
         References = references;
         HadErrors = hadErrors;
         Includes = includes ?? Array.Empty<string>();
+        IndexedAt = indexedAt;
     }
 
     /// <summary>그 파일 안에 있는 참조입니다.</summary>
@@ -74,6 +75,11 @@ public sealed class IndexedFile
 
     /// <summary>그 파일이 직접 include한 파일의 실제 경로입니다(색인 파일 파일 목록 기록, 없으면 빈 목록).</summary>
     public IReadOnlyList<string> Includes { get; }
+
+    /// <summary>
+    /// 읽은 색인 파일 중 가장 먼저 쓴 시각(UTC)입니다. 그 뒤에 바뀐 include 헤더는 이 기록의 심볼 해석에 반영되지 않았습니다.
+    /// </summary>
+    public DateTime IndexedAt { get; }
 }
 
 /// <summary>
@@ -142,12 +148,14 @@ public sealed class ClangdIndexShards
         List<IndexedReference>? found = null;
         bool? hadErrors = null;
         var includes = new List<string>();
+        var indexedAt = DateTime.MaxValue;
         foreach (var shard in ShardsNamed(Path.GetFileName(path)))
         {
             var written = SafeWriteTime(shard);
             if (written < sourceWritten) continue;
             if (Read(shard, written) is not { References: { } references } content) continue;
             found ??= new List<IndexedReference>();
+            if (written < indexedAt) indexedAt = written;
             foreach (var reference in references)
             {
                 if (string.Equals(Normalize(reference.Path), full, StringComparison.OrdinalIgnoreCase)) found.Add(reference);
@@ -161,7 +169,7 @@ public sealed class ClangdIndexShards
             }
         }
 
-        return found is null ? null : new IndexedFile(found, hadErrors, includes);
+        return found is null ? null : new IndexedFile(found, hadErrors, includes, indexedAt);
     }
 
     /// <summary>

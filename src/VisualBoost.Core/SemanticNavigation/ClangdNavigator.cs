@@ -2320,8 +2320,9 @@ public sealed class ClangdNavigator : IDisposable
     /// </summary>
     /// <remarks>
     /// 이미 분석한 문서는 clangd가 바로 답하고 저장하지 않은 편집도 반영하므로 쓰지 않습니다. 디스크와 내용이 다른 문서(저장하지 않은 편집),
-    /// 색인 뒤 바뀐 파일(색인 파일이 원본보다 오래됨), 분석 오류가 있던 색인(참조가 덜 기록되었거나 오류 복구로 다른 심볼에 묶였을 수 있음)도
-    /// 쓰지 않습니다. 정의 기록이 없고 헤더의 함수 선언 하나만 있으면(엔진 cpp처럼 색인하지 않는 정의) clangd 경로와 같이 이름 인덱스의 유일한
+    /// 색인 뒤 바뀐 파일(색인 파일이 원본보다 오래됨), 분석 오류가 있던 색인(참조가 덜 기록되었거나 오류 복구로 다른 심볼에 묶였을 수 있음),
+    /// 문서 색인 뒤 include한 헤더(두 단계까지)가 바뀐 경우(중간 클래스에 override를 더하면 <c>Super::</c> 호출이 가리키는 심볼이 바뀜)도
+    /// 쓰지 않습니다. 세 단계 이상 안쪽 헤더의 변경은 보지 않습니다(남는 위험, 2026-10-10 검토 74). 정의 기록이 없고 헤더의 함수 선언 하나만 있으면(엔진 cpp처럼 색인하지 않는 정의) clangd 경로와 같이 이름 인덱스의 유일한
     /// 정의를 찾고(<see cref="IndexedDefinition(string, string, NavigationLocation)"/>), 그것도 없으면 clangd로 넘깁니다.
     /// </remarks>
     private IReadOnlyList<NavigationLocation>? DefinitionFromIndexFiles(NavigationQuery query)
@@ -2345,22 +2346,29 @@ public sealed class ClangdNavigator : IDisposable
     {
         var text = query.Document.Text;
         if (!string.Equals(SourceLinePreview.ReadText(query.Path), text, StringComparison.Ordinal)) return null;
-        var name = IndexedDefinitions.IdentifierAt(SourceLinePreview.LineAt(text, query.Line), query.Character);
-        if (name is null || shards.CurrentFile(Context.Paths.ToReal(query.Path)) is not { HadErrors: false } own) return null;
-        var id = IndexedDefinitions.SymbolAt(own.References, query.Line, query.Character, name);
+        if (IndexedDefinitions.IdentifierSpanAt(SourceLinePreview.LineAt(text, query.Line), query.Character) is not { } at ||
+            shards.CurrentFile(Context.Paths.ToReal(query.Path)) is not { HadErrors: false } own)
+        {
+            return null;
+        }
+
+        var name = at.Name;
+        var id = IndexedDefinitions.SymbolAt(own.References, query.Line, at.Start, name);
         if (id is null) return null;
 
-        var named = options.FindSymbols?.Invoke(name) ?? Array.Empty<SourceSymbolLocation>();
         // include 관계는 색인 파일의 파일 목록에서 읽습니다(문서와 직접 include한 헤더의 색인 파일만, 두 단계까지).
+        var nearReal = own.Includes.SelectMany(h => shards.CurrentFile(h)?.Includes ?? Array.Empty<string>()).ToArray();
+        if (own.Includes.Concat(nearReal).Any(h => ChangedAfter(h, own.IndexedAt))) return null;
+        var named = options.FindSymbols?.Invoke(name) ?? Array.Empty<SourceSymbolLocation>();
         var direct = own.Includes.Select(Context.Paths.ToGiven).ToArray();
-        var near = direct.SelectMany(h => shards.CurrentFile(Context.Paths.ToReal(h))?.Includes ?? Array.Empty<string>()).Select(Context.Paths.ToGiven).ToArray();
+        var near = nearReal.Select(Context.Paths.ToGiven).ToArray();
         var files = IndexedDefinitions.CandidateFiles(query.Path, named, IndexedDefinitions.QualifierAt(SourceLinePreview.LineAt(text, query.Line), query.Character),
             direct, near, IsEngine, MaxIndexFileCandidates);
         var (definition, declared) = IndexedDefinitions.Resolve(id, files.Select(file =>
             string.Equals(file, query.Path, StringComparison.OrdinalIgnoreCase)
                 ? own.References
                 : shards.CurrentFile(Context.Paths.ToReal(file))?.References ?? Array.Empty<IndexedReference>()));
-        if (definition is { } found) return new[] { LocationOf(found) };
+        if (definition is { } found) return SpelledAt(LocationOf(found), name) ? new[] { LocationOf(found) } : null;
         if (declared is null) return null;
 
         var declaration = LocationOf(declared.Value);
@@ -2371,6 +2379,34 @@ public sealed class ClangdNavigator : IDisposable
 
         NavigationLocation LocationOf(IndexedReference reference) => new(Context.Paths.ToGiven(reference.Path), reference.Line, reference.Character,
             reference.EndLine, reference.EndCharacter);
+    }
+
+    /// <summary>
+    /// 그 자리(열린 문서는 clangd에 보낸 글, 아니면 디스크)에 이름이 그대로 있으면 true입니다. 색인 뒤 수정 시각을 보존한 채 바뀐 정의 파일에서
+    /// 같은 길이의 다른 이름으로 가지 않게 합니다(2026-10-10 검토 80).
+    /// </summary>
+    private bool SpelledAt(NavigationLocation location, string name)
+    {
+        var text = documents.SentText(location.Path) ?? SourceLinePreview.ReadText(location.Path);
+        if (text is null || location.Line != location.EndLine || location.EndCharacter - location.Character != name.Length) return false;
+        var line = SourceLinePreview.LineAt(text, location.Line);
+        return location.Character >= 0 && location.EndCharacter <= line.Length &&
+               string.CompareOrdinal(line, location.Character, name, 0, name.Length) == 0;
+    }
+
+    /// <summary>파일이 없거나 <paramref name="time"/>(UTC)보다 늦게 바뀌었으면 true입니다. 확인하지 못해도 true입니다.</summary>
+    private static bool ChangedAfter(string path, DateTime time)
+    {
+        try
+        {
+            var info = new FileInfo(path);
+            return !info.Exists || info.LastWriteTimeUtc > time;
+        }
+        catch (Exception exception) when (exception is IOException || exception is UnauthorizedAccessException || exception is ArgumentException ||
+                                          exception is NotSupportedException)
+        {
+            return true;
+        }
     }
 
     /// <summary>

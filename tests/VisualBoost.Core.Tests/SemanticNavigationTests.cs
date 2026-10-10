@@ -461,19 +461,21 @@ internal static class SemanticNavigationTests
         Check(IndexedDefinitions.IdentifierAt(line, combine) == "Combine" && IndexedDefinitions.IdentifierAt(line, combine + 7) == "Combine" &&
               IndexedDefinitions.IdentifierAt(line, combine + 3) == "Combine" && IndexedDefinitions.IdentifierAt(line, line.IndexOf("::", StringComparison.Ordinal)) == "ScaleMath" &&
               IndexedDefinitions.IdentifierAt(line, line.IndexOf("12", StringComparison.Ordinal)) is null && IndexedDefinitions.IdentifierAt(line, 1) is null &&
-              IndexedDefinitions.IdentifierAt(line, line.Length + 1) is null, "커서의 식별자(바로 뒤 포함, 숫자·공백 제외)");
+              IndexedDefinitions.IdentifierAt(line, line.Length + 1) is null &&
+              IndexedDefinitions.IdentifierSpanAt(line, combine + 3) == ("Combine", combine), "커서의 식별자와 시작 위치(바로 뒤 포함, 숫자·공백 제외)");
 
         IndexedReference Ref(string id, byte kind, int at, int length = 7, string path = "Use.cpp", int row = 3) =>
             new(id, kind, path, row, at, row, at + length);
         // 종류 비트: 선언 1, 정의 2, 참조 4, 소스에 쓰인 이름 8.
         var call = Ref("A", 12, combine);
-        Check(IndexedDefinitions.SymbolAt(new[] { call, Ref("B", 4, combine) }, 3, combine + 2, "Combine") == "A",
+        Check(IndexedDefinitions.SymbolAt(new[] { call, Ref("B", 4, combine) }, 3, combine, "Combine") == "A",
             "커서의 소스에 쓰인 참조 심볼(매크로 펼침 자리의 쓰이지 않은 참조 제외)");
         Check(IndexedDefinitions.SymbolAt(new[] { call, Ref("C", 12, combine) }, 3, combine, "Combine") is null &&
               IndexedDefinitions.SymbolAt(new[] { Ref("A", 11, combine) }, 3, combine, "Combine") is null &&
               IndexedDefinitions.SymbolAt(new[] { Ref("A", 12, combine, 5) }, 3, combine, "Combine") is null &&
-              IndexedDefinitions.SymbolAt(new[] { call }, 4, combine, "Combine") is null,
-            "심볼이 겹치거나 정의 자리·이름 길이가 다르거나 다른 줄이면 정하지 않음");
+              IndexedDefinitions.SymbolAt(new[] { call }, 4, combine, "Combine") is null &&
+              IndexedDefinitions.SymbolAt(new[] { Ref("A", 12, combine - 1) }, 3, combine, "Combine") is null,
+            "심볼이 겹치거나 정의 자리·이름 길이·시작 열이 다르거나 다른 줄이면 정하지 않음");
 
         var (definitions, declarations) = IndexedDefinitions.Occurrences("A", new[]
         {
@@ -626,6 +628,23 @@ internal static class SemanticNavigationTests
             Check(edited.Locations.Single().Path == helper && navigator.IndexFileDefinitions == 3 && navigator.IsOpen(use), "저장하지 않은 편집은 clangd로");
             var analyzed = Definition("Helper");
             Check(analyzed.Locations.Single().Path == helper && navigator.IndexFileDefinitions == 3, "분석한 문서는 clangd로");
+
+            // 색인 파일 지름길의 신선도(2026-10-10 검토 74·80): 문서 색인 뒤 include 헤더가 바뀌었거나, 수정 시각을 보존한 채 정의 자리가
+            // 바뀌었으면 답하지 않습니다. 조회 부분(IndexFileDefinition)은 문서 분석 여부를 보지 않으므로 분석한 뒤에도 잴 수 있습니다.
+            var helperQuery = new NavigationQuery(new DocumentText(use, useText, 1), 2, callLine.IndexOf("Helper(", StringComparison.Ordinal));
+            Check(navigator.IndexFileDefinition(helperQuery)?.Single().Path == helper, "색인 파일 조회 기준 답");
+            var headerTime = File.GetLastWriteTimeUtc(helperHeader);
+            File.SetLastWriteTimeUtc(helperHeader, DateTime.UtcNow.AddMinutes(1));
+            Check(navigator.IndexFileDefinition(helperQuery) is null, "문서 색인 뒤 include 헤더가 바뀌면 색인 파일로 답하지 않음");
+            File.SetLastWriteTimeUtc(helperHeader, headerTime);
+            var helperText = File.ReadAllText(helper);
+            var helperTime = File.GetLastWriteTimeUtc(helper);
+            File.WriteAllText(helper, helperText.Replace("int Helper(int Value)\n{", "int Hxlper(int Value)\n{"));
+            File.SetLastWriteTimeUtc(helper, helperTime);
+            Check(navigator.IndexFileDefinition(helperQuery) is null, "수정 시각을 보존한 채 정의 자리 이름이 바뀌었으면 답하지 않음");
+            File.WriteAllText(helper, helperText);
+            File.SetLastWriteTimeUtc(helper, helperTime);
+            Check(navigator.IndexFileDefinition(helperQuery)?.Single().Path == helper, "되돌리면 다시 색인 파일로 답함");
             Check(File.ReadAllText(use) == useText, "원본 파일 보존");
             navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
