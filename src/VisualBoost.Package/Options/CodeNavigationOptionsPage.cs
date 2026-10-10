@@ -35,7 +35,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     }
 
     [Category("정의·참조 탐색"), DisplayName("clangd 메모리 정리 기준(MB)"), DefaultValue(0)]
-    [Description("clangd가 이보다 많은 메모리를 쥐고 있으면 색인과 탐색이 멈춘 동안 다시 시작해 메모리를 돌려받습니다. 색인을 마친 뒤에는 이 기준과 상관없이 한 번 다시 시작합니다. 저장된 색인은 그대로 씁니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~4 GB). 1024~65536 범위로 적용됩니다.")]
+    [Description("clangd가 이보다 많은 메모리를 쓰면 색인·탐색을 하지 않는 동안 다시 시작해 메모리를 돌려받습니다. 색인을 마친 뒤에는 이 기준과 상관없이 한 번 다시 시작합니다. 저장된 색인은 그대로 씁니다. 값을 낮추면 메모리를 덜 쓰지만 다시 시작이 잦아집니다. 0이면 자동으로 정합니다(물리 메모리의 1/8, 2~4 GB). 1024~65536 범위로 적용됩니다.")]
     public int MemoryLimitMegabytes
     {
         get => memoryLimitMegabytes;
@@ -43,7 +43,7 @@ public sealed class CodeNavigationOptionsPage : DialogPage
     }
 
     [Category("정의·참조 탐색"), DisplayName("Unreal 공유 PCH 포함"), DefaultValue(UnrealPchMode.Auto)]
-    [Description("Unreal 프로젝트를 분석할 때 빌드의 공유 PCH 헤더를 넣는 방식입니다. 자동은 넣지 않고 색인한 뒤 분석 오류가 난 파일만 넣어 다시 분석합니다. 항상 넣으면 첫 색인과 메모리가 몇 배 늘고, 넣지 않으면 공유 PCH에 기대는 파일의 정의·참조가 빠질 수 있습니다.")]
+    [Description("Unreal 프로젝트를 분석할 때 빌드의 공유 PCH 헤더를 넣는 방식입니다. 자동은 공유 PCH 없이 색인한 뒤, 분석 오류가 난 파일에만 필요한 헤더나 공유 PCH를 넣어 다시 분석합니다. 항상 넣으면 첫 색인 시간과 메모리가 몇 배 늘고, 넣지 않으면 공유 PCH에 의존하는 파일의 정의·참조가 빠질 수 있습니다.")]
     [TypeConverter(typeof(UnrealPchModeConverter))]
     public UnrealPchMode PchMode { get; set; } = UnrealPchMode.Auto;
 

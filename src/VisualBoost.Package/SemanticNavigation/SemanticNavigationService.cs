@@ -792,7 +792,7 @@ internal sealed class SemanticNavigationService : IDisposable
 
     private const string IndexSignalsUnreadableMessage =
         "clangd 색인 결과(색인 파일·로그)를 읽지 못해 공유 PCH 자동 판단과 색인 뒤 메모리 정리를 하지 못했습니다. clangd 버전이 바뀌었을 수 있습니다. " +
-        "공유 PCH에 기대는 파일의 참조가 빠지면 옵션 'Unreal 공유 PCH 포함'을 항상으로 바꾸세요.";
+        "공유 PCH에 의존하는 파일의 참조가 빠지면 옵션 'VisualBoost > 정의·참조 탐색 > Unreal 공유 PCH 포함'을 '항상'으로 바꾸세요.";
 
     /// <summary>
     /// 떼어 낸 이전 탐색기의 종료를 기다립니다(최대 5초). 이전 clangd가 종료 중에 알린 색인 실패를 기록하는 것과 새 세션이 같은 캐시 폴더의

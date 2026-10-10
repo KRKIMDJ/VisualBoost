@@ -857,7 +857,7 @@ public sealed class ClangdNavigator : IDisposable
         {
             visited++;
             var site = await ReferencesAtAsync(file, define!.Value.Line, define.Value.Character, name, at => GeneratedDefinitionMacros.Same(at.Usr, symbol.Usr),
-                DefinitionsCommand(file), "다른 모듈 정의에서 참조 확인 중", progress, cancellationToken).ConfigureAwait(false);
+                DefinitionsCommand(file), "다른 모듈에서 참조 확인 중", progress, cancellationToken).ConfigureAwait(false);
             if (site is null) continue;
             found.Add(site);
             if (site.Limited) return (found, 0);
@@ -888,7 +888,7 @@ public sealed class ClangdNavigator : IDisposable
         if (documents.AcquireIfOpen(path) is null)
         {
             if (SourceLinePreview.ReadText(path) is not { } text) return null;
-            progress?.Report($"{stage}: {Path.GetFileName(path)}");
+            progress?.Report($"{stage} · {Path.GetFileName(path)}");
             if (command is not null)
             {
                 MarkOnDemand(path);
@@ -1890,7 +1890,7 @@ public sealed class ClangdNavigator : IDisposable
 
             if (sent is null || ReferenceEquals(sent, awaited)) return;
             var supplemented = await sent.ConfigureAwait(false);
-            progress?.Report(supplemented ? "필요한 헤더를 넣어 다시 분석하는 중…" : "공유 PCH를 넣어 다시 분석하는 중…");
+            progress?.Report(supplemented ? "필요한 헤더를 넣어 다시 분석하는 중" : "공유 PCH를 넣어 다시 분석하는 중");
             if (!supplemented) return;
             awaited = sent;
         }
@@ -2420,7 +2420,7 @@ public sealed class ClangdNavigator : IDisposable
                 continue;
             }
 
-            progress?.Report($"{(engine ? "엔진 정의" : "정의 파일")} 확인 중({i + 1}/{candidates.Length}): {Path.GetFileName(candidate)}");
+            progress?.Report($"{(engine ? "엔진 정의" : "정의 파일")} 확인 중 · {i + 1}/{candidates.Length} · {Path.GetFileName(candidate)}");
             if (command is not null) MarkOnDemand(candidate);
             var sent = false;
             if (command is not null && rememberedSources?.Value.Contains(candidate) == true && shards.HasCurrentShard(Context.Paths.ToReal(candidate)))

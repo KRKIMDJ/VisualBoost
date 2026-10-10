@@ -50,8 +50,11 @@ internal sealed class RebuildIndexCommand
         ThreadHelper.ThrowIfNotOnUIThread();
         var answer = VsShellUtilities.ShowMessageBox(
             package,
-            "현재 Solution의 저장된 파일 목록과 이름 분석을 지우고 처음부터 다시 만듭니다.\n" +
-            "큰 Solution은 다시 분석하는 데 몇 분 걸리고, 그동안 심볼 탐색 결과가 줄어듭니다.\n\n계속할까요?",
+            // 무엇을 지우는지(VisualBoost가 저장한 것, 소스 파일 아님)와 지우지 않는 것(정의·참조 색인)을 밝혀, 정의 이동 문제를 이 명령으로
+            // 고칠 수 있다고 기대하지 않게 합니다. 다시 만드는 동안 결과가 일부만 나오는 기능을 사용자에게 보이는 이름으로 적습니다(2026-10-10 검토).
+            "VisualBoost가 현재 Solution에 대해 저장해 둔 파일 목록과 소스 분석 결과를 지우고, 처음 열 때처럼 다시 만듭니다. " +
+            "정의·참조 탐색 색인은 그대로 둡니다.\n" +
+            "큰 Solution은 몇 분 걸리고, 그동안 파일·심볼 탐색과 이름 자동완성에는 결과가 일부만 나옵니다.\n\n계속할까요?",
             "VisualBoost 인덱스 다시 만들기",
             OLEMSGICON.OLEMSGICON_QUERY,
             OLEMSGBUTTON.OLEMSGBUTTON_OKCANCEL,
@@ -63,7 +66,9 @@ internal sealed class RebuildIndexCommand
             await package.JoinableTaskFactory.SwitchToMainThreadAsync(package.DisposalToken);
             VsShellUtilities.ShowMessageBox(
                 package,
-                "일부 저장 파일을 지우지 못했습니다. 다른 Visual Studio가 같은 Solution을 열고 있으면 그 창을 닫은 뒤 다시 실행하세요.",
+                // 지우지 못해도 다시 만들기는 시작했으므로 그 상태를 먼저 알립니다. "저장 파일"만 쓰면 소스 파일로 읽힐 수 있습니다.
+                "다시 만들기는 시작했지만, VisualBoost가 저장해 둔 인덱스 파일 일부를 지우지 못했습니다. " +
+                "같은 Solution을 연 다른 Visual Studio가 있으면 닫은 뒤 한 번 더 실행하세요.",
                 "VisualBoost 인덱스 다시 만들기",
                 OLEMSGICON.OLEMSGICON_WARNING,
                 OLEMSGBUTTON.OLEMSGBUTTON_OK,

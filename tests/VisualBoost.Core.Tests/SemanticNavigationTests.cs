@@ -1739,7 +1739,7 @@ internal static class SemanticNavigationTests
             var definition = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(u5, u5Text, 1), 0, u5Text.IndexOf("Value", StringComparison.Ordinal)),
                 new CollectProgress(reports), timeout.Token).Result;
             Check(definition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") &&
-                  SpinUntil(() => navigator.ErrorsOf(u5) is null, 10000) && reports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                  SpinUntil(() => navigator.ErrorsOf(u5) is null, 10000) && reports.Contains("공유 PCH를 넣어 다시 분석하는 중"),
                 "혼자 실패하는 구성원 문서는 PCH로 다시 분석: " + string.Join(",", definition.Locations) + " / " + navigator.ErrorsOf(u5)?.FirstMessage + " / " +
                 string.Join("|", reports));
 
@@ -1748,7 +1748,7 @@ internal static class SemanticNavigationTests
             var flagReports = new List<string>();
             var twice = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(flag, flagText, 1), 3, flagLine.IndexOf("Twice", StringComparison.Ordinal)),
                 new CollectProgress(flagReports), timeout.Token).Result;
-            Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+            Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중"),
                 "PCH가 정의하는 조건 매크로에 기대는 문서는 PCH로 다시 분석: " + string.Join(",", twice.Locations) + " / " + string.Join("|", flagReports));
             var store = new DocumentSupplementStore(navigator.Context.Directory);
             Check(SpinUntil(() => store.LoadPch().Contains(Path.GetFullPath(u5)) && store.LoadPch().Contains(Path.GetFullPath(flag)), 10000),
@@ -1763,7 +1763,7 @@ internal static class SemanticNavigationTests
             var nextDefinition = next.DefinitionAsync(new NavigationQuery(new DocumentText(u5, u5Text, 1), 0, u5Text.IndexOf("Value", StringComparison.Ordinal)),
                 new CollectProgress(nextReports), timeout.Token).Result;
             Check(nextDefinition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") && next.IsOpen(u5) &&
-                  SpinUntil(() => next.ErrorsOf(u5) is null, 10000) && !nextReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                  SpinUntil(() => next.ErrorsOf(u5) is null, 10000) && !nextReports.Contains("공유 PCH를 넣어 다시 분석하는 중"),
                 "기억한 문서는 다음 세션에 처음부터 PCH로 분석: " + string.Join(",", nextDefinition.Locations) + " / " + string.Join("|", nextReports));
             next.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
         }
@@ -1867,15 +1867,15 @@ internal static class SemanticNavigationTests
                 var definition = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(u5, u5Text, 1), 0, u5Text.IndexOf("Value", StringComparison.Ordinal)),
                     new CollectProgress(reports), timeout.Token).Result;
                 Check(definition.Locations.Any(l => Path.GetFileName(l.Path) == "U4.cpp" || Path.GetFileName(l.Path) == "Shared.h") &&
-                      SpinUntil(() => navigator.ErrorsOf(u5) is null, 10000) && reports.Contains("필요한 헤더를 넣어 다시 분석하는 중…") &&
-                      !reports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                      SpinUntil(() => navigator.ErrorsOf(u5) is null, 10000) && reports.Contains("필요한 헤더를 넣어 다시 분석하는 중") &&
+                      !reports.Contains("공유 PCH를 넣어 다시 분석하는 중"),
                     "혼자 실패하는 문서는 보충 헤더로 다시 분석: " + string.Join(",", definition.Locations) + " / " + navigator.ErrorsOf(u5)?.FirstMessage + " / " +
                     string.Join("|", reports));
                 var flagText = File.ReadAllText(flag);
                 var flagReports = new List<string>();
                 var twice = navigator.DefinitionAsync(new NavigationQuery(new DocumentText(flag, flagText, 1), 3, flagText.Split('\n')[3].IndexOf("Twice", StringComparison.Ordinal)),
                     new CollectProgress(flagReports), timeout.Token).Result;
-                Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…"),
+                Check(twice.Locations.Any(l => Path.GetFileName(l.Path) == "U1.cpp" || Path.GetFileName(l.Path) == "Calc.h") && flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중"),
                     "이름 색인이 모르는 조건 매크로는 PCH로: " + string.Join(",", twice.Locations) + " / " + string.Join("|", flagReports));
                 // 디스크 내용 그대로 보충 헤더로 오류 없이 분석된 문서만 다음 세션을 위해 기억합니다.
                 var store = new DocumentSupplementStore(navigator.Context.Directory);
@@ -1908,7 +1908,7 @@ internal static class SemanticNavigationTests
                 navigator.DefinitionAsync(new NavigationQuery(new DocumentText(flag, flagText, 1), 3, flagText.Split('\n')[3].IndexOf("Twice", StringComparison.Ordinal)),
                     new CollectProgress(flagReports), timeout.Token).Wait();
                 var store = new DocumentSupplementStore(navigator.Context.Directory);
-                Check(flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중…") && !store.Load().ContainsKey(flag) && store.Load().ContainsKey(u5),
+                Check(flagReports.Contains("공유 PCH를 넣어 다시 분석하는 중") && !store.Load().ContainsKey(flag) && store.Load().ContainsKey(u5),
                     "PCH로 돌아간 문서의 기억 삭제: " + string.Join("|", flagReports));
                 navigator.ShutdownAsync(TimeSpan.FromSeconds(10)).Wait();
             }

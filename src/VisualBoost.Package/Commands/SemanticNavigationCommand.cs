@@ -236,7 +236,8 @@ internal sealed class SemanticNavigationCommand
         if (kind == Kind.Definition) notes.Add("정의 후보가 여러 개입니다");
         if (limited) notes.Add($"결과가 {referenceLimit:N0}개로 제한되었습니다");
         if (kind == Kind.References && result.CurrentFileOnly) notes.Add("네임스페이스는 이 파일의 참조만 찾습니다");
-        if (kind == Kind.References && result.UncheckedDefinitionFiles > 0) notes.Add($"다른 모듈 정의 헤더 {result.UncheckedDefinitionFiles:N0}개는 확인하지 않았습니다");
+        // 정의 헤더는 모듈마다 하나라, 사용자에게는 빠졌을 수 있는 모듈 수로 알립니다(2026-10-10 검토).
+        if (kind == Kind.References && result.UncheckedDefinitionFiles > 0) notes.Add($"다른 모듈 {result.UncheckedDefinitionFiles:N0}개의 참조는 확인하지 않았습니다");
         if (kind == Kind.References && result.ResolvedOnDemand) notes.Add(OnDemandNote(result, "더했습니다"));
         if (incomplete.Length > 0) notes.Add(incomplete);
         if (broken.Length > 0) notes.Add(broken);
@@ -320,7 +321,7 @@ internal sealed class SemanticNavigationCommand
     /// 덜 된 것으로 오해하지 않게 엔진과 프로젝트를 나눠 씁니다.
     /// </summary>
     private static string OnDemandNote(NavigationResult result, string verb) =>
-        result.ResolvedFromEngine ? $"색인 범위 밖인 엔진 cpp를 분석해 정의를 {verb}" : $"아직 색인되지 않은 정의 파일을 분석해 {verb}";
+        result.ResolvedFromEngine ? $"색인하지 않는 엔진 cpp를 바로 분석해 정의를 {verb}" : $"아직 색인되지 않은 파일을 바로 분석해 정의를 {verb}";
 
     private static string WordAt(string text, int column)
     {
@@ -395,7 +396,8 @@ internal sealed class SemanticNavigationCommand
             ThreadHelper.ThrowIfNotOnUIThread();
             var seconds = (int)watch.Elapsed.TotalSeconds;
             var index = service.Current?.Progress is { Active: true, Total: > 0 } progress ? $" · 색인 {progress.Done:N0}/{progress.Total:N0}" : string.Empty;
-            statusBar?.SetText("VisualBoost: " + Current + "…" + (seconds >= 2 ? $" {seconds}초" : string.Empty) + index);
+            // 분석 진행 문구(AnalysisStatusText)처럼 " · "로만 나눕니다. 단계 문구 끝에 말줄임표를 덧붙이지 않습니다(2026-10-10 검토).
+            statusBar?.SetText("VisualBoost: " + Current + (seconds >= 2 ? $" · {seconds}초" : string.Empty) + index);
         }
     }
 }
