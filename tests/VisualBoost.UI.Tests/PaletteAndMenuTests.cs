@@ -56,7 +56,7 @@ internal static class PaletteAndMenuTests
         Assert(navigationView.Descendants().Any(node => (string?)node.Attribute(x + "Name") == "Search"), "상단 줄과 별개로 숨김 모드 검색란 유지");
         var navigationOptions = File.ReadAllText(Path.Combine(root, "src", "VisualBoost.Package", "Options", "DocumentNavigationOptionsPage.cs"));
         Assert(navigationOptions.Contains("ShowBar") && navigationOptions.Contains("NameOrder"), "상단 줄 표시·정렬 설정 유지");
-        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 10, "정의·참조 탐색과 참조 결과 창을 포함한 사용자 명령 열 개 유지");
+        Assert(commands.Element(ns + "Buttons")!.Elements(ns + "Button").Count(b => b.Element(ns + "Strings")?.Element(ns + "CanonicalName") is not null) == 11, "정의·참조 탐색, 참조 결과 창과 인덱스 다시 만들기를 포함한 사용자 명령 열한 개 유지");
         var placements = xml.Root.Element(ns + "CommandPlacements")!.Elements(ns + "CommandPlacement")
             .Select(p => (string?)p.Attribute("id") + "|" + (string?)p.Element(ns + "Parent")!.Attribute("id")).ToArray();
         Assert(placements.SequenceEqual(new[] {

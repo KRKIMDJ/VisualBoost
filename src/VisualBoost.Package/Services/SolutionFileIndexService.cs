@@ -763,8 +763,10 @@ internal sealed class SolutionFileIndexService : IDisposable
             var explicitSet = new HashSet<string>(effectiveProjectFiles, StringComparer.OrdinalIgnoreCase);
             bool IsInScope(string path) => explicitSet.Contains(path) ||
                 (ProjectSourceScope.IsSupplementalCode(path) && effectiveRoots.Any(root => IsInside(path, root)));
-            // 디스크 검증과 큰 검색 맵 구축 중에는 UI 상태 조회 잠금을 점유하지 않습니다.
-            index.ReplaceAll(cachedFiles.Where(IsInScope).Where(File.Exists).Concat(effectiveProjectFiles), cancellationToken);
+            // 디스크 검증과 큰 검색 맵 구축 중에는 UI 상태 조회 잠금을 점유하지 않습니다. 방금 존재를 확인한 프로젝트 항목은
+            // 저장된 목록에서 다시 확인하지 않습니다(다시 열기는 대부분 같은 목록이라 엔진 규모에서 파일 확인이 두 번 돌았음).
+            index.ReplaceAll(cachedFiles.Where(IsInScope).Where(path => explicitSet.Contains(path) || File.Exists(path))
+                .Concat(effectiveProjectFiles), cancellationToken);
             if (currentConfiguration.EnableSourceAnalysis)
             {
                 // 수집 전에 공개한 저장 심볼에서 이번 파일 목록 밖의 파일을 뺍니다(복원이 공개하지 못했으면 목록 안의 것만 공개).

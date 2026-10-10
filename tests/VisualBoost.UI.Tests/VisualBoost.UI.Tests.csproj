@@ -8,6 +8,7 @@
   <ItemGroup>
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionSearchRootCollector.cs" Link="SolutionSearchRootCollector.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/ProjectMembershipCache.cs" Link="ProjectMembershipCache.cs" />
+    <Compile Include="../../src/VisualBoost.Package/Services/CacheFiles.cs" Link="CacheFiles.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/UnrealEngineSourceLocator.cs" Link="UnrealEngineSourceLocator.cs" />
     <Compile Include="../../src/VisualBoost.Package/Services/SolutionIndexDiscoveryResult.cs" Link="SolutionIndexDiscoveryResult.cs" />
     <Compile Include="../../src/VisualBoost.Package/DocumentNavigation/DocumentNavigationSession.cs" Link="DocumentNavigationSession.cs" />
