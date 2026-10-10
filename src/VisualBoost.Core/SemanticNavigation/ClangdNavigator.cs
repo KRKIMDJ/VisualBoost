@@ -2556,7 +2556,8 @@ public sealed class ClangdNavigator : IDisposable
             var attempt = candidate + "|" + SafeWriteTicks(candidate);
             lock (attemptedCandidates)
             {
-                // 한 번 연 후보는 background index에 남으므로 내용이 바뀌기 전에는 다시 열어도 새 정보가 없습니다.
+                // 한 번 연 후보는 background index에 남으므로 내용이 바뀌기 전에는 다시 열어도 새 정보가 없습니다. 열거나 기다리지 않고 끝내는
+                // 경로(저장된 색인 기록으로 판단)는 clangd에 그 색인을 남기지 않으므로 기록을 지웁니다.
                 if (!attemptedCandidates.Add(attempt)) continue;
             }
 
@@ -2577,25 +2578,33 @@ public sealed class ClangdNavigator : IDisposable
             if (command is not null && rememberedSources?.Value.Contains(candidate) == true && shards.HasCurrentShard(Context.Paths.ToReal(candidate)))
             {
                 // 저장된 색인 파일에 이 심볼의 정의 기록이 있는지 먼저 봅니다. 없으면(기억했지만 이번 정의가 없는 같은 이름 파일·같은 이름 cpp 후보)
-                // 기다려도, 문서로 열어도 나오지 않으므로 건너뜁니다. 있으면 정의 이동은 그 위치를 바로 씁니다. 전에는 후보마다 5초를 기다린 뒤 문서로
-                // 다시 분석해 최악이면 후보 3개에 15초와 분석 시간이 들었습니다(2026-10-10 검토 78).
+                // 기다려도, 문서로 열어도 나오지 않으므로 건너뜁니다. 있으면 clangd가 그 색인을 읽을 때까지 기다리고, 상한 안에 나오지 않으면 정의
+                // 이동은 기록한 위치를 씁니다. 전에는 후보마다 5초를 기다린 뒤 문서로 다시 분석해 최악이면 후보 3개에 15초와 분석 시간이 들었습니다
+                // (2026-10-10 검토 78).
                 var recorded = StoredDefinition(candidate, symbol);
-                if (recorded is { Found: false }) continue;
-                if (definitionOnly && recorded is { Location: { } at })
+                if (recorded is { Found: false })
                 {
-                    // 명령은 그대로 줘 clangd가 이 후보의 저장된 색인을 읽기 시작하게 하되 기다리지 않습니다. 시도 기록은 지워, 읽기가 끝나기 전에
-                    // 이어지는 참조 탐색이 이 후보를 건너뛰지 않고 저장된 색인이 실제로 읽힐 때까지 기다리게 합니다. 남기면 그 참조 탐색에서 정의
-                    // 파일의 참조가 빠졌습니다(Core 통합 테스트에서 간헐 재현).
-                    session.UpdateCompileCommands(new[] { command });
-                    definitionSources?.Record(candidate);
+                    // 이 심볼의 정의만 없을 뿐, 같은 세션의 다른 심볼은 이 후보에 정의가 있을 수 있습니다. 명령도 주지 않았으므로 시도 기록을
+                    // 남기면 그 요청이 이 후보를 건너뛰어 정의를 찾지 못했습니다(2026-10-10 검토 96).
                     lock (attemptedCandidates) attemptedCandidates.Remove(attempt);
-                    return (new[] { at }, false);
+                    continue;
                 }
-
+                // 기록한 위치로 바로 답하지 않고 읽기를 기다립니다. 바로 답하면 clangd가 그 색인을 읽는 동안 이어진 참조 탐색이 읽기 전의 참조를
+                // 받고, 그 요청의 정의 확인은 읽은 뒤라 정의 파일 확정도 하지 않아 정의 파일의 참조가 빠졌습니다(Core 통합 테스트에서 간헐 재현).
+                // 읽기는 보통 대기 간격 한두 번 안에 끝나므로 아끼는 시간이 작습니다.
                 if (await DefinitionFromStoredIndexAsync(query, command, cancellationToken).ConfigureAwait(false) is { } stored)
                 {
                     definitionSources?.Record(candidate);
                     return (stored, false);
+                }
+
+                if (definitionOnly && recorded is { Location: { } at })
+                {
+                    // 상한 안에 clangd 색인에 나타나지 않았지만 저장된 기록이 있으므로 문서 분석 없이 그 위치로 답합니다. 시도 기록은 지워 이어지는
+                    // 참조 탐색이 이 후보를 다시 기다리거나 문서로 열어 확정하게 합니다.
+                    definitionSources?.Record(candidate);
+                    lock (attemptedCandidates) attemptedCandidates.Remove(attempt);
+                    return (new[] { at }, false);
                 }
 
                 // 색인 파일이 다른 폴더의 같은 이름 파일 것이었거나 읽기가 늦었습니다. 이미 준 명령으로 문서를 열어 확정합니다.

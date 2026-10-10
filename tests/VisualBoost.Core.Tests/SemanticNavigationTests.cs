@@ -2544,7 +2544,7 @@ internal static class SemanticNavigationTests
             var module = Path.Combine(engineRoot, "Engine", "Source", "Runtime", "Mod");
             Write(Path.Combine(module, "Mod.Build.cs"), "");
             var header = Path.Combine(module, "Public", "Mod.h");
-            Write(header, "#pragma once\nstruct MOD_API FMod\n{\n    static int Compute(int Value);\n};\n");
+            Write(header, "#pragma once\nstruct MOD_API FMod\n{\n    static int Compute(int Value);\n    static int Missing(int Value);\n};\n");
             var engineSource = Path.Combine(module, "Private", "Mod.cpp");
             Write(engineSource, "#include \"Mod.h\"\nint FMod::Compute(int Value) { return Value * 2; }\n");
 
@@ -2553,7 +2553,7 @@ internal static class SemanticNavigationTests
             var gameSource = Path.Combine(project, "Source", "Game");
             Write(Path.Combine(gameSource, "Game.Build.cs"), "");
             var use = Path.Combine(gameSource, "Use.cpp");
-            var useText = "#include \"Mod.h\"\nint Use() { return FMod::Compute(3); }\n";
+            var useText = "#include \"Mod.h\"\nint Use() { return FMod::Compute(3); }\nint UseMissing() { return FMod::Missing(5); }\n";
             Write(use, useText);
             var other = Path.Combine(gameSource, "Other.cpp");
             Write(other, "#include \"Mod.h\"\nint Other() { return FMod::Compute(4); }\n");
@@ -2707,6 +2707,12 @@ internal static class SemanticNavigationTests
             Check(SpinUntil(() => restarted.IsOpen(use) && restarted.IsOpen(caller) && restarted.IsOpen(otherImpl), 60000) && !restarted.IsOpen(spare),
                 "다시 시작한 뒤 최근 문서를 정원까지 미리 열되 기다리는 사이 닫은 문서는 열지 않음");
             using var restartTimeout = new CancellationTokenSource(TimeSpan.FromSeconds(120));
+            // 기억한 엔진 cpp에 정의 기록이 없는 심볼은 그 후보를 건너뛰지만, 같은 세션의 다른 심볼(아래 Compute)은 그 후보에서 찾아야 합니다
+            // (2026-10-10 검토 96: 건너뛴 후보가 시도 기록에 남아 다음 요청이 그 후보를 보지 않았음).
+            var missingQuery = new NavigationQuery(new DocumentText(use, useText, 1), 2, useText.Split('\n')[2].LastIndexOf("Missing", StringComparison.Ordinal));
+            var missingDefinition = restarted.DefinitionAsync(missingQuery, null, restartTimeout.Token).Result;
+            Check(missingDefinition.Locations.All(l => l.Path == header) && !restarted.IsOpen(engineSource),
+                "기억한 후보에 정의 기록이 없는 심볼은 선언에 머묾: " + string.Join(",", missingDefinition.Locations));
             var restartReports = new List<string>();
             var again = restarted.DefinitionAsync(query, new SyncProgress(restartReports.Add), restartTimeout.Token).Result;
             Check(again.Locations.Any(l => l.Path == engineSource) && !again.ResolvedOnDemand && !restarted.IsOpen(engineSource) &&
