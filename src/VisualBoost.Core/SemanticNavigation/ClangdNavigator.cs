@@ -1529,9 +1529,14 @@ public sealed class ClangdNavigator : IDisposable
     /// 후보 소스의 저장된 색인 파일에서 심볼의 정의 기록을 찾습니다. 기록이 하나이고 그 자리에 이름이 그대로 있으면 위치를, 기록이 없으면
     /// <c>Found</c>가 거짓을 돌려줍니다. 심볼 ID를 모르거나 색인 파일을 읽지 못하면 null입니다(지금처럼 clangd에 물음).
     /// </summary>
+    /// <remarks>
+    /// 색인 파일을 쓴 뒤 그 소스가 include한 헤더가 바뀌었으면 null입니다. 헤더의 형식 별칭·매크로만 바뀌어도 함수의 심볼 ID가 달라지는데 소스의
+    /// 색인 파일은 다시 쓰이지 않아, 옛 ID만 보고 '기록 없음'으로 건너뛰면 정의를 놓칩니다(2026-10-10 검토 95).
+    /// </remarks>
     private (bool Found, NavigationLocation? Location)? StoredDefinition(string candidate, SemanticSymbol symbol)
     {
         if (symbol.Id.Length == 0 || shards.CurrentFile(Context.Paths.ToReal(candidate)) is not { } file) return null;
+        if (IncludesChangedAfter(file, NearIncludes(file))) return null;
         var (definitions, _) = IndexedDefinitions.Occurrences(symbol.Id, new[] { file.References });
         // 분석 오류가 있던 색인은 정의를 덜 기록했을 수 있어, 기록이 없다고 단정하지 않습니다.
         if (definitions.Count == 0) return file.HadErrors == false ? (false, null) : null;
@@ -2459,8 +2464,8 @@ public sealed class ClangdNavigator : IDisposable
         if (id is null) return null;
 
         // include 관계는 색인 파일의 파일 목록에서 읽습니다(문서와 직접 include한 헤더의 색인 파일만, 두 단계까지).
-        var nearReal = own.Includes.SelectMany(h => shards.CurrentFile(h)?.Includes ?? Array.Empty<string>()).ToArray();
-        if (own.Includes.Concat(nearReal).Any(h => ChangedAfter(h, own.IndexedAt))) return null;
+        var nearReal = NearIncludes(own);
+        if (IncludesChangedAfter(own, nearReal)) return null;
         var named = options.FindSymbols?.Invoke(name) ?? Array.Empty<SourceSymbolLocation>();
         var direct = own.Includes.Select(Context.Paths.ToGiven).ToArray();
         var near = nearReal.Select(Context.Paths.ToGiven).ToArray();
@@ -2482,6 +2487,17 @@ public sealed class ClangdNavigator : IDisposable
         NavigationLocation LocationOf(IndexedReference reference) => new(Context.Paths.ToGiven(reference.Path), reference.Line, reference.Character,
             reference.EndLine, reference.EndCharacter);
     }
+
+    /// <summary>색인 파일의 소스가 직접 include한 헤더들이 include한 파일(실제 경로)입니다. 각 헤더의 색인 파일 파일 목록에서 읽습니다.</summary>
+    private string[] NearIncludes(IndexedFile file) =>
+        file.Includes.SelectMany(h => shards.CurrentFile(h)?.Includes ?? Array.Empty<string>()).ToArray();
+
+    /// <summary>
+    /// 색인 파일을 쓴 뒤 그 소스가 include한 파일(직접과 <paramref name="near"/>)이 바뀌었거나 확인하지 못했습니다. clangd는 내용이 바뀐 파일의
+    /// 색인 파일만 다시 쓰므로, 헤더만 바뀌었으면 소스의 기록(위치·심볼 ID)이 옛 것일 수 있습니다(2026-10-10 검토 74·95).
+    /// </summary>
+    private static bool IncludesChangedAfter(IndexedFile file, IEnumerable<string> near) =>
+        file.Includes.Concat(near).Any(h => ChangedAfter(h, file.IndexedAt));
 
     /// <summary>
     /// 그 자리(열린 문서는 clangd에 보낸 글, 아니면 디스크)에 이름이 그대로 있으면 true입니다. 색인 뒤 수정 시각을 보존한 채 바뀐 정의 파일에서
@@ -2537,10 +2553,11 @@ public sealed class ClangdNavigator : IDisposable
             // 첫 색인이 끝났고 database에 명령이 있는 파일은 이미 색인되었으므로 열어도 새 정보가 없습니다.
             // 정의가 원래 소스에 없는 함수(외부 라이브러리 선언 등)에서 요청마다 후보 분석 시간을 쓰지 않게 합니다.
             if (Progress.Completed && HasCommand(candidate)) continue;
+            var attempt = candidate + "|" + SafeWriteTicks(candidate);
             lock (attemptedCandidates)
             {
                 // 한 번 연 후보는 background index에 남으므로 내용이 바뀌기 전에는 다시 열어도 새 정보가 없습니다.
-                if (!attemptedCandidates.Add(candidate + "|" + SafeWriteTicks(candidate))) continue;
+                if (!attemptedCandidates.Add(attempt)) continue;
             }
 
             // 엔진 cpp와 명령이 없는 Unreal 프로젝트 파일은 근사 명령을 줍니다. 명령이 있는 파일은 database의 명령을 그대로 씁니다.
@@ -2566,10 +2583,12 @@ public sealed class ClangdNavigator : IDisposable
                 if (recorded is { Found: false }) continue;
                 if (definitionOnly && recorded is { Location: { } at })
                 {
-                    // 명령은 그대로 줘 clangd가 이 후보의 저장된 색인을 읽게 합니다(기다리지 않음). 이 후보는 이번 세션에 다시 시도하지 않으므로,
-                    // 주지 않으면 이어지는 참조 탐색에서 정의 파일의 참조가 빠집니다.
+                    // 명령은 그대로 줘 clangd가 이 후보의 저장된 색인을 읽기 시작하게 하되 기다리지 않습니다. 시도 기록은 지워, 읽기가 끝나기 전에
+                    // 이어지는 참조 탐색이 이 후보를 건너뛰지 않고 저장된 색인이 실제로 읽힐 때까지 기다리게 합니다. 남기면 그 참조 탐색에서 정의
+                    // 파일의 참조가 빠졌습니다(Core 통합 테스트에서 간헐 재현).
                     session.UpdateCompileCommands(new[] { command });
                     definitionSources?.Record(candidate);
+                    lock (attemptedCandidates) attemptedCandidates.Remove(attempt);
                     return (new[] { at }, false);
                 }
 
