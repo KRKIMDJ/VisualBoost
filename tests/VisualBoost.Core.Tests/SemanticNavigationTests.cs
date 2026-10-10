@@ -2454,6 +2454,9 @@ internal static class SemanticNavigationTests
                 "오버로드는 매개변수 수로 좁히고 남은 하나도 형식·const가 맞아야 씀, 선언을 모르면 쓰지 않음");
             Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(float Delta, bool bForce);", Read) is null,
                 "후보가 하나여도 정의 파일의 현재 매개변수 수가 선언과 다르면 쓰지 않음(저장된 분석 공개 직후 새로 생긴 오버로드)");
+            Check(DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(double Delta);", Read) is null &&
+                  DefinitionCandidates.UniqueDefinition("Tick", "Game::UWorld::", worldHeader, definitions, "Tick(const float InDelta) override;", Read) is { Line: 2 },
+                "후보가 하나여도 수가 같은 다른 형식이면 쓰지 않고, 값 매개변수의 const 차이는 같은 형식으로 봄(검토 93)");
             Check(DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(const FString&Path = TEXT(\"/Game,x\"));", Read) is { Line: 17 } &&
                   DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(FStringView);", Read) is { Line: 14 } &&
                   DefinitionCandidates.UniqueDefinition("Find", "UWorld::", worldHeader, definitions, "Find(TStringView<TCHAR> InPath);", Read) is null &&
@@ -2461,8 +2464,18 @@ internal static class SemanticNavigationTests
                   DefinitionCandidates.UniqueDefinition("Get", "UWorld::", worldHeader, definitions, "Get();", Read) is { Line: 23 },
                 "수가 같은 오버로드는 이름 뺀 매개변수 형식과 const 멤버로 좁히고, 형식을 다르게 적었으면 쓰지 않음");
             var shape = DefinitionCandidates.Shape("Get(int32 Index, const TArray<FName, TInlineAllocator<2>>& Names = {}, unsigned int, UE::FName) const override;");
-            Check(shape is { Const: true } && string.Join("|", shape.Value.Types) == "int32|const TArray<FName,TInlineAllocator<2>>&|unsigned int|UE::FName",
-                "매개변수 형식 정리(이름·기본값 제거, 기본 형식 키워드·한정 이름 유지): " + (shape is null ? "-" : string.Join("|", shape.Value.Types)));
+            Check(shape is { Const: true } && string.Join("|", shape.Value.Types) == "int32|const TArray<FName,TInlineAllocator<2>>&|unsigned int|FName",
+                "매개변수 형식 정리(이름·기본값·소속 한정 제거, 기본 형식 키워드 유지): " + (shape is null ? "-" : string.Join("|", shape.Value.Types)));
+            // 선언과 정의에서 흔히 다르게 적는 표기는 같은 형식으로 봅니다(2026-10-10 검토 93).
+            string Types(string text) => string.Join("|", DefinitionCandidates.Shape(text)!.Value.Types);
+            var declared = Types("F(UPARAM(ref) TArray<int32>& Items, class AActor* Owner, const bool bForce, ::DWORD Flags, TSharedPtr<FAction>const& Action, " +
+                                 "const AActor* const Target, ULevelStreaming::ECurrentState State, TArray<const FName> Names)");
+            var defined = Types("F(TArray<int32>& Items, AActor* Owner, bool bForce, DWORD Flags, const TSharedPtr<FAction>& Action, " +
+                                "const AActor* Target, ECurrentState State, TArray<const FName> Names)");
+            Check(declared == defined && declared == "TArray<int32>&|AActor*|bool|DWORD|const TSharedPtr<FAction>&|const AActor*|ECurrentState|TArray<const FName>" &&
+                  Types("F(const FString& A)") != Types("F(FString& A)") && Types("F(const AActor* A)") != Types("F(AActor* A)") &&
+                  Types("F(struct FFoo)") == "FFoo",
+                "표기 차이 정리(UPARAM·class·소속 한정·값과 포인터 자체의 const·뒤에 적은 const), 가리키는 대상·참조 대상의 const는 유지: " + declared + " / " + defined);
             Check(DefinitionCandidates.UniqueDefinition("Helper", string.Empty, worldHeader, definitions, "Helper();", Read) is { Line: 11 } &&
                   DefinitionCandidates.UniqueDefinition("Stray", string.Empty, worldHeader, definitions, "Stray();", Read) is null,
                 "소속 없는 함수는 선언 헤더를 include하는 파일의 정의만 씀");

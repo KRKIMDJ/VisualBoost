@@ -130,7 +130,10 @@ public static class DefinitionCandidates
     /// 매개변수는 색인에 저장된 시그니처가 아니라 정의 파일의 현재 글로 봅니다. 지난 세션의 분석을 공개한 직후에는 그 사이 바뀐 파일의 색인이
     /// 오래되었을 수 있어, 후보가 하나여도 새로 생긴 오버로드를 옛 정의로 보내지 않게 합니다. 같은 이유로 그 자리를 읽지 못하는 후보가 하나라도
     /// 있으면 실제 정의가 어디로 옮겼는지 모르므로 쓰지 않습니다. cpp 안의 전방 선언(닫는 괄호 뒤에 본문보다 <c>;</c>가 먼저 옴)은 정의가
-    /// 아니므로 뺍니다(2026-10-10 검토 72·73).
+    /// 아니므로 뺍니다(2026-10-10 검토 72·73). 정의가 하나여도 매개변수 형식과 const 멤버 여부가 선언과 맞아야 씁니다. 수만 보면 같은 수의 새
+    /// 오버로드나, 선언의 정의가 색인에 없을 때 다른 오버로드로 보냈습니다(테스트 샘플 엔진 선언 6,000개 표본에서 답 3,218개 중 12개가 다른
+    /// 오버로드였고, 바꾼 뒤 답은 3,207개). 형식은 <see cref="Shape"/>처럼 표기 차이를 정리해 비교하므로, 그래도 다르게 적은 형식(형식 별칭 등)만 clangd 확정으로
+    /// 넘어갑니다(2026-10-10 검토 93).
     /// </remarks>
     /// <param name="container">clangd가 알려 준 소속입니다. 없으면 소속 없는 정의만 봅니다.</param>
     /// <param name="headerPath">선언이 있는 파일입니다.</param>
@@ -159,16 +162,11 @@ public static class DefinitionCandidates
             if (declarationOnly == false) definitions.Add((match, text, list));
         }
 
-        var narrowed = definitions.Where(d => d.List.Parameters.Count == wanted.Parameters.Count).ToList();
-        if (definitions.Count > 1)
-        {
-            // 매개변수 수가 같은 오버로드(FString·FStringView 판 등)는 이름을 뺀 매개변수 형식과 const 멤버 여부로 더 좁힙니다. 선언과 정의를 다르게
-            // 적은 형식(형식 별칭, 이름 없는 매개변수)은 맞지 않아 빠지므로 틀린 곳으로 가지 않고 clangd 확정으로 넘어갑니다.
-            var shape = ShapeOf(wanted);
-            narrowed = narrowed.Where(d => ShapeOf(d.List) is var other && other.Const == shape.Const &&
-                                           other.Types.SequenceEqual(shape.Types, StringComparer.Ordinal)).ToList();
-        }
-
+        // 매개변수 수와, 이름을 뺀 매개변수 형식·const 멤버 여부가 같은 정의만 남깁니다(수가 같은 FString·FStringView 판 등 오버로드 포함).
+        // 선언과 정의를 다르게 적은 형식(형식 별칭)은 맞지 않아 빠지므로 틀린 곳으로 가지 않고 clangd 확정으로 넘어갑니다.
+        var shape = ShapeOf(wanted);
+        var narrowed = definitions.Where(d => d.List.Parameters.Count == wanted.Parameters.Count && ShapeOf(d.List) is var other &&
+                                              other.Const == shape.Const && other.Types.SequenceEqual(shape.Types, StringComparer.Ordinal)).ToList();
         if (narrowed.Count != 1) return null;
         var found = narrowed[0];
         return owner.Length > 0 || IncludesHeader(found.Text, found.Symbol.Path, headerPath) ? found.Symbol : null;
@@ -265,7 +263,7 @@ public static class DefinitionCandidates
     public static int? ParameterCount(string text) => ParameterList(text)?.Parameters.Count;
 
     /// <summary>
-    /// 글에서 처음 나오는 괄호 목록의 매개변수 형식(기본값과 끝의 매개변수 이름을 빼고 공백을 정리한 것)과, 닫는 괄호 뒤가 <c>const</c>인지입니다.
+    /// 글에서 처음 나오는 괄호 목록의 매개변수 형식(<see cref="TypeOf"/>로 정리한 것)과, 닫는 괄호 뒤가 <c>const</c>인지입니다.
     /// 괄호가 닫히지 않으면 null입니다.
     /// </summary>
     public static (IReadOnlyList<string> Types, bool Const)? Shape(string text) => ParameterList(text) is { } list ? ShapeOf(list) : null;
@@ -277,6 +275,7 @@ public static class DefinitionCandidates
         RegexOptions.Singleline | RegexOptions.CultureInvariant);
     private static readonly Regex Token = new(@"[A-Za-z_]\w*|::|\S", RegexOptions.CultureInvariant);
     private static readonly Regex ConstSuffix = new(@"^\s*const\b", RegexOptions.CultureInvariant);
+    private static readonly HashSet<string> ElaboratedKeywords = new(StringComparer.Ordinal) { "class", "struct", "enum", "union", "typename" };
     private static readonly HashSet<string> TypeKeywords = new(StringComparer.Ordinal)
     {
         "const", "volatile", "signed", "unsigned", "short", "long", "int", "char", "wchar_t", "char8_t", "char16_t", "char32_t", "bool", "float",
@@ -338,6 +337,12 @@ public static class DefinitionCandidates
     /// 매개변수의 형식입니다. 기본값(맨 바깥 <c>=</c> 뒤)과 끝의 매개변수 이름을 빼고, 이름 사이 공백만 남깁니다. 끝 이름은 앞에 다른 낱말이 있고
     /// 기본 형식 키워드가 아니며 <c>::</c> 뒤가 아닐 때만 이름으로 봅니다(<c>unsigned int</c>, <c>UE::FName</c>).
     /// </summary>
+    /// <remarks>
+    /// 선언과 정의에서 흔히 다르게 적는 표기는 같은 형식으로 맞춥니다. <c>UPARAM(…)</c>과 <c>class</c>·<c>struct</c>·<c>enum</c>·<c>typename</c>을
+    /// 빼고, 소속 한정(<c>UE::FName</c>, <c>ULevelStreaming::ECurrentState</c>)은 마지막 이름만 남기며, 값 매개변수와 포인터 자체의 맨 바깥
+    /// <c>const</c>(시그니처에 들지 않음)를 빼고, 뒤에 적은 <c>const</c>(<c>T const&amp;</c>)는 앞으로 옮깁니다. 소속만 다른 같은 이름 형식의
+    /// 오버로드는 같아 보이지만 그때는 후보가 둘 남아 쓰지 않습니다(2026-10-10 검토 93).
+    /// </remarks>
     private static string TypeOf(string parameter)
     {
         var depth = 0;
@@ -354,11 +359,16 @@ public static class DefinitionCandidates
         }
 
         var tokens = Token.Matches(parameter).Cast<Match>().Select(m => m.Value).ToList();
+        RemoveMetadataMacros(tokens);
+        tokens.RemoveAll(ElaboratedKeywords.Contains);
         var last = tokens.Count - 1;
         if (tokens.Count >= 2 && IsWordChar(tokens[last][0]) && !char.IsDigit(tokens[last][0]) && !TypeKeywords.Contains(tokens[last]) && tokens[last - 1] != "::")
         {
             tokens.RemoveAt(last);
         }
+
+        RemoveQualifiers(tokens);
+        NormalizeConst(tokens);
 
         var type = new System.Text.StringBuilder();
         for (var i = 0; i < tokens.Count; i++)
@@ -369,6 +379,102 @@ public static class DefinitionCandidates
         }
 
         return type.ToString();
+    }
+
+    /// <summary>매개변수 앞의 <c>UPARAM(…)</c> 표식을 뺍니다. 형식이 아니라 리플렉션용 정보입니다.</summary>
+    private static void RemoveMetadataMacros(List<string> tokens)
+    {
+        for (var i = 0; i + 1 < tokens.Count; i++)
+        {
+            if (tokens[i] != "UPARAM" || tokens[i + 1] != "(") continue;
+            var depth = 0;
+            var end = i + 1;
+            for (; end < tokens.Count; end++)
+            {
+                if (tokens[end] == "(") depth++;
+                else if (tokens[end] == ")" && --depth == 0) break;
+            }
+
+            if (end >= tokens.Count) return;
+            tokens.RemoveRange(i, end - i + 1);
+            i--;
+        }
+    }
+
+    /// <summary>소속 한정(<c>A::B::Name</c>, 맨 앞 <c>::</c>)을 빼고 마지막 이름만 남깁니다.</summary>
+    private static void RemoveQualifiers(List<string> tokens)
+    {
+        for (var i = 0; i < tokens.Count;)
+        {
+            if (tokens[i] != "::")
+            {
+                i++;
+                continue;
+            }
+
+            tokens.RemoveAt(i);
+            if (i > 0 && IsWordChar(tokens[i - 1][0]))
+            {
+                tokens.RemoveAt(i - 1);
+                i--;
+            }
+        }
+    }
+
+    /// <summary>
+    /// 맨 바깥 <c>const</c>를 맞춥니다. 참조가 아니면 값 자체(포인터가 없으면 전부, 있으면 마지막 <c>*</c> 뒤)의 <c>const</c>를 빼고, 첫 <c>*</c>·<c>&amp;</c>
+    /// 앞에서 형식 뒤에 적은 <c>const</c>는 맨 앞으로 옮깁니다. 템플릿 인수 안의 <c>const</c>는 건드리지 않습니다.
+    /// </summary>
+    private static void NormalizeConst(List<string> tokens)
+    {
+        var depth = 0;
+        var lastPointer = -1;
+        var firstIndirection = -1;
+        var reference = false;
+        for (var i = 0; i < tokens.Count; i++)
+        {
+            var token = tokens[i];
+            if (token is "<" or "(" or "[") depth++;
+            else if (token is ">" or ")" or "]") depth--;
+            else if (depth == 0 && token is "*" or "&")
+            {
+                if (firstIndirection < 0) firstIndirection = i;
+                if (token == "*") lastPointer = i;
+                else reference = true;
+            }
+        }
+
+        if (!reference)
+        {
+            for (var i = tokens.Count - 1; i > lastPointer; i--)
+            {
+                if (tokens[i] == "const" && DepthAt(tokens, i) == 0) tokens.RemoveAt(i);
+            }
+
+            // 지운 자리는 모두 마지막 *보다 뒤라 첫 간접 지정의 위치는 그대로입니다.
+            if (lastPointer < 0) return;
+        }
+
+        var end = firstIndirection < 0 ? tokens.Count : firstIndirection;
+        for (var i = 1; i < end; i++)
+        {
+            if (tokens[i] != "const" || DepthAt(tokens, i) != 0) continue;
+            tokens.RemoveAt(i);
+            if (tokens[0] != "const") tokens.Insert(0, "const");
+            return;
+        }
+    }
+
+    private static int DepthAt(List<string> tokens, int index)
+    {
+        var depth = 0;
+        for (var i = 0; i < index; i++)
+        {
+            if (tokens[i] is "<" or "(" or "[") depth++;
+            else if (tokens[i] is ">" or ")" or "]") depth--;
+        }
+
+        return depth;
     }
 
     private static bool IsWordChar(char c) => char.IsLetterOrDigit(c) || c == '_';
